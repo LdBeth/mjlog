@@ -1,0 +1,7 @@
+Fetch tile commands
+T, U, V, W
+Discard tile commands
+D, E, F, G
+
+局，本，？，d1，d2，dora
+seed="4,0,0,2,4,69"
