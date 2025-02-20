@@ -11,15 +11,15 @@ enum MjOya {
 
 @interface MjLog : NSObject {
   NSString *seed;
+  NSMutableArray <NSDecimalNumber *> *dices;
   NSMutableArray *allRounds;
   NSMutableArray *currentHand;
-  NSInteger *round;
 }
 
   @property (nonatomic, retain) NSString *seed;
+  @property (nonatomic, retain) NSMutableArray <NSDecimalNumber *> *dices;
   @property (nonatomic, retain) NSMutableArray *allRounds;
   @property (nonatomic, retain) NSMutableArray *currentHand;
-  @property NSInteger *round;
 
   - (MjLog *) initWithSeed:(NSString*)seedString;
   - (void) startHand:(enum MjOya)oya

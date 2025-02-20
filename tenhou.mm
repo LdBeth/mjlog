@@ -77,16 +77,20 @@ int checkMlogRounds(_MTRND &mt, MjLog *mlog){
       printf("nKyoku=%d yama=",nKyoku);
       for(i=0;i<136;++i) printf("%s",haiDisp[yama[i]/4]);
       printf("\n");
-      int dice0=rnd[135]%6;
-      int dice1=rnd[136]%6;
+      int dice1=rnd[135]%6;
+      int dice2=rnd[136]%6;
       // rnd[137]～rnd[143]は未使用
-      printf("dice0=%d dice1=%d\n",dice0, dice1);
+      printf("dice0=%d dice1=%d\n",dice1, dice2);
       if (verbose) {
         for(i=0;i<136;++i) printf("%d,",yama[i]);
         printf("\n");
       }
-      NSArray <NSNumber *> *hand = mlog.allRounds[nKyoku];
       error = false;
+      if (mlog.dices[nKyoku].intValue != dice1*10+dice2) {
+        error = true;
+        NSLog(@"dice mismatch!");
+      }
+      NSArray <NSNumber *> *hand = mlog.allRounds[nKyoku];
       [hand enumerateObjectsUsingBlock:^(NSNumber *n, NSUInteger idx, BOOL *stop) {
           if (n.intValue != yama[135-idx]) {
             NSLog(@"Mismatched element at index %lu is %@", (unsigned long)idx, n);

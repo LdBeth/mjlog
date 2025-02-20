@@ -1,7 +1,8 @@
 #include "mjlog.h"
+#include <Foundation/Foundation.h>
 
 @implementation MjLog
-@synthesize seed, allRounds, currentHand, round;
+@synthesize seed, dices, allRounds, currentHand;
 
 - (MjLog *) initWithSeed:(NSString*)seedString {
   NSString *prefix = @"mt19937ar-sha512-n288-base64,";
@@ -11,6 +12,7 @@
     NSLog(@"seed format incorrect!");
   }
   self.allRounds = [NSMutableArray arrayWithCapacity:20];
+  self.dices = [NSMutableArray arrayWithCapacity:20];
   return self;
 }
 
@@ -62,7 +64,7 @@
 }
 @end
 
-NSArray *stringToNarray(NSString *string) {
+NSArray <NSNumber *> *stringToNarray(NSString *string) {
   NSArray *array = [string componentsSeparatedByString:@","];
   NSMutableArray *numberArray = [NSMutableArray arrayWithCapacity:13];
   for (NSString *numberString in array) {
@@ -112,6 +114,9 @@ didStartElement:(NSString *)elementName
       [mlog draw:[[NSNumber alloc] initWithInt:num]];
     } else kong = NO;
   } else if ([elementName isEqualToString:@"INIT"]) {
+    NSArray <NSNumber *> *seed = stringToNarray([attributeDict objectForKey:@"seed"]);
+    [mlog.dices addObject:[[NSDecimalNumber alloc]
+                            initWithInt:seed[3].intValue*10+seed[4].intValue]];
     kong = NO;
     NSInteger oya = [[attributeDict objectForKey:@"oya"] integerValue];
     [mlog startHand:oya player0:stringToNarray([attributeDict objectForKey:@"hai0"])
