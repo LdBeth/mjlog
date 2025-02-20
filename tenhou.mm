@@ -98,6 +98,15 @@ int checkMlogRounds(_MTRND &mt, MjLog *mlog){
             *stop = YES;
           }
         }];
+      NSDictionary <NSNumber *, NSNumber *> *wall = mlog.deadWalls[nKyoku];
+      [wall enumerateKeysAndObjectsUsingBlock:
+       ^(NSNumber *i, NSNumber *n, BOOL *stop){
+          if (n.intValue != yama[i.unsignedIntValue]) {
+            NSLog(@"Mismatched deadwall at index %lu is %@", (unsigned long)i, n);
+            error = true;
+            *stop = YES;
+          }
+        }];
       if (!error) {
         printf("Hand passes check.\n");
       } else {

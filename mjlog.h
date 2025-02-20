@@ -9,11 +9,11 @@ enum MjOya {
   Oya0, Oya1, Oya2, Oya3
 }; 
 
-@interface MjLog : NSObject {
-}
+@interface MjLog : NSObject
   @property (readonly) NSString *seed;
   @property (readonly) NSArray <NSDecimalNumber *> *dices;
   @property (readonly) NSArray <NSArray *> *allRounds;
+  @property (readonly) NSArray <NSDictionary <NSNumber *, NSNumber *> *> *deadWalls;
   @property (readonly) NSUInteger rounds;
 
 @end
@@ -23,16 +23,21 @@ enum MjOya {
   NSString *seed;
   NSMutableArray <NSDecimalNumber *> *dices;
   NSMutableArray *allRounds;
+  NSMutableArray *deadWalls;
   NSMutableArray *currentHand;
+  NSMutableDictionary <NSNumber *, NSNumber *> *deadWall;
+  NSUInteger dora, kong;
 }
   @property (retain, readwrite) NSMutableArray *dices;
-  - (MjLog *) initWithSeed:(NSString*)seedString;
+  - (instancetype) initWithSeed:(NSString*)seedString;
   - (void) startHand:(enum MjOya)oya
              player0:(NSArray *)hand0
              player1:(NSArray *)hand1
              player2:(NSArray *)hand2
              player3:(NSArray *)hand3;
   - (void) draw:(NSNumber *)tile;
+  - (void) showDora:(NSNumber *)tile;
+  - (void) rinShan:(NSNumber *)tile;
   - (void) endRound;
 @end
 

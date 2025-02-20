@@ -9,9 +9,16 @@
 
 @implementation MjLogCtrl
 
-@synthesize seed, dices, allRounds;
+@synthesize seed, dices, allRounds, deadWalls;
 
-- (MjLog *) initWithSeed:(NSString*)seedString {
+- (instancetype) init {
+  self = [super init];
+  kong = dora = 0;
+  return self;
+}
+
+- (instancetype) initWithSeed:(NSString*)seedString {
+  self = [self init];
   NSString *prefix = @"mt19937ar-sha512-n288-base64,";
   if ([seedString hasPrefix:prefix]) {
     seed = [seedString substringFromIndex:[prefix length]];
@@ -44,6 +51,7 @@
     break;
   }
   currentHand = [NSMutableArray arrayWithCapacity:136];
+  deadWall = [[NSMutableDictionary alloc] initWithCapacity:14];
   if ([h1 count] != 13 || [h2 count] != 13 || [h3 count] != 13 || [h4 count] != 13) {
     NSLog(@"Invalid hand!");
   }
@@ -62,8 +70,28 @@
   [currentHand addObject: tile];
 }
 
+- (void) showDora: (NSNumber *)tile {
+  deadWall[[NSNumber numberWithInt:dora*2 + 5]] = tile;
+  dora++;
+}
+
+- (void) rinShan: (NSNumber *)tile {
+  int ord;
+  switch (kong) {
+  case 0: ord = 1; break;
+  case 1: ord = 0; break;
+  case 2: ord = 3; break;
+  case 3: ord = 2; break;
+  default: NSLog(@"Kong more than four times ?!");
+    return;
+  }
+  deadWall[@(ord)] = tile;
+  kong++;
+}
+
 - (void) endRound {
   [allRounds addObject:currentHand];
+  [deadWalls addObject:deadWall];
 }
 
 @end
@@ -106,8 +134,11 @@ didStartElement:(NSString *)elementName
   if (isFetchTileAction(elementName, &num)) {
     // NSLog(@"draw tile");
     if (kong == NO) {
-      [mlog draw:[[NSNumber alloc] initWithInt:num]];
-    } else kong = NO;
+      [mlog draw:@(num)];
+    } else {
+      [mlog rinShan:@(num)];
+      kong = NO;
+    }
   } else if ([elementName isEqualToString:@"INIT"]) {
     NSArray <NSNumber *> *seed = stringToNarray([attributeDict objectForKey:@"seed"]);
     [mlog.dices addObject:[[NSDecimalNumber alloc]
@@ -118,6 +149,7 @@ didStartElement:(NSString *)elementName
             player1:stringToNarray([attributeDict objectForKey:@"hai1"])
             player2:stringToNarray([attributeDict objectForKey:@"hai2"])
             player3:stringToNarray([attributeDict objectForKey:@"hai3"])];
+    [mlog showDora:seed[5]];
   } else if ([elementName isEqualToString:@"AGARI"] ||
              [elementName isEqualToString:@"RYUUKYOKU"]) {
     [mlog endRound];
@@ -126,6 +158,7 @@ didStartElement:(NSString *)elementName
   } else if ([elementName isEqualToString:@"DORA"]) {
     // todo: verift dora
     kong = YES;
+    [mlog showDora:@([[attributeDict objectForKey:@"hai"] integerValue])];
   }
   
 }
