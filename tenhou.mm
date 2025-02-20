@@ -134,12 +134,12 @@ int main(int argc, char *argv[]) {
     [xmlparser setDelegate:parser];
 
     BOOL success = [xmlparser parse];
+    MjLog *mlog = parser.mlog;
 
-    if ((!success) || (parser.mlog.seed == nil)) {
+    if ((!success) || (mlog.seed == nil)) {
       NSLog(@"Parse not success");
       return -1;
     }
-    MjLog *mlog = [parser getLog];
     NSString *data = mlog.seed;
     char source[5000];
     _MTRND mt;
