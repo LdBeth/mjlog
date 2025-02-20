@@ -104,10 +104,19 @@ int checkMlogRounds(_MTRND &mt, MjLog *mlog){
     return 0;
 }
 
+static const char *perm[] = {
+"0123", "0132", "0213", "0231", "0312", "0321",
+"1023", "1032", "1203", "1230", "1302", "1320",
+"2013", "2031", "2103", "2130", "2301", "2310",
+"3012", "3021", "3102", "3120", "3201", "3210",
+};
+
 int main(int argc, char *argv[]) {
   char *file = NULL;
+  bool hash = false;
   for (int i = 1; i < argc; i++) {
     if (0 == strcmp(argv[i], "-v")) verbose = true;
+    if (0 == strcmp(argv[i], "-h")) hash = true;
     else file = argv[i];
   }
   if (file == NULL) {
@@ -130,15 +139,22 @@ int main(int argc, char *argv[]) {
     NSString *data = mlog.seed;
     char source[5000];
     _MTRND mt;
-    strncpy(source, "1203", 4);
+    
     setup_seed(mt, source + 4, data);
-    unsigned char checksum[SHA512_DIGEST_SIZE];
-    CC_SHA512(source, 8*624+4, checksum);
-    printf("shasum: ");
-    for(int i = 0; i < SHA512_DIGEST_SIZE; ++i) {
-      printf("%02x", checksum[i]);
+    if (hash) {
+      printf("shasum:\n");
+      for (int i=0;i<24;++i) {
+        strncpy(source, perm[i], 4);
+        printf("(%s) ", perm[i]);
+        unsigned char checksum[SHA512_DIGEST_SIZE];
+        CC_SHA512(source, 8*624+4, checksum);
+      
+        for(int i = 0; i < SHA512_DIGEST_SIZE; ++i) {
+          printf("%02x", checksum[i]);
+        }
+        printf("\n");
+      }
     }
-    printf("\n");
     return checkMlogRounds(mt, mlog);
   }
 }
