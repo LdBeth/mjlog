@@ -8,5 +8,5 @@ public:
  _MTRND(): mti(624+1) {};
   void init_genrand(uint32_t s);
   void init_by_array(uint32_t init_key[], int key_length);
-  unsigned long genrand_int32(void);
+  uint32_t genrand_int32(void);
 };

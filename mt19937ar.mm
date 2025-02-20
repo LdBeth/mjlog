@@ -48,7 +48,7 @@ void _MTRND::init_by_array(uint32_t init_key[], int key_length)
     mt[0] = 0x80000000U; /* MSB is 1; assuring non-zero initial array */ 
 }
 
-unsigned long _MTRND::genrand_int32(void)
+uint32_t _MTRND::genrand_int32(void)
 {
   uint32_t y;
   const uint32_t mag01[2]={0x0UL, MATRIX_A};
