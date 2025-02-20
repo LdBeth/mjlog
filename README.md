@@ -1,5 +1,8 @@
 # Tool for verify Tenhou's mahjong log
 
+Note: this tool is written in Objective-C++ thus macOS
+environment is a requirement.
+
 See https://tenhou.net/stat/rand/
 https://81100118.github.io/2021/01/01/天凤牌山生成算法及其验证/
 
