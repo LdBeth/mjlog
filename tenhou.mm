@@ -47,7 +47,7 @@ int checkMlogRounds(_MTRND &mt, MjLog *mlog){
     int i;
     int nKyoku=0;
     NSUInteger round = mlog.rounds;
-    for(;nKyoku<round;++nKyoku){
+    for(;nKyoku<round;++nKyoku) @autoreleasepool {
       uint32_t rnd[SHA512_DIGEST_SIZE/sizeof(uint32_t)*9]; // 135+2以上を確保
       {
         uint32_t src[sizeof(rnd)/sizeof(*rnd)*2]; // 1024bit単位で512bitへhash

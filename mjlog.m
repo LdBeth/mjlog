@@ -131,36 +131,36 @@ didStartElement:(NSString *)elementName
  qualifiedName:(NSString *)qName 
     attributes:(NSDictionary<NSString *,NSString *> *)attributeDict {
   int num;
-  if (isFetchTileAction(elementName, &num)) {
-    // NSLog(@"draw tile");
-    if (kong == NO) {
-      [mlog draw:@(num)];
-    } else {
-      [mlog rinShan:@(num)];
+  @autoreleasepool {
+    if (isFetchTileAction(elementName, &num)) {
+      // NSLog(@"draw tile");
+      if (kong == NO) {
+        [mlog draw:@(num)];
+      } else {
+        [mlog rinShan:@(num)];
+        kong = NO;
+      }
+    } else if ([elementName isEqualToString:@"INIT"]) {
+      NSArray <NSNumber *> *seed = stringToNarray([attributeDict objectForKey:@"seed"]);
+      [mlog.dices addObject:[[NSDecimalNumber alloc]
+                              initWithInt:seed[3].intValue*10+seed[4].intValue]];
       kong = NO;
+      NSInteger oya = [[attributeDict objectForKey:@"oya"] integerValue];
+      [mlog startHand:oya player0:stringToNarray([attributeDict objectForKey:@"hai0"])
+              player1:stringToNarray([attributeDict objectForKey:@"hai1"])
+              player2:stringToNarray([attributeDict objectForKey:@"hai2"])
+              player3:stringToNarray([attributeDict objectForKey:@"hai3"])];
+      [mlog showDora:seed[5]];
+    } else if ([elementName isEqualToString:@"AGARI"] ||
+               [elementName isEqualToString:@"RYUUKYOKU"]) {
+      [mlog endRound];
+    } else if ([elementName isEqualToString:@"SHUFFLE"]) {
+      mlog = [mlog initWithSeed:[attributeDict objectForKey:@"seed"]];
+    } else if ([elementName isEqualToString:@"DORA"]) {
+      kong = YES;
+      [mlog showDora:@([[attributeDict objectForKey:@"hai"] integerValue])];
     }
-  } else if ([elementName isEqualToString:@"INIT"]) {
-    NSArray <NSNumber *> *seed = stringToNarray([attributeDict objectForKey:@"seed"]);
-    [mlog.dices addObject:[[NSDecimalNumber alloc]
-                            initWithInt:seed[3].intValue*10+seed[4].intValue]];
-    kong = NO;
-    NSInteger oya = [[attributeDict objectForKey:@"oya"] integerValue];
-    [mlog startHand:oya player0:stringToNarray([attributeDict objectForKey:@"hai0"])
-            player1:stringToNarray([attributeDict objectForKey:@"hai1"])
-            player2:stringToNarray([attributeDict objectForKey:@"hai2"])
-            player3:stringToNarray([attributeDict objectForKey:@"hai3"])];
-    [mlog showDora:seed[5]];
-  } else if ([elementName isEqualToString:@"AGARI"] ||
-             [elementName isEqualToString:@"RYUUKYOKU"]) {
-    [mlog endRound];
-  } else if ([elementName isEqualToString:@"SHUFFLE"]) {
-    mlog = [mlog initWithSeed:[attributeDict objectForKey:@"seed"]];
-  } else if ([elementName isEqualToString:@"DORA"]) {
-    // todo: verift dora
-    kong = YES;
-    [mlog showDora:@([[attributeDict objectForKey:@"hai"] integerValue])];
   }
-  
 }
 
 @end
