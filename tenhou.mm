@@ -46,7 +46,7 @@ void setup_seed(_MTRND &mt, char *bytes, NSString *data) {
 int checkMlogRounds(_MTRND &mt, MjLog *mlog){
     int i;
     int nKyoku=0;
-    NSUInteger round = [mlog rounds];
+    NSUInteger round = mlog.rounds;
     for(;nKyoku<round;++nKyoku){
       uint32_t rnd[SHA512_DIGEST_SIZE/sizeof(uint32_t)*9]; // 135+2以上を確保
       {
@@ -130,7 +130,7 @@ int main(int argc, char *argv[]) {
   @autoreleasepool {
     NSURL *url = [[NSURL alloc] initFileURLWithPath:[[NSString alloc] initWithUTF8String:file]];
     NSXMLParser *xmlparser = [[NSXMLParser alloc] initWithContentsOfURL:url];
-    MjLogParser *parser = [[MjLogParser alloc] initXMLParser];
+    MjLogParser *parser = [MjLogParser alloc];
     [xmlparser setDelegate:parser];
 
     BOOL success = [xmlparser parse];
@@ -139,7 +139,7 @@ int main(int argc, char *argv[]) {
       NSLog(@"Parse not success");
       return -1;
     }
-    MjLog *mlog = parser.mlog;
+    MjLog *mlog = [parser getLog];
     NSString *data = mlog.seed;
     char source[5000];
     _MTRND mt;

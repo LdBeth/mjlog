@@ -2,17 +2,24 @@
 #include <Foundation/Foundation.h>
 
 @implementation MjLog
-@synthesize seed, dices, allRounds, currentHand;
+@synthesize seed, dices, rounds, allRounds;
+@end
+
+@implementation MjLogCtrl
+
+@synthesize seed = _seed, dices = _dices,
+  rounds = _rounds, allRounds = _allRounds;
+@synthesize currentHand;
 
 - (MjLog *) initWithSeed:(NSString*)seedString {
   NSString *prefix = @"mt19937ar-sha512-n288-base64,";
   if ([seedString hasPrefix:prefix]) {
-    self.seed = [seedString substringFromIndex:[prefix length]];
+    _seed = [seedString substringFromIndex:[prefix length]];
   } else {
     NSLog(@"seed format incorrect!");
   }
-  self.allRounds = [NSMutableArray arrayWithCapacity:20];
-  self.dices = [NSMutableArray arrayWithCapacity:20];
+  _allRounds = [NSMutableArray arrayWithCapacity:20];
+  _dices = [NSMutableArray arrayWithCapacity:20];
   return self;
 }
 
@@ -56,12 +63,9 @@
 }
 
 - (void) endRound {
-  [allRounds addObject:currentHand];
+  [_allRounds addObject:currentHand];
 }
 
-- (NSUInteger) rounds {
-  return [allRounds count];
-}
 @end
 
 NSArray <NSNumber *> *stringToNarray(NSString *string) {
@@ -93,13 +97,12 @@ BOOL isFetchTileAction(NSString *string, int *number) {
 
 @synthesize mlog, kong;
 
-- (MjLogParser *) initXMLParser
-{
-    self = [super init];
+- (void)parserDidStartDocument:(NSXMLParser *)parser {
+  mlog = [MjLogCtrl alloc];
+}
 
-    mlog = [MjLog alloc];
-
-    return self;
+- (void)parserDidEndDocument:(NSXMLParser *)parser {
+  mlog.rounds = [mlog.allRounds count];
 }
 
 - (void)parser:(NSXMLParser *)parser 
@@ -133,6 +136,10 @@ didStartElement:(NSString *)elementName
     kong = YES;
   }
   
+}
+
+- (MjLog *)getLog{
+  return mlog;
 }
 
 @end

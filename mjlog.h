@@ -10,17 +10,28 @@ enum MjOya {
 }; 
 
 @interface MjLog : NSObject {
+@protected
   NSString *seed;
   NSMutableArray <NSDecimalNumber *> *dices;
   NSMutableArray *allRounds;
-  NSMutableArray *currentHand;
+  NSUInteger rounds;
 }
 
-  @property (nonatomic, retain) NSString *seed;
-  @property (nonatomic, retain) NSMutableArray <NSDecimalNumber *> *dices;
-  @property (nonatomic, retain) NSMutableArray *allRounds;
-  @property (nonatomic, retain) NSMutableArray *currentHand;
+  @property (nonatomic, retain, readonly) NSString *seed;
+  @property (nonatomic, retain, readonly) NSArray <NSDecimalNumber *> *dices;
+  @property (nonatomic, retain, readonly) NSArray *allRounds;
+  @property (readonly) NSUInteger rounds;
 
+@end
+
+@interface MjLogCtrl : MjLog {
+  NSMutableArray *currentHand;
+}
+  @property (nonatomic, retain, readwrite) NSString *seed;
+  @property (nonatomic, retain, readwrite) NSMutableArray <NSDecimalNumber *> *dices;
+  @property (nonatomic, retain, readwrite) NSMutableArray *allRounds;
+  @property (readwrite) NSUInteger rounds;
+  @property (nonatomic, retain, readwrite) NSMutableArray *currentHand;
   - (MjLog *) initWithSeed:(NSString*)seedString;
   - (void) startHand:(enum MjOya)oya
              player0:(NSArray *)hand0
@@ -29,22 +40,23 @@ enum MjOya {
              player3:(NSArray *)hand3;
   - (void) draw:(NSNumber *)tile;
   - (void) endRound;
-  - (NSUInteger) rounds;
 @end
 
 @interface MjLogParser : NSObject <NSXMLParserDelegate> {
-  MjLog *mlog;
+@private
+  MjLogCtrl *mlog;
   BOOL kong;
 }
   @property (nonatomic, retain) MjLog *mlog;
   @property BOOL kong;
 
-  - (MjLogParser*) initXMLParser;
+  - (void)parserDidStartDocument:(NSXMLParser *)parser;
   - (void)parser:(NSXMLParser *)parser 
  didStartElement:(NSString *)elementName 
     namespaceURI:(NSString *)namespaceURI 
    qualifiedName:(NSString *)qName 
       attributes:(NSDictionary<NSString *,NSString *> *)attributeDict;
+  - (MjLog *)getLog;
 @end
 
 #ifdef __cplusplus
