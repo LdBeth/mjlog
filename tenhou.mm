@@ -45,9 +45,9 @@ void setup_seed(_MTRND &mt, char *bytes, NSString *data) {
 
 int checkMlogRounds(_MTRND &mt, MjLog *mlog){
     int i;
-    int nKyoku=0;
+
     NSUInteger round = mlog.rounds;
-    for(;nKyoku<round;++nKyoku) @autoreleasepool {
+    for(int nKyoku=0;nKyoku<round;++nKyoku) @autoreleasepool {
       uint32_t rnd[SHA512_DIGEST_SIZE/sizeof(uint32_t)*9]; // 135+2以上を確保
       {
         uint32_t src[sizeof(rnd)/sizeof(*rnd)*2]; // 1024bit単位で512bitへhash
@@ -69,7 +69,7 @@ int checkMlogRounds(_MTRND &mt, MjLog *mlog){
         printf("\n");
       }
 
-      static unsigned char yama[136];// サンマは108
+      unsigned char *yama = new unsigned char[136];// サンマは108
       static bool error;
       for(i=0;i<136;++i) yama[i]=i;
       for(i=0;i<136-1;++i) std::swap(yama[i],yama[i + (rnd[i]%(136-i))]); // 1/2^32以下の誤差は許容
@@ -107,6 +107,7 @@ int checkMlogRounds(_MTRND &mt, MjLog *mlog){
             *stop = YES;
           }
         }];
+      delete [] yama;
       if (!error) {
         printf("Hand passes check.\n");
       } else {
