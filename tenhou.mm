@@ -135,7 +135,7 @@ int main(int argc, const char *argv[]) {
     else file = argv[i];
   }
   if (file == NULL) {
-    NSLog(@"No input!");
+    std::cerr << "No input!" << std::endl;
     return -1;
   }
   @autoreleasepool {
@@ -148,7 +148,7 @@ int main(int argc, const char *argv[]) {
     MjLog *mlog = parser.mlog;
 
     if ((!success) || (mlog.seed == nil)) {
-      NSLog(@"Parse not success");
+      std::cerr << "Parse not success" << std::endl;
       return -1;
     }
     auto data = mlog.seed;
