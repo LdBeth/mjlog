@@ -1,2 +1,2 @@
 #!/bin/sh
-clang++ -Wall -fobjc-arc mt19937ar.mm tenhou.mm mjlog.m -o out
+clang++ -std=c++17 -Wall -flto -fobjc-arc -o out mt19937ar.mm mjlog.mm tenhou.mm

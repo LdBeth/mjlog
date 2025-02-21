@@ -3,6 +3,8 @@
 #import <CommonCrypto/CommonDigest.h>
 #import <CoreFoundation/CoreFoundation.h>
 #include <algorithm>
+#include <format>
+#include <iostream>
 #import "mt19937ar.h"
 #import "mjlog.h"
 
@@ -20,8 +22,7 @@ static bool verbose = false;
 #define PRINT_BLOCK(var) \
   for(int i=0;i<sizeof(var)/sizeof(*var);++i) { \
     printf(" %08X",var[i]);                     \
-    if (7 == i % 8)                             \
-      printf("\n");                             \
+    if (7 == i % 8) std::cout << std::endl;     \
   }
 
 void setup_seed(_MTRND &mt, char *bytes, NSString *data) {
@@ -37,9 +38,9 @@ void setup_seed(_MTRND &mt, char *bytes, NSString *data) {
     // printf("%08x,", CFSwapInt32(seed[i]));
   }
   if (verbose) {
-    printf("mt.seed=\n");
+    std::cout << "mt.seed=" << std::endl;
     PRINT_BLOCK(seed);
-    printf("\n");
+    std::cout << std::endl;
   }
 }
 
@@ -53,9 +54,9 @@ int checkMlogRounds(_MTRND &mt, MjLog *mlog){
         uint32_t src[sizeof(rnd)/sizeof(*rnd)*2]; // 1024bit単位で512bitへhash
         for(i=0;i<sizeof(src)/sizeof(*src);++i) src[i]=mt.genrand_int32();
         if (verbose) {
-          printf("src=\n");
+          std::cout << "src=" << std::endl;
           PRINT_BLOCK(src);
-          printf("\n");
+          std::cout << std::endl;
         }
         for(i=0;i<sizeof(rnd)/SHA512_DIGEST_SIZE;++i){
           CC_SHA512((unsigned char *)src + i * SHA512_DIGEST_SIZE * 2,
@@ -64,23 +65,23 @@ int checkMlogRounds(_MTRND &mt, MjLog *mlog){
         }
       }
       if (verbose) {
-        printf("rnd=\n");
+        std::cout << "rnd=" << std::endl;
         PRINT_BLOCK(rnd);
-        printf("\n");
+        std::cout << std::endl;
       }
 
-      unsigned char *yama = new unsigned char[136];// サンマは108
+      auto yama = new unsigned char[136];// サンマは108
       static bool error;
       for(i=0;i<136;++i) yama[i]=i;
       for(i=0;i<136-1;++i) std::swap(yama[i],yama[i + (rnd[i]%(136-i))]); // 1/2^32以下の誤差は許容
 
-      printf("nKyoku=%d yama=",nKyoku);
+      std::cout << "nKyoku=" << nKyoku << " yama=" << std::endl;
       for(i=0;i<136;++i) printf("%s",haiDisp[yama[i]/4]);
-      printf("\n");
+      std::cout << std::endl;
       int dice1=rnd[135]%6;
       int dice2=rnd[136]%6;
       // rnd[137]～rnd[143]は未使用
-      printf("dice0=%d dice1=%d\n",dice1, dice2);
+      std::cout << "dice0=" << dice1 << " dice1=" << dice2 << std::endl;
       if (verbose) {
         for(i=0;i<136;++i) printf("%d,",yama[i]);
         printf("\n");
@@ -90,7 +91,7 @@ int checkMlogRounds(_MTRND &mt, MjLog *mlog){
         error = true;
         NSLog(@"dice mismatch!");
       }
-      NSArray <NSNumber *> *hand = mlog.allRounds[nKyoku];
+      auto hand = mlog.allRounds[nKyoku];
       [hand enumerateObjectsUsingBlock:^(NSNumber *n, NSUInteger idx, BOOL *stop) {
           if (n.intValue != yama[135-idx]) {
             NSLog(@"Mismatched element at index %lu is %@", (unsigned long)idx, n);
@@ -98,7 +99,7 @@ int checkMlogRounds(_MTRND &mt, MjLog *mlog){
             *stop = YES;
           }
         }];
-      NSDictionary <NSNumber *, NSNumber *> *wall = mlog.deadWalls[nKyoku];
+      auto wall = mlog.deadWalls[nKyoku];
       [wall enumerateKeysAndObjectsUsingBlock:
        ^(NSNumber *i, NSNumber *n, BOOL *stop){
           if (n.intValue != yama[i.unsignedIntValue]) {
@@ -109,7 +110,7 @@ int checkMlogRounds(_MTRND &mt, MjLog *mlog){
         }];
       delete [] yama;
       if (!error) {
-        printf("Hand passes check.\n");
+        std::cout << "Hand passes check." << std::endl;
       } else {
         return 1;
       }
@@ -125,8 +126,8 @@ static const char *perm[] = {
 "3012", "3021", "3102", "3120", "3201", "3210",
 };
 
-int main(int argc, char *argv[]) {
-  char *file = NULL;
+int main(int argc, const char *argv[]) {
+  const char *file = NULL;
   bool hash = false;
   for (int i = 1; i < argc; i++) {
     if (0 == strcmp(argv[i], "-v")) verbose = true;
@@ -138,9 +139,9 @@ int main(int argc, char *argv[]) {
     return -1;
   }
   @autoreleasepool {
-    NSURL *url = [[NSURL alloc] initFileURLWithPath:[[NSString alloc] initWithUTF8String:file]];
-    NSXMLParser *xmlparser = [[NSXMLParser alloc] initWithContentsOfURL:url];
-    MjLogParser *parser = [MjLogParser alloc];
+    auto url = [[NSURL alloc] initFileURLWithPath:[[NSString alloc] initWithUTF8String:file]];
+    auto xmlparser = [[NSXMLParser alloc] initWithContentsOfURL:url];
+    auto parser = [MjLogParser alloc];
     [xmlparser setDelegate:parser];
 
     BOOL success = [xmlparser parse];
@@ -150,7 +151,7 @@ int main(int argc, char *argv[]) {
       NSLog(@"Parse not success");
       return -1;
     }
-    NSString *data = mlog.seed;
+    auto data = mlog.seed;
     char source[5000];
     _MTRND mt;
     

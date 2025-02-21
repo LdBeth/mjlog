@@ -1,5 +1,7 @@
+// -*- mode:objc -*-
 #import <Foundation/Foundation.h>
 #import "mjlog.h"
+#include <string>
 
 @implementation MjLog
 - (NSUInteger) rounds {
@@ -28,7 +30,7 @@
 
 - (instancetype) initWithSeed:(NSString*)seedString {
   self = [self init];
-  NSString *prefix = @"mt19937ar-sha512-n288-base64,";
+  auto prefix = @"mt19937ar-sha512-n288-base64,";
   NSAssert([seedString hasPrefix:prefix], @"seed format incorrect!");
   seed = [seedString substringFromIndex:[prefix length]];
   allRounds = [NSMutableArray arrayWithCapacity:20];
@@ -83,17 +85,9 @@
 }
 
 - (void) rinShan: (NSNumber *)tile {
-  int ord;
-  switch (kong) {
-  case 0: ord = 1; break;
-  case 1: ord = 0; break;
-  case 2: ord = 3; break;
-  case 3: ord = 2; break;
-  default:
-    NSAssert(kong > 3,@"Kong more than four times ?!");
-    return;
-  }
-  deadWall[@(ord)] = tile;
+  int ord[] = {1, 0, 3, 2};
+  NSAssert(kong <= 3,@"Kong more than four times ?!");
+  deadWall[@(ord[kong])] = tile;
   kong++;
 }
 
@@ -107,22 +101,23 @@
 @end
 
 NSArray <NSNumber *> *stringToNarray(NSString *string) {
-  NSArray *array = [string componentsSeparatedByString:@","];
-  NSMutableArray *numberArray = [NSMutableArray arrayWithCapacity:13];
+  auto array = [string componentsSeparatedByString:@","];
+  auto numberArray = [NSMutableArray arrayWithCapacity:13];
   for (NSString *numberString in array) {
-    NSNumber *number = @([numberString integerValue]);
-    [numberArray addObject:number];
+    [numberArray addObject:@([numberString integerValue])];
   }
   return numberArray;
 }
 
-BOOL isFetchTileAction(NSString *string, int *number) {
-  if (!([string hasPrefix:@"T"] ||
-        [string hasPrefix:@"U"] ||
-        [string hasPrefix:@"V"] ||
-        [string hasPrefix:@"W"]))
+BOOL isFetchTileAction(std::string string, int *number) {
+  if (!(string[0] == 'T' ||
+        string[0] == 'U' ||
+        string[0] == 'V' ||
+        string[0] == 'W'))
     return NO;
-  NSScanner *sc = [NSScanner scannerWithString:[string substringFromIndex:1]];
+  NSScanner *sc = [NSScanner scannerWithString:
+                               [NSString stringWithUTF8String:
+                                           string.substr(1).c_str()]];
   [sc scanInt:number];
   BOOL isDecimal = [sc isAtEnd];
   return isDecimal;
@@ -146,7 +141,8 @@ didStartElement:(NSString *)elementName
     attributes:(NSDictionary<NSString *,NSString *> *)attributeDict {
   int num;
   @autoreleasepool {
-    if (isFetchTileAction(elementName, &num)) {
+    auto name = std::string([elementName UTF8String]);
+    if (isFetchTileAction(name, &num)) {
       // NSLog(@"draw tile");
       if (kong == NO) {
         [mlog draw:@(num)];
@@ -154,25 +150,25 @@ didStartElement:(NSString *)elementName
         [mlog rinShan:@(num)];
         kong = NO;
       }
-    } else if ([elementName isEqualToString:@"INIT"]) {
-      NSArray <NSNumber *> *seed = stringToNarray([attributeDict objectForKey:@"seed"]);
+    } else if (name == "INIT") {
+      auto seed = stringToNarray([attributeDict objectForKey:@"seed"]);
       [mlog.dices addObject:@(seed[3].intValue*10+seed[4].intValue)];
       kong = NO;
-      NSInteger oya = [[attributeDict objectForKey:@"oya"] integerValue];
+      auto oya = static_cast<MjOya>([[attributeDict objectForKey:@"oya"] intValue]);
       [mlog startHand:oya player0:stringToNarray([attributeDict objectForKey:@"hai0"])
               player1:stringToNarray([attributeDict objectForKey:@"hai1"])
               player2:stringToNarray([attributeDict objectForKey:@"hai2"])
               player3:stringToNarray([attributeDict objectForKey:@"hai3"])];
       [mlog showDora:seed[5]];
-    } else if ([elementName isEqualToString:@"AGARI"] ||
-               [elementName isEqualToString:@"RYUUKYOKU"]) {
+    } else if (name == "AGARI" ||
+               name == "RYUUKYOKU") {
       [mlog endRound];
-    } else if ([elementName isEqualToString:@"SHUFFLE"]) {
+    } else if (name == "SHUFFLE") {
       mlog = [mlog initWithSeed:[attributeDict objectForKey:@"seed"]];
     } else if ([elementName isEqualToString:@"DORA"]) {
       kong = YES;
       [mlog showDora:@([[attributeDict objectForKey:@"hai"] integerValue])];
-    } else if ([elementName isEqualToString:@"mjloggm"]) {
+    } else if (name == "mjloggm") {
       if (![[attributeDict objectForKey:@"ver"] isEqualToString:@"2.3"])
         NSLog(@"Log format version changed!");
     }

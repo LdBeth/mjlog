@@ -1,10 +1,6 @@
 // -*- mode:objc -*-
 #import <Foundation/Foundation.h>
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 enum MjOya {
   Oya0 = 0, Oya1, Oya2, Oya3
 }; 
@@ -42,7 +38,3 @@ enum MjOya {
    qualifiedName:(NSString *)qName 
       attributes:(NSDictionary<NSString *,NSString *> *)attributeDict;
 @end
-
-#ifdef __cplusplus
-}
-#endif
