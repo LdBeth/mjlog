@@ -87,14 +87,14 @@ int checkMlogRounds(_MTRND &mt, MjLog *mlog){
         printf("\n");
       }
       error = false;
-      if (mlog.dices[nKyoku].intValue != dice1*10+dice2) {
+      if (![mlog.dices[nKyoku] isEqualto: dice1 and: dice2]) {
         error = true;
         NSLog(@"dice mismatch!");
       }
       auto hand = mlog.allRounds[nKyoku];
       [hand enumerateObjectsUsingBlock:^(NSNumber *n, NSUInteger idx, BOOL *stop) {
           if (n.intValue != yama[135-idx]) {
-            NSLog(@"Mismatched element at index %lu is %@", (unsigned long)idx, n);
+            NSLog(@"Mismatched element at index %lu is %@", idx, n);
             error = true;
             *stop = YES;
           }
@@ -103,7 +103,7 @@ int checkMlogRounds(_MTRND &mt, MjLog *mlog){
       [wall enumerateKeysAndObjectsUsingBlock:
        ^(NSNumber *i, NSNumber *n, BOOL *stop){
           if (n.intValue != yama[i.unsignedIntValue]) {
-            NSLog(@"Mismatched deadwall at index %lu is %@", (unsigned long)i, n);
+            NSLog(@"Mismatched deadtile at index %@ is %@", i, n);
             error = true;
             *stop = YES;
           }
