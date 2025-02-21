@@ -9,10 +9,25 @@
 }
 @end
 
+@interface MjLogCtrl : MjLog
+  @property (retain, readwrite) NSMutableArray *dices;
+  - (instancetype) initWithSeed:(NSString*)seedString;
+  - (void) startHand:(enum MjOya)oya
+             player0:(NSArray *)hand0
+             player1:(NSArray *)hand1
+             player2:(NSArray *)hand2
+             player3:(NSArray *)hand3;
+  - (void) roll:(NSNumber *)d1 and:(NSNumber *) d2;
+  - (void) draw:(NSNumber *)tile;
+  - (void) showDora:(NSNumber *)tile;
+  - (void) rinShan:(NSNumber *)tile;
+  - (void) endRound;
+@end
+
 @implementation MjLogCtrl {
 @private
   NSString *seed;
-  NSMutableArray <NSDecimalNumber *> *dices;
+  NSMutableArray <NSNumber *> *dices;
   NSMutableArray *allRounds;
   NSMutableArray *deadWalls;
   NSMutableArray *currentHand;
@@ -79,6 +94,10 @@
   [currentHand addObject: tile];
 }
 
+- (void) roll:(NSNumber *)d1 and:(NSNumber *)d2 {
+  [dices addObject:@((d1.intValue<<3)+d2.intValue)];
+}
+
 - (void) showDora: (NSNumber *)tile {
   deadWall[[NSNumber numberWithInt:dora*2 + 5]] = tile;
   dora++;
@@ -98,6 +117,12 @@
   currentHand = nil;
 }
 
+@end
+
+@implementation NSNumber (Dice)
+- (BOOL)isEqualto:(int)d1 and:(int)d2 {
+  return self.intValue == (d1<<3)+d2;
+}
 @end
 
 NSArray <NSNumber *> *stringToNarray(NSString *string) {
@@ -152,7 +177,7 @@ didStartElement:(NSString *)elementName
       }
     } else if (name == "INIT") {
       auto seed = stringToNarray([attributeDict objectForKey:@"seed"]);
-      [mlog.dices addObject:@(seed[3].intValue*10+seed[4].intValue)];
+      [mlog roll: seed[3] and: seed[4]];
       kong = NO;
       auto oya = static_cast<MjOya>([[attributeDict objectForKey:@"oya"] intValue]);
       [mlog startHand:oya player0:stringToNarray([attributeDict objectForKey:@"hai0"])

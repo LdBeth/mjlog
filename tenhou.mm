@@ -87,7 +87,7 @@ int checkMlogRounds(_MTRND &mt, MjLog *mlog){
       }
       std::cout << "dice0=" << dice1 << " dice1=" << dice2 << std::endl;
       error = false;
-      if (mlog.dices[nKyoku].intValue != dice1*10+dice2) {
+      if (![mlog.dices[nKyoku] isEqualto: dice1 and: dice2]) {
         error = true;
         NSLog(@"dice mismatch!");
       }
@@ -103,8 +103,7 @@ int checkMlogRounds(_MTRND &mt, MjLog *mlog){
       [wall enumerateKeysAndObjectsUsingBlock:
        ^(NSNumber *i, NSNumber *n, BOOL *stop){
           if (n.intValue != yama[i.unsignedIntValue]) {
-            NSLog(@"Mismatched deadwall at index %lu is %@",
-                  i.unsignedLongValue, n);
+            NSLog(@"Mismatched deadtile at index %@ is %@", i, n);
             error = true;
             *stop = YES;
           }

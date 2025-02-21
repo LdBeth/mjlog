@@ -14,18 +14,8 @@ enum MjOya {
 
 @end
 
-@interface MjLogCtrl : MjLog
-  @property (retain, readwrite) NSMutableArray *dices;
-  - (instancetype) initWithSeed:(NSString*)seedString;
-  - (void) startHand:(enum MjOya)oya
-             player0:(NSArray *)hand0
-             player1:(NSArray *)hand1
-             player2:(NSArray *)hand2
-             player3:(NSArray *)hand3;
-  - (void) draw:(NSNumber *)tile;
-  - (void) showDora:(NSNumber *)tile;
-  - (void) rinShan:(NSNumber *)tile;
-  - (void) endRound;
+@interface NSNumber (Dice)
+  - (BOOL) isEqualto: (int) d1 and: (int) d2;
 @end
 
 @interface MjLogParser : NSObject <NSXMLParserDelegate>
