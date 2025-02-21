@@ -6,28 +6,19 @@ extern "C" {
 #endif
 
 enum MjOya {
-  Oya0, Oya1, Oya2, Oya3
+  Oya0 = 0, Oya1, Oya2, Oya3
 }; 
 
 @interface MjLog : NSObject
   @property (readonly) NSString *seed;
-  @property (readonly) NSArray <NSDecimalNumber *> *dices;
+  @property (readonly) NSArray <NSNumber *> *dices;
   @property (readonly) NSArray <NSArray *> *allRounds;
   @property (readonly) NSArray <NSDictionary <NSNumber *, NSNumber *> *> *deadWalls;
   @property (readonly) NSUInteger rounds;
 
 @end
 
-@interface MjLogCtrl : MjLog {
-@private
-  NSString *seed;
-  NSMutableArray <NSDecimalNumber *> *dices;
-  NSMutableArray *allRounds;
-  NSMutableArray *deadWalls;
-  NSMutableArray *currentHand;
-  NSMutableDictionary <NSNumber *, NSNumber *> *deadWall;
-  NSUInteger dora, kong;
-}
+@interface MjLogCtrl : MjLog
   @property (retain, readwrite) NSMutableArray *dices;
   - (instancetype) initWithSeed:(NSString*)seedString;
   - (void) startHand:(enum MjOya)oya
@@ -41,11 +32,7 @@ enum MjOya {
   - (void) endRound;
 @end
 
-@interface MjLogParser : NSObject <NSXMLParserDelegate> {
-@private
-  MjLogCtrl *mlog;
-  BOOL kong;
-}
+@interface MjLogParser : NSObject <NSXMLParserDelegate>
 
   @property (readonly) MjLog *mlog;
   - (void)parserDidStartDocument:(NSXMLParser *)parser;

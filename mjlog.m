@@ -1,5 +1,5 @@
-#include "mjlog.h"
-#include <Foundation/Foundation.h>
+#import <Foundation/Foundation.h>
+#import "mjlog.h"
 
 @implementation MjLog
 - (NSUInteger) rounds {
@@ -7,7 +7,16 @@
 }
 @end
 
-@implementation MjLogCtrl
+@implementation MjLogCtrl {
+@private
+  NSString *seed;
+  NSMutableArray <NSDecimalNumber *> *dices;
+  NSMutableArray *allRounds;
+  NSMutableArray *deadWalls;
+  NSMutableArray *currentHand;
+  NSMutableDictionary <NSNumber *, NSNumber *> *deadWall;
+  NSUInteger dora, kong;
+}
 
 @synthesize seed, dices, allRounds, deadWalls;
 
@@ -20,11 +29,8 @@
 - (instancetype) initWithSeed:(NSString*)seedString {
   self = [self init];
   NSString *prefix = @"mt19937ar-sha512-n288-base64,";
-  if ([seedString hasPrefix:prefix]) {
-    seed = [seedString substringFromIndex:[prefix length]];
-  } else {
-    NSLog(@"seed format incorrect!");
-  }
+  NSAssert([seedString hasPrefix:prefix], @"seed format incorrect!");
+  seed = [seedString substringFromIndex:[prefix length]];
   allRounds = [NSMutableArray arrayWithCapacity:20];
   dices = [NSMutableArray arrayWithCapacity:20];
   return self;
@@ -35,34 +41,35 @@
            player1:(NSArray *)hand1
            player2:(NSArray *)hand2
            player3:(NSArray *)hand3 {
-  NSArray *h1, *h2, *h3, *h4;
+  NSArray *h[4];
   switch (oya) {
   case Oya0:
-    h1 = hand0; h2 = hand1; h3 = hand2; h4 = hand3;
+    h[0] = hand0; h[1] = hand1; h[2] = hand2; h[3] = hand3;
     break;
   case Oya1:
-    h1 = hand1; h2 = hand2; h3 = hand3; h4 = hand0;
+    h[3] = hand0; h[0] = hand1; h[1] = hand2; h[2] = hand3;
     break;
   case Oya2:
-    h1 = hand2; h2 = hand3; h3 = hand0; h4 = hand1;
+    h[2] = hand0; h[3] = hand1; h[0] = hand2; h[1] = hand3;
     break;
   case Oya3:
-    h1 = hand3; h2 = hand0; h3 = hand1; h4 = hand2;
+    h[1] = hand0; h[2] = hand1; h[3] = hand2; h[0] = hand3; 
     break;
   }
   currentHand = [NSMutableArray arrayWithCapacity:136];
   deadWall = [[NSMutableDictionary alloc] initWithCapacity:14];
-  if ([h1 count] != 13 || [h2 count] != 13 || [h3 count] != 13 || [h4 count] != 13) {
-    NSLog(@"Invalid hand!");
+  for (int i = 0; i<4; ++i) {
+    NSAssert([h[i] count] == 13, @"Invalid hand! %@", h[i]);
   }
 
   for (int i=0,s=0; i < 3; ++i,s=i*4) {
-    [currentHand addObjectsFromArray:@[h1[s],h1[s+1],h1[s+2],h1[s+3]]];
-    [currentHand addObjectsFromArray:@[h2[s],h2[s+1],h2[s+2],h2[s+3]]];
-    [currentHand addObjectsFromArray:@[h3[s],h3[s+1],h3[s+2],h3[s+3]]];
-    [currentHand addObjectsFromArray:@[h4[s],h4[s+1],h4[s+2],h4[s+3]]];
+    for(int j=0;j<4;++j){
+    [currentHand addObjectsFromArray:
+                   @[h[j][s],h[j][s+1],h[j][s+2],h[j][s+3]]];
+    }
   }
-  [currentHand addObjectsFromArray:@[h1[12],h2[12],h3[12],h4[12]]];
+  [currentHand addObjectsFromArray:
+                 @[h[0][12],h[1][12],h[2][12],h[3][12]]];
 
 }
 
@@ -82,7 +89,8 @@
   case 1: ord = 0; break;
   case 2: ord = 3; break;
   case 3: ord = 2; break;
-  default: NSLog(@"Kong more than four times ?!");
+  default:
+    NSAssert(kong > 3,@"Kong more than four times ?!");
     return;
   }
   deadWall[@(ord)] = tile;
@@ -92,6 +100,8 @@
 - (void) endRound {
   [allRounds addObject:currentHand];
   [deadWalls addObject:deadWall];
+  deadWall = nil;
+  currentHand = nil;
 }
 
 @end
@@ -118,7 +128,11 @@ BOOL isFetchTileAction(NSString *string, int *number) {
   return isDecimal;
 }
 
-@implementation MjLogParser
+@implementation MjLogParser {
+@private
+  MjLogCtrl *mlog;
+  BOOL kong;
+}
 @synthesize mlog;
 
 - (void)parserDidStartDocument:(NSXMLParser *)parser {
@@ -142,8 +156,7 @@ didStartElement:(NSString *)elementName
       }
     } else if ([elementName isEqualToString:@"INIT"]) {
       NSArray <NSNumber *> *seed = stringToNarray([attributeDict objectForKey:@"seed"]);
-      [mlog.dices addObject:[[NSDecimalNumber alloc]
-                              initWithInt:seed[3].intValue*10+seed[4].intValue]];
+      [mlog.dices addObject:@(seed[3].intValue*10+seed[4].intValue)];
       kong = NO;
       NSInteger oya = [[attributeDict objectForKey:@"oya"] integerValue];
       [mlog startHand:oya player0:stringToNarray([attributeDict objectForKey:@"hai0"])
@@ -159,6 +172,9 @@ didStartElement:(NSString *)elementName
     } else if ([elementName isEqualToString:@"DORA"]) {
       kong = YES;
       [mlog showDora:@([[attributeDict objectForKey:@"hai"] integerValue])];
+    } else if ([elementName isEqualToString:@"mjloggm"]) {
+      if (![[attributeDict objectForKey:@"ver"] isEqualToString:@"2.3"])
+        NSLog(@"Log format version changed!");
     }
   }
 }

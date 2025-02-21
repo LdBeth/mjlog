@@ -3,8 +3,8 @@
 #import <CommonCrypto/CommonDigest.h>
 #import <CoreFoundation/CoreFoundation.h>
 #include <algorithm>
-#include "mt19937ar.h"
-#include "mjlog.h"
+#import "mt19937ar.h"
+#import "mjlog.h"
 
 #define SHA512_DIGEST_SIZE CC_SHA512_DIGEST_LENGTH
 
