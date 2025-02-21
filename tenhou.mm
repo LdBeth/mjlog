@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <format>
 #include <iostream>
+#include <unistd.h>
 #import "mt19937ar.h"
 #import "mjlog.h"
 
@@ -109,12 +110,10 @@ int checkMlogRounds(_MTRND &mt, MjLog *mlog){
           }
         }];
       delete [] yama;
-      if (!error) {
+      if (!error)
         std::cout << "Hand passes check." << std::endl;
-      } else {
+      else
         return 1;
-      }
-      // for(i=0;i<136;++i) printf("%d,",yama[i]);
     }
     return 0;
 }
@@ -126,49 +125,71 @@ static const char *perm[] = {
 "3012", "3021", "3102", "3120", "3201", "3210",
 };
 
-int main(int argc, const char *argv[]) {
-  const char *file = NULL;
+int main(int argc,  char * const argv[]) {
+  const char *seat = NULL;
   bool hash = false;
-  for (int i = 1; i < argc; i++) {
-    if (0 == strcmp(argv[i], "-v")) verbose = true;
-    if (0 == strcmp(argv[i], "-h")) hash = true;
-    else file = argv[i];
+  int opt;
+  while ((opt = getopt(argc, argv, "vhs:")) != EOF) {
+    switch (opt) {
+    case 'v':
+      verbose = true; break;
+    case 's':
+      seat = optarg;
+    case 'h':
+      hash = true; break;
+    default:
+      std::cerr << argv[0] << ": [-v] [-h] [-s value] mjlog" << std::endl;
+      return EXIT_FAILURE;
+    }
   }
-  if (file == NULL) {
+
+  if (argc - optind < 1) {
     std::cerr << "No input!" << std::endl;
     return -1;
   }
+  const char *file = argv[optind];
   @autoreleasepool {
-    auto url = [[NSURL alloc] initFileURLWithPath:[[NSString alloc] initWithUTF8String:file]];
-    auto xmlparser = [[NSXMLParser alloc] initWithContentsOfURL:url];
-    auto parser = [MjLogParser alloc];
-    [xmlparser setDelegate:parser];
+    BOOL success;
+    MjLog *mlog;
+    {
+      auto url = [[NSURL alloc] initFileURLWithPath:@(file)];
+      auto xmlparser = [[NSXMLParser alloc] initWithContentsOfURL:url];
+      auto parser = [MjLogParser alloc];
+      [xmlparser setDelegate:parser];
 
-    BOOL success = [xmlparser parse];
-    MjLog *mlog = parser.mlog;
-
+      success = [xmlparser parse];
+      mlog = parser.mlog;
+    }
     if ((!success) || (mlog.seed == nil)) {
       std::cerr << "Parse not success" << std::endl;
       return -1;
     }
-    auto data = mlog.seed;
+
     char source[5000];
     _MTRND mt;
     
-    setup_seed(mt, source + 4, data);
+    setup_seed(mt, source + 4, mlog.seed);
     if (hash) {
       printf("shasum:\n");
-      for (int i=0;i<24;++i) {
-        strncpy(source, perm[i], 4);
-        printf("(%s) ", perm[i]);
-        unsigned char checksum[SHA512_DIGEST_SIZE];
+      unsigned char checksum[SHA512_DIGEST_SIZE];
+      if (seat != NULL) {
+        strncpy(source, seat, 4);
         CC_SHA512(source, 8*624+4, checksum);
-      
         for(int i = 0; i < SHA512_DIGEST_SIZE; ++i) {
-          printf("%02x", checksum[i]);
-        }
+            printf("%02x", checksum[i]);
+          }
         printf("\n");
-      }
+      } else for (int i=0;i<24;++i) {
+          strncpy(source, perm[i], 4);
+          printf("(%s) ", perm[i]);
+          
+          CC_SHA512(source, 8*624+4, checksum);
+          
+          for(int i = 0; i < SHA512_DIGEST_SIZE; ++i) {
+            printf("%02x", checksum[i]);
+          }
+          printf("\n");
+        }
     }
     return checkMlogRounds(mt, mlog);
   }

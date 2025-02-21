@@ -141,8 +141,7 @@ BOOL isFetchTileAction(std::string string, int *number) {
         string[0] == 'W'))
     return NO;
   NSScanner *sc = [NSScanner scannerWithString:
-                               [NSString stringWithUTF8String:
-                                           string.substr(1).c_str()]];
+                               @(string.substr(1).c_str())];
   [sc scanInt:number];
   BOOL isDecimal = [sc isAtEnd];
   return isDecimal;
