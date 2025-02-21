@@ -10,7 +10,7 @@
 
 #define SHA512_DIGEST_SIZE CC_SHA512_DIGEST_LENGTH
 
-static const char *haiDisp[34]={
+static const char *haiDisp[]={
   "一","二","三","四","五","六","七","八","九",
   "①","②","③","④","⑤","⑥","⑦","⑧","⑨",
   "１","２","３","４","５","６","７","８","９",
@@ -28,8 +28,8 @@ static bool verbose = false;
 void setup_seed(_MTRND &mt, char *bytes, NSString *data) {
   uint32_t seed[624];
         
-  NSData *d = [[NSData alloc] initWithBase64EncodedString:data
-               options:NSDataBase64DecodingIgnoreUnknownCharacters];
+  auto *d = [[NSData alloc] initWithBase64EncodedString:data
+             options:NSDataBase64DecodingIgnoreUnknownCharacters];
   [d getBytes:seed length:sizeof(seed)];
 
   mt.init_by_array(seed,sizeof(seed)/sizeof(*seed));
@@ -81,11 +81,11 @@ int checkMlogRounds(_MTRND &mt, MjLog *mlog){
       int dice1=rnd[135]%6;
       int dice2=rnd[136]%6;
       // rnd[137]～rnd[143]は未使用
-      std::cout << "dice0=" << dice1 << " dice1=" << dice2 << std::endl;
       if (verbose) {
         for(i=0;i<136;++i) printf("%d,",yama[i]);
-        printf("\n");
+        std::cout << std::endl;
       }
+      std::cout << "dice0=" << dice1 << " dice1=" << dice2 << std::endl;
       error = false;
       if (mlog.dices[nKyoku].intValue != dice1*10+dice2) {
         error = true;
@@ -94,7 +94,7 @@ int checkMlogRounds(_MTRND &mt, MjLog *mlog){
       auto hand = mlog.allRounds[nKyoku];
       [hand enumerateObjectsUsingBlock:^(NSNumber *n, NSUInteger idx, BOOL *stop) {
           if (n.intValue != yama[135-idx]) {
-            NSLog(@"Mismatched element at index %lu is %@", (unsigned long)idx, n);
+            NSLog(@"Mismatched element at index %lu is %@", idx, n);
             error = true;
             *stop = YES;
           }
@@ -103,7 +103,8 @@ int checkMlogRounds(_MTRND &mt, MjLog *mlog){
       [wall enumerateKeysAndObjectsUsingBlock:
        ^(NSNumber *i, NSNumber *n, BOOL *stop){
           if (n.intValue != yama[i.unsignedIntValue]) {
-            NSLog(@"Mismatched deadwall at index %lu is %@", (unsigned long)i, n);
+            NSLog(@"Mismatched deadwall at index %lu is %@",
+                  i.unsignedLongValue, n);
             error = true;
             *stop = YES;
           }
