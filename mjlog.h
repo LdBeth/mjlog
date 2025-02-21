@@ -1,7 +1,7 @@
 // -*- mode:objc -*-
 #import <Foundation/Foundation.h>
 
-enum MjOya {
+typedef NS_ENUM(int, MjOya) {
   Oya0 = 0, Oya1, Oya2, Oya3
 }; 
 
@@ -21,7 +21,6 @@ enum MjOya {
 @interface MjLogParser : NSObject <NSXMLParserDelegate>
 
   @property (readonly) MjLog *mlog;
-  - (void)parserDidStartDocument:(NSXMLParser *)parser;
   - (void)parser:(NSXMLParser *)parser 
  didStartElement:(NSString *)elementName 
     namespaceURI:(NSString *)namespaceURI 

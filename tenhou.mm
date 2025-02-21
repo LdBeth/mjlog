@@ -3,8 +3,8 @@
 #import <CommonCrypto/CommonDigest.h>
 #import <CoreFoundation/CoreFoundation.h>
 #include <algorithm>
-#include <format>
 #include <iostream>
+#include <vector>
 #include <unistd.h>
 #import "mt19937ar.h"
 #import "mjlog.h"
@@ -20,11 +20,14 @@ static const char *haiDisp[]={
 
 static bool verbose = false;
 
-#define PRINT_BLOCK(var) \
-  for(int i=0;i<sizeof(var)/sizeof(*var);++i) { \
-    printf(" %08X",var[i]);                     \
-    if (7 == i % 8) std::cout << std::endl;     \
+template<typename T, size_t N>
+void printBlock(const T (&arr)[N]) {
+  for (size_t i = 0; i < N; ++i) {
+    printf(" %08X", arr[i]);
+    if ((i + 1) % 8 == 0)
+      std::cout << std::endl;
   }
+}
 
 void setup_seed(_MTRND &mt, char *bytes, NSString *data) {
   uint32_t seed[624];
@@ -40,7 +43,7 @@ void setup_seed(_MTRND &mt, char *bytes, NSString *data) {
   }
   if (verbose) {
     std::cout << "mt.seed=" << std::endl;
-    PRINT_BLOCK(seed);
+    printBlock(seed);
     std::cout << std::endl;
   }
 }
@@ -56,7 +59,7 @@ int checkMlogRounds(_MTRND &mt, MjLog *mlog){
         for(i=0;i<sizeof(src)/sizeof(*src);++i) src[i]=mt.genrand_int32();
         if (verbose) {
           std::cout << "src=" << std::endl;
-          PRINT_BLOCK(src);
+          printBlock(src);
           std::cout << std::endl;
         }
         for(i=0;i<sizeof(rnd)/SHA512_DIGEST_SIZE;++i){
@@ -67,11 +70,11 @@ int checkMlogRounds(_MTRND &mt, MjLog *mlog){
       }
       if (verbose) {
         std::cout << "rnd=" << std::endl;
-        PRINT_BLOCK(rnd);
+        printBlock(rnd);
         std::cout << std::endl;
       }
 
-      auto yama = new unsigned char[136];// サンマは108
+      auto yama = new unsigned char[136]; // サンマは108
       static bool error;
       for(i=0;i<136;++i) yama[i]=i;
       for(i=0;i<136-1;++i) std::swap(yama[i],yama[i + (rnd[i]%(136-i))]); // 1/2^32以下の誤差は許容
@@ -109,7 +112,8 @@ int checkMlogRounds(_MTRND &mt, MjLog *mlog){
             *stop = YES;
           }
         }];
-      delete [] yama;
+      delete[] yama;
+
       if (!error)
         std::cout << "Hand passes check." << std::endl;
       else

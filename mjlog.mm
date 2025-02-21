@@ -135,10 +135,10 @@ NSArray <NSNumber *> *stringToNarray(NSString *string) {
 }
 
 BOOL isFetchTileAction(std::string string, int *number) {
-  if (!(string[0] == 'T' ||
-        string[0] == 'U' ||
-        string[0] == 'V' ||
-        string[0] == 'W'))
+  if (string[0] != 'T' &&
+      string[0] != 'U' &&
+      string[0] != 'V' &&
+      string[0] != 'W')
     return NO;
   NSScanner *sc = [NSScanner scannerWithString:
                                @(string.substr(1).c_str())];
@@ -153,10 +153,6 @@ BOOL isFetchTileAction(std::string string, int *number) {
   BOOL kong;
 }
 @synthesize mlog;
-
-- (void)parserDidStartDocument:(NSXMLParser *)parser {
-  mlog = [MjLogCtrl alloc];
-}
 
 - (void)parser:(NSXMLParser *)parser 
 didStartElement:(NSString *)elementName 
@@ -175,25 +171,26 @@ didStartElement:(NSString *)elementName
         kong = NO;
       }
     } else if (name == "INIT") {
-      auto seed = stringToNarray([attributeDict objectForKey:@"seed"]);
+      auto seed = stringToNarray(attributeDict[@"seed"]);
       [mlog roll: seed[3] and: seed[4]];
       kong = NO;
-      auto oya = static_cast<MjOya>([[attributeDict objectForKey:@"oya"] intValue]);
-      [mlog startHand:oya player0:stringToNarray([attributeDict objectForKey:@"hai0"])
-              player1:stringToNarray([attributeDict objectForKey:@"hai1"])
-              player2:stringToNarray([attributeDict objectForKey:@"hai2"])
-              player3:stringToNarray([attributeDict objectForKey:@"hai3"])];
+      auto oya = static_cast<MjOya>([attributeDict[@"oya"] intValue]);
+      [mlog startHand:oya
+              player0:stringToNarray(attributeDict[@"hai0"])
+              player1:stringToNarray(attributeDict[@"hai1"])
+              player2:stringToNarray(attributeDict[@"hai2"])
+              player3:stringToNarray(attributeDict[@"hai3"])];
       [mlog showDora:seed[5]];
     } else if (name == "AGARI" ||
                name == "RYUUKYOKU") {
       [mlog endRound];
     } else if (name == "SHUFFLE") {
-      mlog = [mlog initWithSeed:[attributeDict objectForKey:@"seed"]];
-    } else if ([elementName isEqualToString:@"DORA"]) {
+      mlog = [[MjLogCtrl alloc] initWithSeed:attributeDict[@"seed"]];
+    } else if (name == "DORA") {
       kong = YES;
-      [mlog showDora:@([[attributeDict objectForKey:@"hai"] integerValue])];
+      [mlog showDora:@([attributeDict[@"hai"] integerValue])];
     } else if (name == "mjloggm") {
-      if (![[attributeDict objectForKey:@"ver"] isEqualToString:@"2.3"])
+      if (![attributeDict [@"ver"] isEqualToString:@"2.3"])
         NSLog(@"Log format version changed!");
     }
   }
