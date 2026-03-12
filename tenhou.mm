@@ -121,12 +121,6 @@ int checkMlogRounds(_MTRND &mt, MjLog *mlog){
     return 0;
 }
 
-static const char *perm[] = {
-"0123", "0132", "0213", "0231", "0312", "0321",
-"1023", "1032", "1203", "1230", "1302", "1320",
-"2013", "2031", "2103", "2130", "2301", "2310",
-"3012", "3021", "3102", "3120", "3201", "3210",
-};
 
 int main(int argc,  char * const argv[]) {
   const char *seat = NULL;
@@ -185,11 +179,14 @@ int main(int argc,  char * const argv[]) {
         strncpy(source, seat, 4);
         CC_SHA512(source, 8*624+4, checksum);
         printHash();
-      } else for (int i=0;i<24;++i) {
-          strncpy(source, perm[i], 4);
-          printf("(%s) ", perm[i]);
-          CC_SHA512(source, 8*624+4, checksum);
-          printHash();
+      } else {
+          char p[] = "0123";
+          do {
+            strncpy(source, p, 4);
+            printf("(%s) ", p);
+            CC_SHA512(source, 8*624+4, checksum);
+            printHash();
+          } while (std::next_permutation(p, p + 4));
         }
     }
     return checkMlogRounds(mt, mlog);
