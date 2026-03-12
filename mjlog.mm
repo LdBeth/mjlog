@@ -10,7 +10,8 @@
 @end
 
 @interface MjLogCtrl : MjLog
-  @property (retain, readwrite) NSMutableArray *dices;
+@property(retain, readwrite) NSMutableArray *dices;
+@property(retain, readwrite) NSString *player1, *player2, *player3, *player4;
   - (instancetype) initWithSeed:(NSString*)seedString;
   - (void) startHand:(enum MjOya)oya
              player0:(NSArray *)hand0
@@ -36,6 +37,7 @@
 }
 
 @synthesize seed, dices, allRounds, deadWalls;
+@synthesize player1, player2, player3, player4;
 
 - (instancetype) init {
   self = [super init];
@@ -181,6 +183,11 @@ didStartElement:(NSString *)elementName
               player2:stringToNarray(attributeDict[@"hai2"])
               player3:stringToNarray(attributeDict[@"hai3"])];
       [mlog showDora:seed[5]];
+    } else if (name == "UN") {
+      mlog.player1 = [attributeDict[@"n0"] stringByRemovingPercentEncoding];
+      mlog.player2 = [attributeDict[@"n1"] stringByRemovingPercentEncoding];
+      mlog.player3 = [attributeDict[@"n2"] stringByRemovingPercentEncoding];
+      mlog.player4 = [attributeDict[@"n3"] stringByRemovingPercentEncoding];
     } else if (name == "AGARI" ||
                name == "RYUUKYOKU") {
       [mlog endRound];
