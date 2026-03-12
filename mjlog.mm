@@ -134,7 +134,7 @@ NSArray <NSNumber *> *stringToNarray(NSString *string) {
   return numberArray;
 }
 
-BOOL isFetchTileAction(std::string string, int *number) {
+BOOL isFetchTileAction(const std::string &string, int *number) {
   if (string[0] != 'T' &&
       string[0] != 'U' &&
       string[0] != 'V' &&

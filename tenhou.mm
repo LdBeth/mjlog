@@ -4,7 +4,6 @@
 #import <CoreFoundation/CoreFoundation.h>
 #include <algorithm>
 #include <iostream>
-#include <vector>
 #include <unistd.h>
 #import "mt19937ar.h"
 #import "mjlog.h"
@@ -74,8 +73,9 @@ int checkMlogRounds(_MTRND &mt, MjLog *mlog){
         std::cout << std::endl;
       }
 
-      auto yama = new unsigned char[136]; // サンマは108
-      static bool error;
+      unsigned char yama_arr[136]; // サンマは108
+      unsigned char *yama = yama_arr;
+      __block bool error = false;
       for(i=0;i<136;++i) yama[i]=i;
       for(i=0;i<136-1;++i) std::swap(yama[i],yama[i + (rnd[i]%(136-i))]); // 1/2^32以下の誤差は許容
 
@@ -112,7 +112,6 @@ int checkMlogRounds(_MTRND &mt, MjLog *mlog){
             *stop = YES;
           }
         }];
-      delete[] yama;
 
       if (!error)
         std::cout << "Hand passes check." << std::endl;
@@ -139,6 +138,7 @@ int main(int argc,  char * const argv[]) {
       verbose = true; break;
     case 's':
       seat = optarg;
+      [[fallthrough]];
     case 'h':
       hash = true; break;
     default:
@@ -158,7 +158,7 @@ int main(int argc,  char * const argv[]) {
     {
       auto url = [[NSURL alloc] initFileURLWithPath:@(file)];
       auto xmlparser = [[NSXMLParser alloc] initWithContentsOfURL:url];
-      auto parser = [MjLogParser alloc];
+      auto parser = [[MjLogParser alloc] init];
       [xmlparser setDelegate:parser];
 
       success = [xmlparser parse];
@@ -176,23 +176,20 @@ int main(int argc,  char * const argv[]) {
     if (hash) {
       printf("shasum:\n");
       unsigned char checksum[SHA512_DIGEST_SIZE];
+      auto printHash = [&]() {
+        for (int j = 0; j < SHA512_DIGEST_SIZE; ++j)
+          printf("%02x", checksum[j]);
+        printf("\n");
+      };
       if (seat != NULL) {
         strncpy(source, seat, 4);
         CC_SHA512(source, 8*624+4, checksum);
-        for(int i = 0; i < SHA512_DIGEST_SIZE; ++i) {
-            printf("%02x", checksum[i]);
-          }
-        printf("\n");
+        printHash();
       } else for (int i=0;i<24;++i) {
           strncpy(source, perm[i], 4);
           printf("(%s) ", perm[i]);
-          
           CC_SHA512(source, 8*624+4, checksum);
-          
-          for(int i = 0; i < SHA512_DIGEST_SIZE; ++i) {
-            printf("%02x", checksum[i]);
-          }
-          printf("\n");
+          printHash();
         }
     }
     return checkMlogRounds(mt, mlog);
