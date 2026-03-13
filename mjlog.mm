@@ -7,6 +7,15 @@
 - (NSUInteger) rounds {
   return [self.allRounds count];
 }
+- (bool) computSeat:(char *)out {
+  NSArray *names = @[self.pE, self.pS, self.pW, self.pN];
+  NSArray *sorted = [names sortedArrayUsingSelector:@selector(compare:)];
+  // Check all names are present and distinct
+  if ([NSSet setWithArray:sorted].count != 4) return NO;
+  for (int i = 0; i < 4; i++)
+    out[i] = '0' + [sorted indexOfObject:names[i]];
+  return YES;
+}
 @end
 
 @interface MjLogCtrl : MjLog
