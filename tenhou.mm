@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <iostream>
 #include <unistd.h>
+#include <zlib.h>
 #import "mt19937ar.h"
 #import "mjlog.h"
 
@@ -122,6 +123,36 @@ int checkMlogRounds(_MTRND &mt, MjLog *mlog){
 }
 
 
+static NSData *decompressIfGzip(NSData *data) {
+  const uint8_t *bytes = (const uint8_t *)data.bytes;
+  if (data.length < 2 || bytes[0] != 0x1f || bytes[1] != 0x8b)
+    return data;
+
+  z_stream stream = {};
+  if (inflateInit2(&stream, 15 + 16) != Z_OK)
+    return nil;
+
+  NSMutableData *result = [NSMutableData dataWithLength:data.length * 4];
+  stream.next_in = (Bytef *)data.bytes;
+  stream.avail_in = (uInt)data.length;
+
+  int status;
+  do {
+    if (stream.total_out >= result.length)
+      result.length *= 2;
+    stream.next_out = (Bytef *)result.mutableBytes + stream.total_out;
+    stream.avail_out = (uInt)(result.length - stream.total_out);
+    status = inflate(&stream, Z_NO_FLUSH);
+  } while (status == Z_OK);
+
+  inflateEnd(&stream);
+  if (status != Z_STREAM_END)
+    return nil;
+
+  result.length = stream.total_out;
+  return result;
+}
+
 int main(int argc,  char * const argv[]) {
   const char *seat = NULL;
   bool hash = false;
@@ -151,7 +182,17 @@ int main(int argc,  char * const argv[]) {
     MjLog *mlog;
     {
       auto url = [[NSURL alloc] initFileURLWithPath:@(file)];
-      auto xmlparser = [[NSXMLParser alloc] initWithContentsOfURL:url];
+      auto rawData = [[NSData alloc] initWithContentsOfURL:url];
+      if (rawData == nil) {
+        std::cerr << "Could not read file: " << file << std::endl;
+        return -1;
+      }
+      auto xmlData = decompressIfGzip(rawData);
+      if (xmlData == nil) {
+        std::cerr << "Decompression failed" << std::endl;
+        return -1;
+      }
+      auto xmlparser = [[NSXMLParser alloc] initWithData:xmlData];
       auto parser = [[MjLogParser alloc] init];
       [xmlparser setDelegate:parser];
 
