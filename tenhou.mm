@@ -186,12 +186,16 @@ int main(int argc,  char * const argv[]) {
         printHash();
       } else {
           char p[] = "0123";
+          bool canInfer = [mlog computSeat:p];
+          if (!canInfer) {
+            printf("[Cannot infer seat.]\n");
+          }
           do {
             strncpy(source, p, 4);
             printf("(%s) ", p);
             CC_SHA512(source, 8*624+4, checksum);
             printHash();
-          } while (std::next_permutation(p, p + 4));
+          } while (!canInfer && std::next_permutation(p, p + 4));
         }
     }
     return checkMlogRounds(mt, mlog);
