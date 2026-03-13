@@ -6,10 +6,10 @@ environment is a requirement.
 See https://tenhou.net/stat/rand/
 https://81100118.github.io/2021/01/01/天凤牌山生成算法及其验证/
 
-There is a flaw in the method of checking yama on the replay against  
-the yama recomputed from the seed: the mjlog file does not actually record  
-the yama, and that information is also likely to be recomputed from the  
-seed in online replay mode.  
+There is a flaw in the method of checking yama on the replay against
+the yama recomputed from the seed: the mjlog file does not actually record
+the yama, and that information is also likely to be recomputed from the
+seed in online replay mode.
 
 Thus, the most secure method is to check directly against the mjlog.
 (Although the fact that the seed is used for the replay already

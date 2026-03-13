@@ -8,7 +8,7 @@ typedef NS_ENUM(int, MjOya) {
 @interface MjLog : NSObject
 @property (readonly) NSString *seed;
 @property (readonly) NSArray<NSNumber *> *dices;
-@property (readonly) NSString *player1, *player2, *player3, *player4;
+@property (readonly) NSString *pE, *pS, *pW, *pN;
 @property (readonly) NSArray <NSArray <NSNumber *> *> *allRounds;
 @property (readonly) NSArray <NSDictionary <NSNumber *, NSNumber *> *> *deadWalls;
 @property (readonly) NSUInteger rounds;

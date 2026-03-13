@@ -163,10 +163,10 @@ int main(int argc,  char * const argv[]) {
       return -1;
     }
 
-    std::cout << "Player1: " << [mlog.player1 UTF8String] << std::endl;
-    std::cout << "Player2: " << [mlog.player2 UTF8String] << std::endl;
-    std::cout << "Player3: " << [mlog.player3 UTF8String] << std::endl;
-    std::cout << "Player4: " << [mlog.player4 UTF8String] << std::endl;
+    std::cout << "East : " << [mlog.pE UTF8String] << std::endl;
+    std::cout << "South: " << [mlog.pS UTF8String] << std::endl;
+    std::cout << "West : " << [mlog.pW UTF8String] << std::endl;
+    std::cout << "North: " << [mlog.pN UTF8String] << std::endl;
 
     char source[5000];
     _MTRND mt;

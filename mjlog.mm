@@ -11,13 +11,13 @@
 
 @interface MjLogCtrl : MjLog
 @property(retain, readwrite) NSMutableArray *dices;
-@property(retain, readwrite) NSString *player1, *player2, *player3, *player4;
+@property(retain, readwrite) NSString *pE, *pS, *pW, *pN;
   - (instancetype) initWithSeed:(NSString*)seedString;
   - (void) startHand:(enum MjOya)oya
-             player0:(NSArray *)hand0
-             player1:(NSArray *)hand1
-             player2:(NSArray *)hand2
-             player3:(NSArray *)hand3;
+             East:(NSArray *)hand0
+             South:(NSArray *)hand1
+             West:(NSArray *)hand2
+             North:(NSArray *)hand3;
   - (void) roll:(NSNumber *)d1 and:(NSNumber *) d2;
   - (void) draw:(NSNumber *)tile;
   - (void) showDora:(NSNumber *)tile;
@@ -37,7 +37,7 @@
 }
 
 @synthesize seed, dices, allRounds, deadWalls;
-@synthesize player1, player2, player3, player4;
+@synthesize pE, pS, pW, pN;
 
 - (instancetype) init {
   self = [super init];
@@ -56,10 +56,10 @@
 }
 
 - (void) startHand:(enum MjOya)oya
-           player0:(NSArray *)hand0
-           player1:(NSArray *)hand1
-           player2:(NSArray *)hand2
-           player3:(NSArray *)hand3 {
+           East:(NSArray *)hand0
+           South:(NSArray *)hand1
+           West:(NSArray *)hand2
+           North:(NSArray *)hand3 {
   NSArray *h[4];
   switch (oya) {
   case Oya0:
@@ -178,16 +178,16 @@ didStartElement:(NSString *)elementName
       kong = NO;
       auto oya = static_cast<MjOya>([attributeDict[@"oya"] intValue]);
       [mlog startHand:oya
-              player0:stringToNarray(attributeDict[@"hai0"])
-              player1:stringToNarray(attributeDict[@"hai1"])
-              player2:stringToNarray(attributeDict[@"hai2"])
-              player3:stringToNarray(attributeDict[@"hai3"])];
+              East:stringToNarray(attributeDict[@"hai0"])
+              South:stringToNarray(attributeDict[@"hai1"])
+              West:stringToNarray(attributeDict[@"hai2"])
+              North:stringToNarray(attributeDict[@"hai3"])];
       [mlog showDora:seed[5]];
     } else if (name == "UN") {
-      mlog.player1 = [attributeDict[@"n0"] stringByRemovingPercentEncoding];
-      mlog.player2 = [attributeDict[@"n1"] stringByRemovingPercentEncoding];
-      mlog.player3 = [attributeDict[@"n2"] stringByRemovingPercentEncoding];
-      mlog.player4 = [attributeDict[@"n3"] stringByRemovingPercentEncoding];
+      mlog.pE = [attributeDict[@"n0"] stringByRemovingPercentEncoding];
+      mlog.pS = [attributeDict[@"n1"] stringByRemovingPercentEncoding];
+      mlog.pW = [attributeDict[@"n2"] stringByRemovingPercentEncoding];
+      mlog.pN = [attributeDict[@"n3"] stringByRemovingPercentEncoding];
     } else if (name == "AGARI" ||
                name == "RYUUKYOKU") {
       [mlog endRound];
