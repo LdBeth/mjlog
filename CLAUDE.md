@@ -50,6 +50,7 @@ The codebase is three Objective-C++ source files:
 - **NSString → std::cout**: Use `[nsstring UTF8String]` to convert NSString to C string for C++ output.
 - **Property redeclaration in subclass**: When redeclaring parent's property as `readwrite` in subclass, add explicit `@synthesize propertyName;` to `@implementation` to avoid warnings.
 - **XML attribute URL encoding**: Player names and other data from XML attributes are percent-encoded; decode with `stringByRemovingPercentEncoding`.
+- **Use `auto`**: Use type inference to reduce clutters.
 - **Build verification**: Run `sh build.sh` after changes — expect zero warnings with current `-O3 -flto` configuration.
 
 ## TODO: Known Limitations

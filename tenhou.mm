@@ -124,7 +124,7 @@ int checkMlogRounds(_MTRND &mt, MjLog *mlog){
 
 
 static NSData *decompressIfGzip(NSData *data) {
-  const uint8_t *bytes = (const uint8_t *)data.bytes;
+  auto bytes = (const uint8_t *)data.bytes;
   if (data.length < 2 || bytes[0] != 0x1f || bytes[1] != 0x8b)
     return data;
 
@@ -132,7 +132,7 @@ static NSData *decompressIfGzip(NSData *data) {
   if (inflateInit2(&stream, 15 + 16) != Z_OK)
     return nil;
 
-  NSMutableData *result = [NSMutableData dataWithLength:data.length * 4];
+  auto result = [NSMutableData dataWithLength:data.length * 4];
   stream.next_in = (Bytef *)data.bytes;
   stream.avail_in = (uInt)data.length;
 
