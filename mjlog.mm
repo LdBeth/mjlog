@@ -7,13 +7,13 @@
 - (NSUInteger) rounds {
   return [self.allRounds count];
 }
-- (bool) computSeat:(char *)out {
+- (bool) computSeat:(char *)result {
   NSArray *names = @[self.pE, self.pS, self.pW, self.pN];
   NSArray *sorted = [names sortedArrayUsingSelector:@selector(compare:)];
   // Check all names are present and distinct
   if ([NSSet setWithArray:sorted].count != 4) return NO;
   for (int i = 0; i < 4; i++)
-    out[i] = '0' + [sorted indexOfObject:names[i]];
+    result[i] = '0' + [sorted indexOfObject:names[i]];
   return YES;
 }
 @end
@@ -151,11 +151,10 @@ BOOL isFetchTileAction(const std::string &string, int *number) {
       string[0] != 'V' &&
       string[0] != 'W')
     return NO;
-  NSScanner *sc = [NSScanner scannerWithString:
-                               @(string.substr(1).c_str())];
+  auto sc = [NSScanner scannerWithString:
+                         @(string.substr(1).c_str())];
   [sc scanInt:number];
-  BOOL isDecimal = [sc isAtEnd];
-  return isDecimal;
+  return [sc isAtEnd];
 }
 
 @implementation MjLogParser {
