@@ -12,7 +12,7 @@ typedef NS_ENUM(int, MjOya) {
 @property (readonly) NSArray <NSArray <NSNumber *> *> *allRounds;
 @property (readonly) NSArray <NSDictionary <NSNumber *, NSNumber *> *> *deadWalls;
 @property (readonly) NSUInteger rounds;
-- (bool) computSeat:(char *)out;
+- (bool) computSeat:(char [4])output;
 @end
 
 @interface NSNumber (Dice)

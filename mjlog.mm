@@ -7,7 +7,7 @@
 - (NSUInteger) rounds {
   return [self.allRounds count];
 }
-- (bool) computSeat:(char *)result {
+- (bool) computSeat:(char [4])result {
   NSArray *names = @[self.pE, self.pS, self.pW, self.pN];
   NSArray *sorted = [names sortedArrayUsingSelector:@selector(compare:)];
   // Check all names are present and distinct

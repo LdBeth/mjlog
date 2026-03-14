@@ -51,7 +51,7 @@ void setup_seed(_MTRND &mt, char *bytes, NSString *data) {
 int checkMlogRounds(_MTRND &mt, MjLog *mlog){
     int i;
 
-    NSUInteger round = mlog.rounds;
+    auto round = mlog.rounds;
     for(int nKyoku=0;nKyoku<round;++nKyoku) @autoreleasepool {
       uint32_t rnd[SHA512_DIGEST_SIZE/sizeof(uint32_t)*9]; // 135+2以上を確保
       {
