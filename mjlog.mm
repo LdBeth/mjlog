@@ -30,6 +30,8 @@
   - (void) roll:(NSNumber *)d1 and:(NSNumber *) d2;
   - (void) draw:(NSNumber *)tile;
   - (void) showDora:(NSNumber *)tile;
+  - (void) showUraDora:(NSArray<NSNumber *> *)tiles;
+  - (void) recordAgariDora:(NSArray<NSNumber *> *)tiles;
   - (void) rinShan:(NSNumber *)tile;
   - (void) endRound;
 @end
@@ -40,12 +42,14 @@
   NSMutableArray <NSNumber *> *dices;
   NSMutableArray *allRounds;
   NSMutableArray *deadWalls;
+  NSMutableArray *doraLists;
   NSMutableArray *currentHand;
   NSMutableDictionary <NSNumber *, NSNumber *> *deadWall;
+  NSArray<NSNumber *> *currentDora;
   NSUInteger dora, kong;
 }
 
-@synthesize seed, dices, allRounds, deadWalls;
+@synthesize seed, dices, allRounds, deadWalls, doraLists;
 @synthesize pE, pS, pW, pN;
 
 - (instancetype) init {
@@ -60,6 +64,8 @@
   NSAssert([seedString hasPrefix:prefix], @"seed format incorrect!");
   seed = [seedString substringFromIndex:[prefix length]];
   allRounds = [NSMutableArray arrayWithCapacity:20];
+  deadWalls = [NSMutableArray arrayWithCapacity:20];
+  doraLists = [NSMutableArray arrayWithCapacity:20];
   dices = [NSMutableArray arrayWithCapacity:20];
   return self;
 }
@@ -86,6 +92,8 @@
   }
   currentHand = [NSMutableArray arrayWithCapacity:136];
   deadWall = [[NSMutableDictionary alloc] initWithCapacity:14];
+  currentDora = nil;
+  dora = kong = 0;
   for (int i = 0; i<4; ++i) {
     NSAssert([h[i] count] == 13, @"Invalid hand! %@", h[i]);
   }
@@ -114,6 +122,11 @@
   dora++;
 }
 
+- (void) showUraDora:(NSArray<NSNumber *> *)tiles {
+  for (NSUInteger k = 0; k < tiles.count; k++)
+    deadWall[@(k*2 + 4)] = tiles[k];
+}
+
 - (void) rinShan: (NSNumber *)tile {
   int ord[] = {1, 0, 3, 2};
   NSAssert(kong <= 3,@"Kong more than four times ?!");
@@ -121,11 +134,17 @@
   kong++;
 }
 
+- (void) recordAgariDora:(NSArray<NSNumber *> *)tiles {
+  currentDora = tiles;
+}
+
 - (void) endRound {
   [allRounds addObject:currentHand];
   [deadWalls addObject:deadWall];
+  [doraLists addObject:currentDora ?: @[]];
   deadWall = nil;
   currentHand = nil;
+  currentDora = nil;
 }
 
 @end
@@ -137,12 +156,14 @@
 @end
 
 NSArray <NSNumber *> *stringToNarray(NSString *string) {
-  auto array = [string componentsSeparatedByString:@","];
-  auto numberArray = [NSMutableArray arrayWithCapacity:13];
-  for (NSString *numberString in array) {
-    [numberArray addObject:@([numberString integerValue])];
+  static auto sep = [NSCharacterSet characterSetWithCharactersInString:@" ,"];
+  auto parts = [string componentsSeparatedByCharactersInSet:sep];
+  auto result = [NSMutableArray arrayWithCapacity:13];
+  for (NSString *s in parts) {
+    if (s.length > 0)
+      [result addObject:@([s integerValue])];
   }
-  return numberArray;
+  return result;
 }
 
 BOOL isFetchTileAction(const std::string &string, int *number) {
@@ -160,7 +181,8 @@ BOOL isFetchTileAction(const std::string &string, int *number) {
 @implementation MjLogParser {
 @private
   MjLogCtrl *mlog;
-  BOOL kong;
+  BOOL nextDrawIsRinshan;
+  BOOL roundEnded;
 }
 @synthesize mlog;
 
@@ -174,16 +196,17 @@ didStartElement:(NSString *)elementName
     auto name = std::string([elementName UTF8String]);
     if (isFetchTileAction(name, &num)) {
       // NSLog(@"draw tile");
-      if (kong == NO) {
+      if (nextDrawIsRinshan == NO) {
         [mlog draw:@(num)];
       } else {
         [mlog rinShan:@(num)];
-        kong = NO;
+        nextDrawIsRinshan = NO;
       }
     } else if (name == "INIT") {
       auto seed = stringToNarray(attributeDict[@"seed"]);
       [mlog roll: seed[3] and: seed[4]];
-      kong = NO;
+      nextDrawIsRinshan = NO;
+      roundEnded = NO;
       auto oya = static_cast<MjOya>([attributeDict[@"oya"] intValue]);
       [mlog startHand:oya
               East:stringToNarray(attributeDict[@"hai0"])
@@ -196,13 +219,26 @@ didStartElement:(NSString *)elementName
       mlog.pS = [attributeDict[@"n1"] stringByRemovingPercentEncoding];
       mlog.pW = [attributeDict[@"n2"] stringByRemovingPercentEncoding];
       mlog.pN = [attributeDict[@"n3"] stringByRemovingPercentEncoding];
-    } else if (name == "AGARI" ||
-               name == "RYUUKYOKU") {
-      [mlog endRound];
+    } else if (name == "AGARI") {
+      if (!roundEnded) {
+        auto uraStr = attributeDict[@"doraHaiUra"];
+        if (uraStr != nil)
+          [mlog showUraDora:stringToNarray(uraStr)];
+        auto doraStr = attributeDict[@"doraHai"];
+        if (doraStr != nil)
+          [mlog recordAgariDora:stringToNarray(doraStr)];
+        [mlog endRound];
+        roundEnded = YES;
+      }
+    } else if (name == "RYUUKYOKU") {
+      if (!roundEnded) {
+        [mlog endRound];
+        roundEnded = YES;
+      }
     } else if (name == "SHUFFLE") {
       mlog = [[MjLogCtrl alloc] initWithSeed:attributeDict[@"seed"]];
     } else if (name == "DORA") {
-      kong = YES;
+      nextDrawIsRinshan = YES;
       [mlog showDora:@([attributeDict[@"hai"] integerValue])];
     } else if (name == "mjloggm") {
       if (![attributeDict [@"ver"] isEqualToString:@"2.3"])

@@ -11,6 +11,7 @@ typedef NS_ENUM(int, MjOya) {
 @property (readonly) NSString *pE, *pS, *pW, *pN;
 @property (readonly) NSArray <NSArray <NSNumber *> *> *allRounds;
 @property (readonly) NSArray <NSDictionary <NSNumber *, NSNumber *> *> *deadWalls;
+@property (readonly) NSArray <NSArray <NSNumber *> *> *doraLists;
 @property (readonly) NSUInteger rounds;
 - (bool) computSeat:(char [4])output;
 @end

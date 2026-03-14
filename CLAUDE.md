@@ -1,7 +1,5 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
 ## Project Overview
 
 A macOS tool to verify the integrity of Tenhou online mahjong game logs against their cryptographic seed. It confirms that the tile draws in a replay match what the PRNG would generate from the recorded seed, proving the game was not manipulated.
@@ -28,7 +26,7 @@ This compiles with `clang++` using C++17, Objective-C ARC, and `-O3 -flto`. The 
 - `-h`: compute SHA-512 hashes of seed for all 24 seat permutations
 - `-s <seat>`: compute SHA-512 hash for a specific seat string
 
-Mjlog files from Tenhou are gzipped XML. Unzip first, then pass the XML to `./out`.
+Mjlog files from Tenhou are gzipped XML. The tool decompresses them automatically.
 
 ## Architecture
 
@@ -53,8 +51,18 @@ The codebase is three Objective-C++ source files:
 - **Use `auto`**: Use type inference to reduce clutters.
 - **Build verification**: Run `sh build.sh` after changes — expect zero warnings with current `-O3 -flto` configuration.
 
+## Dead Wall Layout (yama indices 0–13)
+
+- `yama[0..3]`: Rinshan (kan draw) tiles — order within `ord[] = {1,0,3,2}`
+- `yama[4,6,8,10,12]`: Ura-dora indicators (parsed from `AGARI doraHaiUra`)
+- `yama[5,7,9,11,13]`: Dora indicators (first from `INIT seed[5]`, rest from `DORA` elements)
+
+`AGARI doraHaiUra` uses space- or comma-separated integers (unlike INIT's comma-only `seed`).
+Multiple `AGARI` elements in one round (double/triple ron) — only the first should trigger `endRound`.
+`allRounds[nKyoku]` contains 52 initial deal tiles (in deal order) followed by subsequent live wall draws. Rinshan tiles are excluded (they go to `deadWalls`).
+`DORA` element sets a `kong` flag so the *next* T/U/V/W draw is recorded as rinshan, not a normal draw.
+
 ## TODO: Known Limitations
 
 - [ ] 3-player (sanma) mahjong support (would use 108 tiles instead of 136).
-- [ ] Dora and Rinshan tile verification.
 - [ ] Log format version hardcoded to `2.3` — make configurable.

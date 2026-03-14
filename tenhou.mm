@@ -97,6 +97,21 @@ int checkMlogRounds(_MTRND &mt, MjLog *mlog){
         NSLog(@"dice mismatch!");
       }
       auto hand = mlog.allRounds[nKyoku];
+      auto wall = mlog.deadWalls[nKyoku];
+
+      // Count kans: rinshan tiles occupy dead wall positions 0-3
+      NSUInteger kangCount = 0;
+      for (int ki = 0; ki < 4; ki++)
+        if (wall[@(ki)] != nil) kangCount++;
+      // After kangCount kans, live wall shrinks by kangCount from the bottom
+      // (replenishment consumes yama[14..14+kangCount-1]).
+      // Total drawable tiles = 122 - kangCount; hand must not exceed this.
+      if (hand.count > 122 - kangCount) {
+        NSLog(@"Round %d: %lu draws exceed live wall capacity (%lu with %lu kans)",
+              nKyoku, hand.count, 122 - kangCount, kangCount);
+        error = true;
+      }
+
       [hand enumerateObjectsUsingBlock:^(NSNumber *n, NSUInteger idx, BOOL *stop) {
           if (n.intValue != yama[135-idx]) {
             NSLog(@"Mismatched element at index %lu is %@", idx, n);
@@ -104,7 +119,6 @@ int checkMlogRounds(_MTRND &mt, MjLog *mlog){
             *stop = YES;
           }
         }];
-      auto wall = mlog.deadWalls[nKyoku];
       [wall enumerateKeysAndObjectsUsingBlock:
        ^(NSNumber *i, NSNumber *n, BOOL *stop){
           if (n.intValue != yama[i.unsignedIntValue]) {
@@ -114,8 +128,20 @@ int checkMlogRounds(_MTRND &mt, MjLog *mlog){
           }
         }];
 
+      // Cross-check AGARI doraHai against dead wall tiles recorded during play.
+      // doraLists[nKyoku] is empty for ryuukyoku rounds (no AGARI element).
+      auto doraList = mlog.doraLists[nKyoku];
+      for (NSUInteger di = 0; di < doraList.count; di++) {
+        NSNumber *expected = wall[@(5 + di * 2)];
+        if (![doraList[di] isEqualToNumber:expected]) {
+          NSLog(@"Dora mismatch at position %lu: AGARI doraHai says %@, dead wall has %@",
+                di, doraList[di], expected);
+          error = true;
+        }
+      }
+
       if (!error)
-        std::cout << "Hand passes check." << std::endl;
+        std::cout << "Round passes check." << std::endl;
       else
         return 1;
     }
