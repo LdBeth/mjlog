@@ -1,27 +1,24 @@
 // -*- mode:c++ -*-
-#import <Foundation/Foundation.h>
+#import "mjlog.h"
+#import "mt19937ar.h"
 #import <CommonCrypto/CommonDigest.h>
 #import <CoreFoundation/CoreFoundation.h>
+#import <Foundation/Foundation.h>
 #include <algorithm>
 #include <iostream>
 #include <unistd.h>
 #include <zlib.h>
-#import "mt19937ar.h"
-#import "mjlog.h"
 
 #define SHA512_DIGEST_SIZE CC_SHA512_DIGEST_LENGTH
 
-static const char *haiDisp[]={
-  "一","二","三","四","五","六","七","八","九",
-  "①","②","③","④","⑤","⑥","⑦","⑧","⑨",
-  "１","２","３","４","５","６","７","８","９",
-  "東","南","西","北","白","發","中"
-};
+static const char *haiDisp[] = {
+    "一", "二", "三", "四", "五", "六", "七", "八", "九", "①",  "②",  "③",
+    "④",  "⑤",  "⑥",  "⑦",  "⑧",  "⑨",  "１", "２", "３", "４", "５", "６",
+    "７", "８", "９", "東", "南", "西", "北", "白", "發", "中"};
 
 static bool verbose = false;
 
-template<typename T, size_t N>
-void printBlock(const T (&arr)[N]) {
+template <typename T, size_t N> void printBlock(const T (&arr)[N]) {
   for (size_t i = 0; i < N; ++i) {
     printf(" %08X", arr[i]);
     if ((i + 1) % 8 == 0)
@@ -31,13 +28,14 @@ void printBlock(const T (&arr)[N]) {
 
 void setup_seed(_MTRND &mt, char *bytes, NSString *data) {
   uint32_t seed[624];
-        
-  auto *d = [[NSData alloc] initWithBase64EncodedString:data
-             options:NSDataBase64DecodingIgnoreUnknownCharacters];
+
+  auto *d = [[NSData alloc]
+      initWithBase64EncodedString:data
+                          options:NSDataBase64DecodingIgnoreUnknownCharacters];
   [d getBytes:seed length:sizeof(seed)];
 
-  mt.init_by_array(seed,sizeof(seed)/sizeof(*seed));
-  for(int i=0;i<sizeof(seed)/sizeof(*seed);++i) {
+  mt.init_by_array(seed, sizeof(seed) / sizeof(*seed));
+  for (int i = 0; i < sizeof(seed) / sizeof(*seed); ++i) {
     snprintf(bytes + (i * 8), 9, "%08x", CFSwapInt32(seed[i]));
     // printf("%08x,", CFSwapInt32(seed[i]));
   }
@@ -48,21 +46,25 @@ void setup_seed(_MTRND &mt, char *bytes, NSString *data) {
   }
 }
 
-int checkMlogRounds(_MTRND &mt, MjLog *mlog){
-    int i;
+int checkMlogRounds(_MTRND &mt, MjLog *mlog) {
+  int i;
 
-    auto round = mlog.rounds;
-    for(int nKyoku=0;nKyoku<round;++nKyoku) @autoreleasepool {
-      uint32_t rnd[SHA512_DIGEST_SIZE/sizeof(uint32_t)*9]; // 135+2以上を確保
+  auto round = mlog.rounds;
+  for (int nKyoku = 0; nKyoku < round; ++nKyoku)
+    @autoreleasepool {
+      uint32_t
+          rnd[SHA512_DIGEST_SIZE / sizeof(uint32_t) * 9]; // 135+2以上を確保
       {
-        uint32_t src[sizeof(rnd)/sizeof(*rnd)*2]; // 1024bit単位で512bitへhash
-        for(i=0;i<sizeof(src)/sizeof(*src);++i) src[i]=mt.genrand_int32();
+        uint32_t
+            src[sizeof(rnd) / sizeof(*rnd) * 2]; // 1024bit単位で512bitへhash
+        for (i = 0; i < sizeof(src) / sizeof(*src); ++i)
+          src[i] = mt.genrand_int32();
         if (verbose) {
           std::cout << "src=" << std::endl;
           printBlock(src);
           std::cout << std::endl;
         }
-        for(i=0;i<sizeof(rnd)/SHA512_DIGEST_SIZE;++i){
+        for (i = 0; i < sizeof(rnd) / SHA512_DIGEST_SIZE; ++i) {
           CC_SHA512((unsigned char *)src + i * SHA512_DIGEST_SIZE * 2,
                     SHA512_DIGEST_SIZE * 2,
                     (unsigned char *)rnd + i * SHA512_DIGEST_SIZE);
@@ -77,22 +79,27 @@ int checkMlogRounds(_MTRND &mt, MjLog *mlog){
       unsigned char yama_arr[136]; // サンマは108
       unsigned char *yama = yama_arr;
       __block bool error = false;
-      for(i=0;i<136;++i) yama[i]=i;
-      for(i=0;i<136-1;++i) std::swap(yama[i],yama[i + (rnd[i]%(136-i))]); // 1/2^32以下の誤差は許容
+      for (i = 0; i < 136; ++i)
+        yama[i] = i;
+      for (i = 0; i < 136 - 1; ++i)
+        std::swap(yama[i],
+                  yama[i + (rnd[i] % (136 - i))]); // 1/2^32以下の誤差は許容
 
       std::cout << "nKyoku=" << nKyoku << " yama=" << std::endl;
-      for(i=0;i<136;++i) printf("%s",haiDisp[yama[i]/4]);
+      for (i = 0; i < 136; ++i)
+        printf("%s", haiDisp[yama[i] / 4]);
       std::cout << std::endl;
-      int dice1=rnd[135]%6;
-      int dice2=rnd[136]%6;
+      int dice1 = rnd[135] % 6;
+      int dice2 = rnd[136] % 6;
       // rnd[137]～rnd[143]は未使用
       if (verbose) {
-        for(i=0;i<136;++i) printf("%d,",yama[i]);
+        for (i = 0; i < 136; ++i)
+          printf("%d,", yama[i]);
         std::cout << std::endl;
       }
       std::cout << "dice0=" << dice1 << " dice1=" << dice2 << std::endl;
       error = false;
-      if (![mlog.dices[nKyoku] isEqualto: dice1 and: dice2]) {
+      if (![mlog.dices[nKyoku] isEqualto:dice1 and:dice2]) {
         error = true;
         NSLog(@"dice mismatch!");
       }
@@ -102,31 +109,34 @@ int checkMlogRounds(_MTRND &mt, MjLog *mlog){
       // Count kans: rinshan tiles occupy dead wall positions 0-3
       NSUInteger kangCount = 0;
       for (int ki = 0; ki < 4; ki++)
-        if (wall[@(ki)] != nil) kangCount++;
+        if (wall[@(ki)] != nil)
+          kangCount++;
       // After kangCount kans, live wall shrinks by kangCount from the bottom
       // (replenishment consumes yama[14..14+kangCount-1]).
       // Total drawable tiles = 122 - kangCount; hand must not exceed this.
       if (hand.count > 122 - kangCount) {
-        NSLog(@"Round %d: %lu draws exceed live wall capacity (%lu with %lu kans)",
+        NSLog(@"Round %d: %lu draws exceed live wall capacity (%lu with %lu "
+              @"kans)",
               nKyoku, hand.count, 122 - kangCount, kangCount);
         error = true;
       }
 
-      [hand enumerateObjectsUsingBlock:^(NSNumber *n, NSUInteger idx, BOOL *stop) {
-          if (n.intValue != yama[135-idx]) {
-            NSLog(@"Mismatched element at index %lu is %@", idx, n);
-            error = true;
-            *stop = YES;
-          }
-        }];
-      [wall enumerateKeysAndObjectsUsingBlock:
-       ^(NSNumber *i, NSNumber *n, BOOL *stop){
-          if (n.intValue != yama[i.unsignedIntValue]) {
-            NSLog(@"Mismatched deadtile at index %@ is %@", i, n);
-            error = true;
-            *stop = YES;
-          }
-        }];
+      [hand enumerateObjectsUsingBlock:^(NSNumber *n, NSUInteger idx,
+                                         BOOL *stop) {
+        if (n.intValue != yama[135 - idx]) {
+          NSLog(@"Mismatched element at index %lu is %@", idx, n);
+          error = true;
+          *stop = YES;
+        }
+      }];
+      [wall enumerateKeysAndObjectsUsingBlock:^(NSNumber *i, NSNumber *n,
+                                                BOOL *stop) {
+        if (n.intValue != yama[i.unsignedIntValue]) {
+          NSLog(@"Mismatched deadtile at index %@ is %@", i, n);
+          error = true;
+          *stop = YES;
+        }
+      }];
 
       // Cross-check AGARI doraHai against dead wall tiles recorded during play.
       // doraLists[nKyoku] is empty for ryuukyoku rounds (no AGARI element).
@@ -134,7 +144,8 @@ int checkMlogRounds(_MTRND &mt, MjLog *mlog){
       for (NSUInteger di = 0; di < doraList.count; di++) {
         NSNumber *expected = wall[@(5 + di * 2)];
         if (![doraList[di] isEqualToNumber:expected]) {
-          NSLog(@"Dora mismatch at position %lu: AGARI doraHai says %@, dead wall has %@",
+          NSLog(@"Dora mismatch at position %lu: AGARI doraHai says %@, dead "
+                @"wall has %@",
                 di, doraList[di], expected);
           error = true;
         }
@@ -145,9 +156,8 @@ int checkMlogRounds(_MTRND &mt, MjLog *mlog){
       else
         return 1;
     }
-    return 0;
+  return 0;
 }
-
 
 static NSData *decompressIfGzip(NSData *data) {
   auto bytes = (const uint8_t *)data.bytes;
@@ -179,19 +189,21 @@ static NSData *decompressIfGzip(NSData *data) {
   return result;
 }
 
-int main(int argc,  char * const argv[]) {
+int main(int argc, char *const argv[]) {
   const char *seat = NULL;
   bool hash = false;
   int opt;
   while ((opt = getopt(argc, argv, "vhs:")) != EOF) {
     switch (opt) {
     case 'v':
-      verbose = true; break;
+      verbose = true;
+      break;
     case 's':
       seat = optarg;
       [[fallthrough]];
     case 'h':
-      hash = true; break;
+      hash = true;
+      break;
     default:
       std::cerr << argv[0] << ": [-v] [-h] [-s value] mjlog" << std::endl;
       return EXIT_FAILURE;
@@ -237,7 +249,7 @@ int main(int argc,  char * const argv[]) {
 
     char source[5000];
     _MTRND mt;
-    
+
     setup_seed(mt, source + 4, mlog.seed);
     if (hash) {
       printf("shasum:\n");
@@ -249,21 +261,21 @@ int main(int argc,  char * const argv[]) {
       };
       if (seat != NULL) {
         strncpy(source, seat, 4);
-        CC_SHA512(source, 8*624+4, checksum);
+        CC_SHA512(source, 8 * 624 + 4, checksum);
         printHash();
       } else {
-          char p[] = "0123";
-          bool canInfer = [mlog computSeat:p];
-          if (!canInfer) {
-            printf("[Cannot infer seat.]\n");
-          }
-          do {
-            strncpy(source, p, 4);
-            printf("(%s) ", p);
-            CC_SHA512(source, 8*624+4, checksum);
-            printHash();
-          } while (!canInfer && std::next_permutation(p, p + 4));
+        char p[] = "0123";
+        bool canInfer = [mlog computSeat:p];
+        if (!canInfer) {
+          printf("[Cannot infer seat.]\n");
         }
+        do {
+          strncpy(source, p, 4);
+          printf("(%s) ", p);
+          CC_SHA512(source, 8 * 624 + 4, checksum);
+          printHash();
+        } while (!canInfer && std::next_permutation(p, p + 4));
+      }
     }
     return checkMlogRounds(mt, mlog);
   }
