@@ -32,14 +32,14 @@ Mjlog files from Tenhou are gzipped XML. The tool decompresses them automaticall
 
 The codebase is three Objective-C++ source files:
 
-- **`mt19937ar.mm`** / **`mt19937ar.h`**: Mersenne Twister PRNG (`_MTRND` class). Generates the raw random numbers used to shuffle tiles.
+- **`mt19937ar.cc`** / **`mt19937ar.h`**: Mersenne Twister PRNG (`_MTRND` class). Generates the raw random numbers used to shuffle tiles.
 
-- **`mjlog.mm`** / **`mjlog.h`**: XML log parser and data model.
+- **`mjlog.cc`** / **`mjlog.h`**: XML log parser and data model.
   - `MjLog`: read-only model holding parsed game data (seed string, dice rolls per round, drawn tiles per round, dead wall tiles).
   - `MjLogCtrl`: mutable subclass built by `MjLogParser` as it parses.
   - `MjLogParser` (`NSXMLParserDelegate`): walks the XML elements (`SHUFFLE`, `INIT`, `AGARI`/`RYUUKYOKU`, `DORA`, tile-draw elements `T`/`U`/`V`/`W`) to reconstruct the draw order and dead wall contents.
 
-- **`tenhou.mm`**: verification logic and `main`.
+- **`tenhou.cc`**: verification logic and `main`.
   - `setup_seed`: decodes the base64 seed from the log and initializes the MT PRNG.
   - `checkMlogRounds`: for each round, generates 137 random values, hashes them via SHA-512 (two 512-bit blocks → one shuffle array), performs a Fisher-Yates shuffle on 136 tiles, then compares dices and draw order against what the log recorded.
 
