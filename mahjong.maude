@@ -91,8 +91,80 @@ mod MAHJONG-WAIT is
     rl [tenpai-tanki]   : M1 M2 M3 M4 x => Wait(x) .
 endm
 
-mod MAHJONG-TEST is
+mod MAHJONG-SPECIAL is
     protecting MAHJONG-WAIT .
+
+    *** yaochuhai predicate (terminals + honours)
+    op is-yao : Tile -> Bool .
+    var T : Tile .
+    eq is-yao([M,1]) = true .   eq is-yao([M,9]) = true .
+    eq is-yao([P,1]) = true .   eq is-yao([P,9]) = true .
+    eq is-yao([S,1]) = true .   eq is-yao([S,9]) = true .
+    eq is-yao(east)  = true .   eq is-yao(south) = true .
+    eq is-yao(west)  = true .   eq is-yao(north) = true .
+    eq is-yao(haku)  = true .   eq is-yao(hatsu) = true .   eq is-yao(chun) = true .
+    eq is-yao(T)     = false [owise] .
+
+    *** ---- 七対子 (chiitoitsu) ----
+    sort Chiitoi .
+    subsort Chiitoi < Win .
+    op chiitoi : -> Chiitoi .
+
+    vars t1 t2 t3 t4 t5 t6 t7 : Tile .
+
+    op distinct7 : Tile Tile Tile Tile Tile Tile Tile -> Bool .
+    eq distinct7(t1, t2, t3, t4, t5, t6, t7) =
+            t1 =/= t2 and t1 =/= t3 and t1 =/= t4 and t1 =/= t5 and t1 =/= t6 and t1 =/= t7
+        and t2 =/= t3 and t2 =/= t4 and t2 =/= t5 and t2 =/= t6 and t2 =/= t7
+        and t3 =/= t4 and t3 =/= t5 and t3 =/= t6 and t3 =/= t7
+        and t4 =/= t5 and t4 =/= t6 and t4 =/= t7
+        and t5 =/= t6 and t5 =/= t7
+        and t6 =/= t7 .
+
+    crl [chiitoi-win] :
+        pair(t1) pair(t2) pair(t3) pair(t4) pair(t5) pair(t6) pair(t7) => chiitoi
+        if distinct7(t1, t2, t3, t4, t5, t6, t7) .
+
+    crl [chiitoi-wait] :
+        pair(t1) pair(t2) pair(t3) pair(t4) pair(t5) pair(t6) t7 => Wait(t7)
+        if distinct7(t1, t2, t3, t4, t5, t6, t7) .
+
+    *** ---- 国士無双 (kokushi musou) ----
+    sort Kokushi .
+    subsort Kokushi < Win .
+    op kokushi : -> Kokushi .
+
+    var z : Tile .
+    crl [kokushi-win] :
+        [M,1] [M,9] [P,1] [P,9] [S,1] [S,9]
+        east south west north haku hatsu chun z
+        => kokushi if is-yao(z) .
+
+    *** 13-tile tenpai with all 13 distinct (the 13-way wait)
+    rl [kokushi-13way] :
+        [M,1] [M,9] [P,1] [P,9] [S,1] [S,9]
+        east south west north haku hatsu chun
+        => Wait([M,1] [M,9] [P,1] [P,9] [S,1] [S,9]
+                east south west north haku hatsu chun) .
+
+    *** 13-tile tenpai with one yao paired — match directly: 12 specific + z (the duplicate)
+    crl [kokushi-tanki] : [M,9] [P,1] [P,9] [S,1] [S,9] east south west north haku hatsu chun z => Wait([M,1]) if is-yao(z) .
+    crl [kokushi-tanki] : [M,1] [P,1] [P,9] [S,1] [S,9] east south west north haku hatsu chun z => Wait([M,9]) if is-yao(z) .
+    crl [kokushi-tanki] : [M,1] [M,9] [P,9] [S,1] [S,9] east south west north haku hatsu chun z => Wait([P,1]) if is-yao(z) .
+    crl [kokushi-tanki] : [M,1] [M,9] [P,1] [S,1] [S,9] east south west north haku hatsu chun z => Wait([P,9]) if is-yao(z) .
+    crl [kokushi-tanki] : [M,1] [M,9] [P,1] [P,9] [S,9] east south west north haku hatsu chun z => Wait([S,1]) if is-yao(z) .
+    crl [kokushi-tanki] : [M,1] [M,9] [P,1] [P,9] [S,1] east south west north haku hatsu chun z => Wait([S,9]) if is-yao(z) .
+    crl [kokushi-tanki] : [M,1] [M,9] [P,1] [P,9] [S,1] [S,9] south west north haku hatsu chun z => Wait(east)  if is-yao(z) .
+    crl [kokushi-tanki] : [M,1] [M,9] [P,1] [P,9] [S,1] [S,9] east west north haku hatsu chun z => Wait(south) if is-yao(z) .
+    crl [kokushi-tanki] : [M,1] [M,9] [P,1] [P,9] [S,1] [S,9] east south north haku hatsu chun z => Wait(west)  if is-yao(z) .
+    crl [kokushi-tanki] : [M,1] [M,9] [P,1] [P,9] [S,1] [S,9] east south west haku hatsu chun z => Wait(north) if is-yao(z) .
+    crl [kokushi-tanki] : [M,1] [M,9] [P,1] [P,9] [S,1] [S,9] east south west north hatsu chun z => Wait(haku)  if is-yao(z) .
+    crl [kokushi-tanki] : [M,1] [M,9] [P,1] [P,9] [S,1] [S,9] east south west north haku chun z => Wait(hatsu) if is-yao(z) .
+    crl [kokushi-tanki] : [M,1] [M,9] [P,1] [P,9] [S,1] [S,9] east south west north haku hatsu z => Wait(chun)  if is-yao(z) .
+endm
+
+mod MAHJONG-TEST is
+    protecting MAHJONG-SPECIAL .
     vars x y z : Tile .
     var H : Hand .
 endm
