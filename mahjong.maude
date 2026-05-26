@@ -4,16 +4,16 @@ fmod MAHJONG is
     subsorts NTile ZTile < Tile < Hand .
     subsort  Num < Seq .
 
-    ops 1 2 3 4 5 6 7 8 9     : -> Num .
-    ops M P S                 : -> Color .
-    ops east south west north : -> Wind .
-    ops haku hatsu chun       : -> Dragon .
+    ops 1 2 3 4 5 6 7 8 9     : -> Num [ctor] .
+    ops M P S                 : -> Color [ctor] .
+    ops east south west north : -> Wind [ctor] .
+    ops haku hatsu chun       : -> Dragon [ctor] .
 
-    op [_,_] : Color Num -> NTile .
-    op __    : Hand Hand -> Hand [comm assoc] .
+    op [_,_] : Color Num -> NTile [ctor] .
+    op __    : Hand Hand -> Hand [ctor comm assoc] .
 
     *** shorthand: < 1 1 1 2 3 , M >  expands to  [M,1] [M,1] [M,1] [M,2] [M,3]
-    op __    : Seq Seq -> Seq [comm assoc] .
+    op __    : Seq Seq -> Seq [ctor comm assoc] .
     op <_,_> : Seq Color -> Hand .
 
     var c : Color .
@@ -57,14 +57,20 @@ mod MAHJONG-RULE is
     rl [win] : P M1 M2 M3 M4 => win(P, M1 ; M2 ; M3 ; M4) .
 endm
 
+view Tile from TRIV to MAHJONG is
+    sort Elt to Tile .
+endv
+
+
 mod MAHJONG-WAIT is
     protecting MAHJONG-RULE .
+    *** Rename the prelude SET's `_,_` to `_U_` so it doesn't collide with the
+    *** Tiles `_,_` operator inherited from MAHJONG-WAIT.
+    protecting SET{Tile} * (sort Set{Tile} to Tiles) .
 
-    sorts WaitHand Tiles .
+    sorts WaitHand .
     subsort WaitHand < Hand .
-    subsort Tile < Tiles .
     op Wait : Tiles -> WaitHand [ctor] .
-    op _,_ : Tiles Tiles -> Tiles [comm assoc] .
 
     var x : Tile .
     var y : Color .
@@ -72,12 +78,12 @@ mod MAHJONG-WAIT is
     rl [pwait] : x x => Wait(x) .
     rl [pen]   : [y,1] [y,2] => Wait([y,3]) .
     rl [pen]   : [y,8] [y,9] => Wait([y,7]) .
-    rl [ryan]  : [y,2] [y,3] => Wait([y,1], [y,4]) .
-    rl [ryan]  : [y,3] [y,4] => Wait([y,2], [y,5]) .
-    rl [ryan]  : [y,4] [y,5] => Wait([y,3], [y,6]) .
-    rl [ryan]  : [y,5] [y,6] => Wait([y,4], [y,7]) .
-    rl [ryan]  : [y,6] [y,7] => Wait([y,5], [y,8]) .
-    rl [ryan]  : [y,7] [y,8] => Wait([y,6], [y,9]) .
+    rl [ryan]  : [y,2] [y,3] => Wait(([y,1], [y,4])) .
+    rl [ryan]  : [y,3] [y,4] => Wait(([y,2], [y,5])) .
+    rl [ryan]  : [y,4] [y,5] => Wait(([y,3], [y,6])) .
+    rl [ryan]  : [y,5] [y,6] => Wait(([y,4], [y,7])) .
+    rl [ryan]  : [y,6] [y,7] => Wait(([y,5], [y,8])) .
+    rl [ryan]  : [y,7] [y,8] => Wait(([y,6], [y,9])) .
     rl [kan]   : [y,1] [y,3] => Wait([y,2]) .
     rl [kan]   : [y,2] [y,4] => Wait([y,3]) .
     rl [kan]   : [y,3] [y,5] => Wait([y,4]) .
@@ -112,43 +118,42 @@ mod MAHJONG-SPECIAL is
     subsort Chiitoi < Win .
     op chiitoi : -> Chiitoi .
 
-    vars t1 t2 t3 t4 t5 t6 t7 : Tile .
+    vars t1 t2 t3 t4 t5 t6 t7 t8 t9 t10 t11 t12 : Tile .
+    var tt : Tiles .
 
-    op distinct7 : Tile Tile Tile Tile Tile Tile Tile -> Bool .
-    eq distinct7(t1, t2, t3, t4, t5, t6, t7) =
-            t1 =/= t2 and t1 =/= t3 and t1 =/= t4 and t1 =/= t5 and t1 =/= t6 and t1 =/= t7
-        and t2 =/= t3 and t2 =/= t4 and t2 =/= t5 and t2 =/= t6 and t2 =/= t7
-        and t3 =/= t4 and t3 =/= t5 and t3 =/= t6 and t3 =/= t7
-        and t4 =/= t5 and t4 =/= t6 and t4 =/= t7
-        and t5 =/= t6 and t5 =/= t7
-        and t6 =/= t7 .
+    op distinct7 : Tiles -> Bool .
+    eq distinct7(tt) =
+        | tt | == 7 .
 
     crl [chiitoi-win] :
         pair(t1) pair(t2) pair(t3) pair(t4) pair(t5) pair(t6) pair(t7) => chiitoi
-        if distinct7(t1, t2, t3, t4, t5, t6, t7) .
+      if distinct7((t1, t2, t3, t4, t5, t6, t7)) .
 
     crl [chiitoi-wait] :
         pair(t1) pair(t2) pair(t3) pair(t4) pair(t5) pair(t6) t7 => Wait(t7)
-        if distinct7(t1, t2, t3, t4, t5, t6, t7) .
+      if distinct7((t1, t2, t3, t4, t5, t6, t7)) .
 
-    *** ---- 国士無双 (kokushi musou) ----
+      *** ---- 国士無双 (kokushi musou) ----
     sort Kokushi .
     subsort Kokushi < Win .
     op kokushi : -> Kokushi .
 
     var z : Tile .
+
     crl [kokushi-win] :
         [M,1] [M,9] [P,1] [P,9] [S,1] [S,9]
         east south west north haku hatsu chun z
-        => kokushi if is-yao(z) .
+      => kokushi if is-yao(z) .
 
-    *** 13-tile tenpai with all 13 distinct (the 13-way wait)
+      *** 13 distinct yao → the 13-way wait
     rl [kokushi-13way] :
         [M,1] [M,9] [P,1] [P,9] [S,1] [S,9]
         east south west north haku hatsu chun
-        => Wait([M,1], [M,9], [P,1], [P,9], [S,1], [S,9],
-                east, south, west, north, haku, hatsu, chun) .
+      => Wait(([M,1], [M,9], [P,1], [P,9], [S,1], [S,9],
+            east, south, west, north, haku, hatsu, chun)) .
 
+    *** Single rule replacing the 13 explicit tanki rules.
+    *** 13 yao tiles with exactly 12 distinct → tanki on the missing yao.
     *** 13-tile tenpai with one yao paired — match directly: 12 specific + z (the duplicate)
     crl [kokushi-tanki] : [M,9] [P,1] [P,9] [S,1] [S,9] east south west north haku hatsu chun z => Wait([M,1]) if is-yao(z) and z =/= [M,1] .
     crl [kokushi-tanki] : [M,1] [P,1] [P,9] [S,1] [S,9] east south west north haku hatsu chun z => Wait([M,9]) if is-yao(z) and z =/= [M,9] .
@@ -168,7 +173,6 @@ endm
 mod MAHJONG-TEST is
     protecting MAHJONG-SPECIAL .
     vars x y z : Tile .
-    var T : Tiles .
 endm
 
 *** Example queries (run after `in mahjong.maude`):
@@ -181,4 +185,4 @@ endm
 ***   show path <state-number> .
 ***
 *** Tenpai (listening) tiles for the pure nine-gates shape:
-***   search < 1 1 1 2 3 4 5 6 7 8 9 9 9 , M > =>* Wait(T) .
+***   search < 1 1 1 2 3 4 5 6 7 8 9 9 9 , M > =>* Wait(T:Tiles) .
