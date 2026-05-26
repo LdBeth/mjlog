@@ -60,9 +60,11 @@ endm
 mod MAHJONG-WAIT is
     protecting MAHJONG-RULE .
 
-    sort WaitHand .
+    sorts WaitHand Tiles .
     subsort WaitHand < Hand .
-    op Wait : Hand -> WaitHand .
+    subsort Tile < Tiles .
+    op Wait : Tiles -> WaitHand [ctor] .
+    op _,_ : Tiles Tiles -> Tiles [comm assoc] .
 
     var x : Tile .
     var y : Color .
@@ -70,12 +72,12 @@ mod MAHJONG-WAIT is
     rl [pwait] : x x => Wait(x) .
     rl [pen]   : [y,1] [y,2] => Wait([y,3]) .
     rl [pen]   : [y,8] [y,9] => Wait([y,7]) .
-    rl [ryan]  : [y,2] [y,3] => Wait([y,1] [y,4]) .
-    rl [ryan]  : [y,3] [y,4] => Wait([y,2] [y,5]) .
-    rl [ryan]  : [y,4] [y,5] => Wait([y,3] [y,6]) .
-    rl [ryan]  : [y,5] [y,6] => Wait([y,4] [y,7]) .
-    rl [ryan]  : [y,6] [y,7] => Wait([y,5] [y,8]) .
-    rl [ryan]  : [y,7] [y,8] => Wait([y,6] [y,9]) .
+    rl [ryan]  : [y,2] [y,3] => Wait([y,1], [y,4]) .
+    rl [ryan]  : [y,3] [y,4] => Wait([y,2], [y,5]) .
+    rl [ryan]  : [y,4] [y,5] => Wait([y,3], [y,6]) .
+    rl [ryan]  : [y,5] [y,6] => Wait([y,4], [y,7]) .
+    rl [ryan]  : [y,6] [y,7] => Wait([y,5], [y,8]) .
+    rl [ryan]  : [y,7] [y,8] => Wait([y,6], [y,9]) .
     rl [kan]   : [y,1] [y,3] => Wait([y,2]) .
     rl [kan]   : [y,2] [y,4] => Wait([y,3]) .
     rl [kan]   : [y,3] [y,5] => Wait([y,4]) .
@@ -144,29 +146,29 @@ mod MAHJONG-SPECIAL is
     rl [kokushi-13way] :
         [M,1] [M,9] [P,1] [P,9] [S,1] [S,9]
         east south west north haku hatsu chun
-        => Wait([M,1] [M,9] [P,1] [P,9] [S,1] [S,9]
-                east south west north haku hatsu chun) .
+        => Wait([M,1], [M,9], [P,1], [P,9], [S,1], [S,9],
+                east, south, west, north, haku, hatsu, chun) .
 
     *** 13-tile tenpai with one yao paired — match directly: 12 specific + z (the duplicate)
-    crl [kokushi-tanki] : [M,9] [P,1] [P,9] [S,1] [S,9] east south west north haku hatsu chun z => Wait([M,1]) if is-yao(z) .
-    crl [kokushi-tanki] : [M,1] [P,1] [P,9] [S,1] [S,9] east south west north haku hatsu chun z => Wait([M,9]) if is-yao(z) .
-    crl [kokushi-tanki] : [M,1] [M,9] [P,9] [S,1] [S,9] east south west north haku hatsu chun z => Wait([P,1]) if is-yao(z) .
-    crl [kokushi-tanki] : [M,1] [M,9] [P,1] [S,1] [S,9] east south west north haku hatsu chun z => Wait([P,9]) if is-yao(z) .
-    crl [kokushi-tanki] : [M,1] [M,9] [P,1] [P,9] [S,9] east south west north haku hatsu chun z => Wait([S,1]) if is-yao(z) .
-    crl [kokushi-tanki] : [M,1] [M,9] [P,1] [P,9] [S,1] east south west north haku hatsu chun z => Wait([S,9]) if is-yao(z) .
-    crl [kokushi-tanki] : [M,1] [M,9] [P,1] [P,9] [S,1] [S,9] south west north haku hatsu chun z => Wait(east)  if is-yao(z) .
-    crl [kokushi-tanki] : [M,1] [M,9] [P,1] [P,9] [S,1] [S,9] east west north haku hatsu chun z => Wait(south) if is-yao(z) .
-    crl [kokushi-tanki] : [M,1] [M,9] [P,1] [P,9] [S,1] [S,9] east south north haku hatsu chun z => Wait(west)  if is-yao(z) .
-    crl [kokushi-tanki] : [M,1] [M,9] [P,1] [P,9] [S,1] [S,9] east south west haku hatsu chun z => Wait(north) if is-yao(z) .
-    crl [kokushi-tanki] : [M,1] [M,9] [P,1] [P,9] [S,1] [S,9] east south west north hatsu chun z => Wait(haku)  if is-yao(z) .
-    crl [kokushi-tanki] : [M,1] [M,9] [P,1] [P,9] [S,1] [S,9] east south west north haku chun z => Wait(hatsu) if is-yao(z) .
-    crl [kokushi-tanki] : [M,1] [M,9] [P,1] [P,9] [S,1] [S,9] east south west north haku hatsu z => Wait(chun)  if is-yao(z) .
+    crl [kokushi-tanki] : [M,9] [P,1] [P,9] [S,1] [S,9] east south west north haku hatsu chun z => Wait([M,1]) if is-yao(z) and z =/= [M,1] .
+    crl [kokushi-tanki] : [M,1] [P,1] [P,9] [S,1] [S,9] east south west north haku hatsu chun z => Wait([M,9]) if is-yao(z) and z =/= [M,9] .
+    crl [kokushi-tanki] : [M,1] [M,9] [P,9] [S,1] [S,9] east south west north haku hatsu chun z => Wait([P,1]) if is-yao(z) and z =/= [P,1] .
+    crl [kokushi-tanki] : [M,1] [M,9] [P,1] [S,1] [S,9] east south west north haku hatsu chun z => Wait([P,9]) if is-yao(z) and z =/= [P,9] .
+    crl [kokushi-tanki] : [M,1] [M,9] [P,1] [P,9] [S,9] east south west north haku hatsu chun z => Wait([S,1]) if is-yao(z) and z =/= [S,1] .
+    crl [kokushi-tanki] : [M,1] [M,9] [P,1] [P,9] [S,1] east south west north haku hatsu chun z => Wait([S,9]) if is-yao(z) and z =/= [S,9] .
+    crl [kokushi-tanki] : [M,1] [M,9] [P,1] [P,9] [S,1] [S,9] south west north haku hatsu chun z => Wait(east)  if is-yao(z) and z =/= east .
+    crl [kokushi-tanki] : [M,1] [M,9] [P,1] [P,9] [S,1] [S,9] east west north haku hatsu chun z => Wait(south) if is-yao(z) and z =/= south .
+    crl [kokushi-tanki] : [M,1] [M,9] [P,1] [P,9] [S,1] [S,9] east south north haku hatsu chun z => Wait(west)  if is-yao(z) and z =/= west .
+    crl [kokushi-tanki] : [M,1] [M,9] [P,1] [P,9] [S,1] [S,9] east south west haku hatsu chun z => Wait(north) if is-yao(z) and z =/= north .
+    crl [kokushi-tanki] : [M,1] [M,9] [P,1] [P,9] [S,1] [S,9] east south west north hatsu chun z => Wait(haku)  if is-yao(z) and z =/= haku .
+    crl [kokushi-tanki] : [M,1] [M,9] [P,1] [P,9] [S,1] [S,9] east south west north haku chun z => Wait(hatsu) if is-yao(z) and z =/= hatsu .
+    crl [kokushi-tanki] : [M,1] [M,9] [P,1] [P,9] [S,1] [S,9] east south west north haku hatsu z => Wait(chun)  if is-yao(z) and z =/= chun .
 endm
 
 mod MAHJONG-TEST is
     protecting MAHJONG-SPECIAL .
     vars x y z : Tile .
-    var H : Hand .
+    var T : Tiles .
 endm
 
 *** Example queries (run after `in mahjong.maude`):
@@ -179,4 +181,4 @@ endm
 ***   show path <state-number> .
 ***
 *** Tenpai (listening) tiles for the pure nine-gates shape:
-***   search < 1 1 1 2 3 4 5 6 7 8 9 9 9 , M > =>* Wait(H) .
+***   search < 1 1 1 2 3 4 5 6 7 8 9 9 9 , M > =>* Wait(T) .
