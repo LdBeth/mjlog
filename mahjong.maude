@@ -1,28 +1,29 @@
 fmod MAHJONG is
-    sorts Num YNum Seq Color Wind Dragon ZTile YaoTile Tile Hand .
+    sorts Num RNum Seq Color Wind Dragon ZTile YaoTile Tile RTile NTile Hand .
     subsorts Wind Dragon < ZTile .
-    subsorts ZTile < YaoTile < Tile < Hand .
-    subsorts YNum < Num < Seq .
+    subsorts ZTile RTile < YaoTile < Tile < Hand .
+    subsorts RTile < NTile < Tile .
+    subsorts RNum < Num < Seq .
 
-    ops 1 9                   : -> YNum [ctor] .
+    ops 1 9                   : -> RNum [ctor] .
     ops 2 3 4 5 6 7 8         : -> Num [ctor] .
     ops M P S                 : -> Color [ctor] .
     ops east south west north : -> Wind [ctor] .
     ops haku hatsu chun       : -> Dragon [ctor] .
 
-    op [_,_] : Color YNum -> YaoTile [ctor] .
-    op [_,_] : Color Num -> Tile [ctor] .
+    op [_,_] : Color RNum -> RTile [ctor] .
+    op [_,_] : Color Num -> NTile [ctor] .
     op __    : Hand Hand -> Hand [ctor comm assoc] .
 
     *** shorthand: < 1 1 1 2 3 , M >  expands to  [M,1] [M,1] [M,1] [M,2] [M,3]
     op __    : Seq Seq -> Seq [ctor comm assoc] .
-    op <_,_> : Seq Color -> Hand .
+    op <_>_ : Seq Color -> Hand [prec 33 gather (& E)] .
 
     var c : Color .
     var s : Seq .
     var n : Num .
-    eq < n , c >   = [c, n] .
-    eq < n s , c > = [c, n] < s , c > .
+    eq < n > c   = [c, n] .
+    eq < n s > c = [c, n] < s > c .
 endfm
 
 mod MAHJONG-RULE is
@@ -113,8 +114,7 @@ mod MAHJONG-SPECIAL is
     var tt : Tiles .
 
     op distinct7 : Tiles -> Bool .
-    eq distinct7(tt) =
-        | tt | == 7 .
+    eq distinct7(tt) = | tt | == 7 .
 
     crl [chiitoi-win] :
         pair(t1) pair(t2) pair(t3) pair(t4) pair(t5) pair(t6) pair(t7) => chiitoi
@@ -168,11 +168,11 @@ endm
 *** Example queries (run after `in mahjong.maude`):
 ***
 *** Build a hand:
-***   red < 1 3 4 5 7 , P > < 3 3 2 1 , S > haku haku chun .
+***   red < 1 3 4 5 7 > P < 3 3 2 1 > S haku haku chun .
 ***
 *** Find a winning decomposition (W now matches the *sort* Win):
-***   search < 1 1 1 2 3 4 5 6 7 8 9 9 9 2 , M > =>* W:Win .
+***   search < 1 1 1 2 3 4 5 6 7 8 9 9 9 2 > M =>* W:Win .
 ***   show path <state-number> .
 ***
 *** Tenpai (listening) tiles for the pure nine-gates shape:
-***   search < 1 1 1 2 3 4 5 6 7 8 9 9 9 , M > =>* Wait(T:Tiles) .
+***   search < 1 1 1 2 3 4 5 6 7 8 9 9 9 > M =>* Wait(T:Tiles) .
