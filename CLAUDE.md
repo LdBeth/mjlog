@@ -43,6 +43,22 @@ The codebase is three Objective-C++ source files:
   - `setup_seed`: decodes the base64 seed from the log and initializes the MT PRNG.
   - `checkMlogRounds`: for each round, generates 137 random values, hashes them via SHA-512 (two 512-bit blocks → one shuffle array), performs a Fisher-Yates shuffle on 136 tiles, then compares dices and draw order against what the log recorded.
 
+## Maude Specification (`mahjong.maude`)
+
+A separate formal model (Maude, not C++) of mahjong hand classification —
+independent of the verifier. Defines tile/hand sorts and rewrite rules for
+winning decompositions, multi-tile waits (tenpai), chiitoitsu, and kokushi musou.
+Requires the `maude` binary (separate from the clang++ build).
+
+```sh
+maude mahjong.maude        # then run queries interactively
+```
+
+Hands use shorthand `< 1 1 1 2 3 > M` (→ five M tiles) and honors written
+directly (`haku haku chun`). Example queries are in the file footer:
+- `search < … > M =>* W:Win .`        — find a winning decomposition
+- `search < … > M =>* Wait(T:Tiles) .` — find listening (tenpai) tiles
+
 ## Patterns & Conventions
 
 - **NSString → std::cout**: Use `[nsstring UTF8String]` to convert NSString to C string for C++ output.
