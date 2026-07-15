@@ -1,0 +1,21 @@
+{
+  "name": "mjrender",
+  "version": "0.1.0",
+  "exports": "./src/cli.ts",
+  "tasks": {
+    "render": "deno run --allow-read src/cli.ts",
+    "check": "deno check src/*.ts",
+    "test": "deno test --allow-read"
+  },
+  "imports": {
+    "fast-xml-parser": "npm:fast-xml-parser@^4.5.0"
+  },
+  "compilerOptions": {
+    "strict": true,
+    "noImplicitOverride": true
+  },
+  "fmt": {
+    "lineWidth": 100,
+    "semiColons": true
+  }
+}

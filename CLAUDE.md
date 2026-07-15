@@ -43,6 +43,21 @@ The codebase is three Objective-C++ source files:
   - `setup_seed`: decodes the base64 seed from the log and initializes the MT PRNG.
   - `checkMlogRounds`: for each round, generates 137 random values, hashes them via SHA-512 (two 512-bit blocks → one shuffle array), performs a Fisher-Yates shuffle on 136 tiles, then compares dices and draw order against what the log recorded.
 
+## mjrender (`mjrender/`)
+
+A **separate Deno/TypeScript CLI** (not part of the C++ build) that renders a
+mjlog into an **LLM-ready Japanese commentary transcript**: full play-by-play
+with reconstructed hands, decoded calls, riichi, wins/scores, plus computed
+metrics (shanten / ukeire / waits / dora / danger) and `〔解説ポイント: …〕`
+commentary-insertion anchors an LLM fills in. Unlike the C++ verifier, it
+captures the whole gameplay narrative (discards, `N` melds, `REACH`, `AGARI`
+detail), not just the wall.
+
+Run: `cd mjrender && deno task render ../1.mjlog` (needs `deno`, no build step).
+Tests: `deno task test`. See `mjrender/README.md`. The reusable core is
+`src/core.ts` `render(path)`; a future MCP server (Phase 2) wraps it unchanged.
+Uses Deno, not Node/npm.
+
 ## Maude Specification (`mahjong.maude`)
 
 A separate formal model (Maude, not C++) of mahjong hand classification —
