@@ -55,7 +55,7 @@ function formatInstruction(): string {
     "・牌表記: 一〜九=萬子 / ①〜⑨=筒子 / １〜９=索子 / 東南西北白發中=字牌 / 赤=赤ドラ",
     "・場風=局名で決まる風（東n局→東、南n局→南）、配牌の(東家/南家/西家/北家)=各家の自風。役牌判断に用いる",
     "・「N巡」=巡目。親（東家）が山からツモるたび1巡進む卓全体共有のカウンタで、各巡の最初の打牌にのみ表示",
-    "・〔シャンテンN 受入X種Y枚 ドラZ〕=打牌後の手牌評価、〔テンパイ 待ち…〕=聴牌と待ち牌",
+    "・〔向聴N 受入X種Y枚 ドラZ〕=打牌後の手牌評価、〔聴牌 待ち…〕=聴牌と待ち牌",
     "・「ツモ切り」=引いた牌をそのまま捨て、「（リーチ後）」=リーチ後の強制ツモ切り",
     "・「嶺上ツモ」=カン後の嶺上牌ツモ、「＋新ドラ」=カンによる新ドラ表示（表示位置は実際のめくり順）",
     "・★=注目の局面 / ┗…手:=その時点の手牌",
@@ -151,9 +151,9 @@ function renderRound(g: Game, round: Round, opts: RenderOptions, out: string[]):
     const d = countDora(seat);
     if (info.shanten <= 0) {
       const waits = info.types.map((t) => typeGlyph(t)).join("");
-      return `〔テンパイ 待ち${waits || "?"} ドラ${d}〕`;
+      return `〔聴牌 待ち${waits || "?"} ドラ${d}〕`;
     }
-    return `〔シャンテン${info.shanten} 受入${info.kinds}種${info.count}枚 ドラ${d}〕`;
+    return `〔向聴${info.shanten} 受入${info.kinds}種${info.count}枚 ドラ${d}〕`;
   };
 
   const handLine = (seat: number, note = ""): string =>
@@ -268,9 +268,9 @@ function renderRound(g: Game, round: Round, opts: RenderOptions, out: string[]):
 
       // non-kan call (chi / pon): show the shanten advance from fixing the set
       const advanced = afterCall < beforeCall;
-      const afterTxt = afterCall <= 0 ? "テンパイ" : `${afterCall}`;
-      const delta = `シャンテン${beforeCall}→${afterTxt}`;
-      const shText = advanced ? delta : afterCall <= 0 ? "テンパイ" : `シャンテン${afterCall}`;
+      const afterTxt = afterCall <= 0 ? "聴牌" : `${afterCall}`;
+      const delta = `向聴${beforeCall}→${afterTxt}`;
+      const shText = advanced ? delta : afterCall <= 0 ? "聴牌" : `向聴${afterCall}`;
       out.push(`${meldHead}  〔${shText} ドラ${countDora(m.who)}〕${advanced ? " " + DISCARD_MARK : ""}`);
       if (advanced) out.push(handLine(m.who, `(${label}で${delta}前進)`));
       continue;
@@ -397,12 +397,12 @@ function renderRound(g: Game, round: Round, opts: RenderOptions, out: string[]):
       out.push(handLine(who, `待ち: ${waits}`));
       out.push(anchor(`${P(who)}のリーチ判断と待ちの良し悪し（打点・待ち枚数・巡目）`));
     } else if (isPush) {
-      const st = restShanten[who] <= 0 ? "テンパイ" : `シャンテン${restShanten[who]}`;
+      const st = restShanten[who] <= 0 ? "聴牌" : `向聴${restShanten[who]}`;
       const adv = advanced ? `・${tileGlyph(drawn, aka)}ツモで${before}→${after}前進` : "";
       out.push(handLine(who, `${danger!.level}(${dangerSeats}リーチ) 自分${st}${adv} ← 押し`));
       out.push(anchor(`${P(who)}の押し引き（自分の手牌価値 vs リーチの脅威）`));
     } else if (advanced) {
-      out.push(handLine(who, `(${tileGlyph(drawn, aka)}ツモでシャンテン${before}→${after})`));
+      out.push(handLine(who, `(${tileGlyph(drawn, aka)}ツモで向聴${before}→${after})`));
     } else if (showAll) {
       for (let s = 0; s < 4; s++) out.push(handLine(s));
     }
@@ -514,7 +514,7 @@ function renderRyuukyoku(
   const label = res.type ? (typeLabel[res.type] ?? res.type) : "荒牌平局";
   out.push(`◆流局（${label}）`);
   for (const th of res.tenpaiHands) {
-    out.push(`  ${P(th.who)} テンパイ: ${renderHand(th.hand, melds[th.who], aka)}`);
+    out.push(`  ${P(th.who)} 聴牌: ${renderHand(th.hand, melds[th.who], aka)}`);
   }
   if (res.sc.length) out.push(`  点棒: ${scoreDeltaLine(res.sc)}`);
   out.push(anchor("流局時の聴牌・ノーテンと点棒状況の評価"));
