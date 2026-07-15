@@ -34,6 +34,17 @@ function P(seat: number): string {
   return `P${seat}`;
 }
 
+// Tenhou rank (段位) is a 0-based index into this table, NOT the dan number.
+const DAN_NAMES = [
+  "新人", "９級", "８級", "７級", "６級", "５級", "４級", "３級", "２級", "１級",
+  "初段", "二段", "三段", "四段", "五段", "六段", "七段", "八段", "九段", "十段", "天鳳位",
+];
+
+function danName(dan: string): string {
+  const i = Number(dan);
+  return Number.isInteger(i) && i >= 0 && i < DAN_NAMES.length ? DAN_NAMES[i] : `段位${dan}`;
+}
+
 /** Self-describing preamble so any LLM receiving only the transcript knows how to read it. */
 function formatInstruction(): string {
   return [
@@ -42,8 +53,12 @@ function formatInstruction(): string {
     "〔解説ポイント: …〕 の各箇所を、その直前の局面・手牌をふまえた解説コメントに",
     "置き換えてください。それ以外の行は事実情報なので改変しないでください。",
     "・牌表記: 一〜九=萬子 / ①〜⑨=筒子 / １〜９=索子 / 東南西北白發中=字牌 / 赤=赤ドラ",
+    "・場風=局名で決まる風（東n局→東、南n局→南）、配牌の(東家/南家/西家/北家)=各家の自風。役牌判断に用いる",
+    "・「N巡」=巡目。親（東家）が山からツモるたび1巡進む卓全体共有のカウンタで、各巡の最初の打牌にのみ表示",
     "・〔シャンテンN 受入X種Y枚 ドラZ〕=打牌後の手牌評価、〔テンパイ 待ち…〕=聴牌と待ち牌",
-    "・「ツモ切り」=引いた牌をそのまま捨て / ★=注目の局面 / ┗…手:=その時点の手牌",
+    "・「ツモ切り」=引いた牌をそのまま捨て、「（リーチ後）」=リーチ後の強制ツモ切り",
+    "・「嶺上ツモ」=カン後の嶺上牌ツモ、「＋新ドラ」=カンによる新ドラ表示（表示位置は実際のめくり順）",
+    "・★=注目の局面 / ┗…手:=その時点の手牌",
     "・危険度低/中/高=リーチに対する放銃危険度の簡易目安、「← 押し」=脅威に対する押し",
     "",
   ].join("\n");
@@ -64,7 +79,7 @@ export function renderGame(game: Game, opts: RenderOptions): string {
   ].join(" / ");
   out.push(`Tenhou 牌譜  ver${g.version}  [${rw}]`);
   for (const p of g.players) {
-    out.push(`  ${P(p.seat)}: ${p.name}` + (p.dan ? `  (段位${p.dan}${p.rate ? ` R${p.rate}` : ""})` : ""));
+    out.push(`  ${P(p.seat)}: ${p.name}` + (p.dan ? `  (${danName(p.dan)}${p.rate ? ` R${p.rate}` : ""})` : ""));
   }
   out.push("=".repeat(48));
   out.push("");
@@ -81,6 +96,10 @@ export function renderGame(game: Game, opts: RenderOptions): string {
 function renderRound(g: Game, round: Round, opts: RenderOptions, out: string[]): void {
   const aka = g.rules.aka;
 
+  // Each player's seat wind (自風) is their offset from the dealer (東家=親, then
+  // 南西北 counterclockwise); it drives yakuhai value, so surface it at 配牌.
+  const seatWind = (seat: number) => WIND[(seat - round.dealer + 4) % 4];
+
   // --- per-round mutable state ---
   const hands: Tile[][] = round.startHands.map((h) => [...h]);
   const melds: Meld[][] = [[], [], [], []];
@@ -91,6 +110,13 @@ function renderRound(g: Game, round: Round, opts: RenderOptions, out: string[]):
   const safe: Array<Set<number>> = [new Set(), new Set(), new Set(), new Set()];
   const lastDraw = [-1, -1, -1, -1];
   const restShanten = [0, 0, 0, 0];
+  // 巡目 (turn number): a single table-wide counter. One 巡 = one full go-around,
+  // so it advances only when the dealer (親/東家) draws from the wall (rinshan
+  // excluded). Every player shares the same current 巡目. `shownJunme` tracks the
+  // last value printed so the `N巡` marker appears once per go-around (at the
+  // first discard after the bump), not on every line.
+  let junme = 0;
+  let shownJunme = 0;
 
   const bumpVisible = (id: Tile) => publicVisible[tileType(id)]++;
   indicators.forEach(bumpVisible);
@@ -145,7 +171,8 @@ function renderRound(g: Game, round: Round, opts: RenderOptions, out: string[]):
   out.push("◆配牌");
   for (let seat = 0; seat < 4; seat++) {
     restShanten[seat] = shanten(countsFromTiles(hands[seat]), 0, true);
-    out.push(`  ${P(seat)}: ${renderHand(hands[seat], [], aka)}  ${metricTag(seat)}`);
+    const swMark = `${seatWind(seat)}家${seat === round.dealer ? "・親" : ""}`;
+    out.push(`  ${P(seat)}(${swMark}): ${renderHand(hands[seat], [], aka)}  ${metricTag(seat)}`);
   }
   out.push(anchor("各家の配牌評価（手役の見込み・スピード・押し引きの構え）"));
   out.push("――");
@@ -156,6 +183,7 @@ function renderRound(g: Game, round: Round, opts: RenderOptions, out: string[]):
     const e = ev[i];
 
     if (e.t === "draw") {
+      if (!e.rinshan && e.who === round.dealer) junme++; // dealer's wall draw = new 巡
       hands[e.who].push(e.tile);
       lastDraw[e.who] = e.tile;
       const before = restShanten[e.who];
@@ -183,10 +211,68 @@ function renderRound(g: Game, round: Round, opts: RenderOptions, out: string[]):
 
     if (e.t === "call") {
       const m = e.meld;
-      applyMeld(m);
+      const beforeCall = restShanten[m.who];
+      applyMeld(m); // updates restShanten[m.who] to the post-call value
+      const afterCall = restShanten[m.who];
       const fromTxt = m.kind === "ankan" || m.kind === "nuki" ? "" : ` (${P(m.fromWho)}から)`;
       const label = meldVerb(m);
-      out.push(`${P(m.who)} ${label}${renderMeldTiles(m)}${fromTxt}`);
+      const meldHead = `${P(m.who)} ${label}${renderMeldTiles(m)}${fromTxt}`;
+      const isKan = m.kind === "ankan" || m.kind === "daiminkan" || m.kind === "shouminkan";
+
+      if (isKan) {
+        // Integrate the kan turn into one line: kan → (dora) → rinshan draw →
+        // (dora) → discard, keeping each new-dora reveal at its true stream
+        // position (ankan reveals before the draw; minkan after it, per the log).
+        const doraSeg = (ind: Tile) =>
+          `＋新ドラ${tileGlyph(ind, aka)}(→ドラ${typeGlyph(doraFromIndicatorType(tileType(ind)))})`;
+        const lead = [meldHead];
+        let j = i + 1;
+        let drawn = -1, rinshan = true, after = afterCall;
+        let handled = false;
+        while (j < ev.length) {
+          const n = ev[j];
+          if (n.t === "dora") {
+            indicators.push(n.indicator);
+            bumpVisible(n.indicator);
+            lead.push(doraSeg(n.indicator));
+            j++;
+            continue;
+          }
+          if (n.t === "draw" && n.who === m.who && drawn < 0) {
+            drawn = n.tile;
+            rinshan = n.rinshan;
+            hands[m.who].push(n.tile);
+            lastDraw[m.who] = n.tile;
+            after = restInfo(m.who).shanten;
+            lead.push(`嶺上ツモ ${tileGlyph(n.tile, aka)}`);
+            j++;
+            continue;
+          }
+          if (n.t === "discard" && n.who === m.who) {
+            i = j;
+            renderDiscard(
+              m.who, n.tile, n.tsumogiri, n.riichi, drawn, rinshan, after < afterCall, afterCall, after,
+              lead.join("  "),
+            );
+            handled = true;
+            break;
+          }
+          break; // rinshan-kaihou win or unexpected — let the outer loop handle it
+        }
+        if (!handled) {
+          out.push(lead.join("  ")); // no discard (e.g. 嶺上開花 tsumo); win renders next
+          i = j - 1;
+        }
+        continue;
+      }
+
+      // non-kan call (chi / pon): show the shanten advance from fixing the set
+      const advanced = afterCall < beforeCall;
+      const afterTxt = afterCall <= 0 ? "テンパイ" : `${afterCall}`;
+      const delta = `シャンテン${beforeCall}→${afterTxt}`;
+      const shText = advanced ? delta : afterCall <= 0 ? "テンパイ" : `シャンテン${afterCall}`;
+      out.push(`${meldHead}  〔${shText} ドラ${countDora(m.who)}〕${advanced ? " " + DISCARD_MARK : ""}`);
+      if (advanced) out.push(handLine(m.who, `(${label}で${delta}前進)`));
       continue;
     }
 
@@ -234,7 +320,11 @@ function renderRound(g: Game, round: Round, opts: RenderOptions, out: string[]):
     advanced: boolean,
     before: number,
     after: number,
+    lead?: string, // when set (kan turn), replaces the "P# ツモ X →" prefix
   ): void {
+    // Print the 巡 marker only when it just advanced (first discard of the go-around).
+    const jmMark = junme !== shownJunme ? `${junme}巡 ` : "";
+    shownJunme = junme;
     const threats: RiichiThreat[] = [];
     for (let s = 0; s < 4; s++) {
       if (s !== who && riichiActive[s]) threats.push({ seat: s, safeTypes: safe[s] });
@@ -261,11 +351,20 @@ function renderRound(g: Game, round: Round, opts: RenderOptions, out: string[]):
     // Tsumogiri (and not a riichi declaration): the hand is unchanged, so collapse
     // the redundant "ツモ X → 打 X" into "ツモ切り X" and drop the metric tag. No
     // advance is realized (the drawn tile is thrown), so only high danger stars it.
-    if (tsumogiri && !riichi) {
-      const note = danger && (danger.level === "危険度高" || danger.level === "危険度中")
+    // (Skipped inside an integrated kan turn, which keeps the explicit "→ 打 X".)
+    if (tsumogiri && !riichi && lead === undefined) {
+      // After riichi the discard is forced (hand locked), not a choice — mark it,
+      // and flag when the player is forced to pass a dora / red five.
+      const forced = riichiActive[who];
+      let state = "";
+      if (forced) {
+        const kind = isAka(tile) ? "・赤ドラ" : doraTypeList().includes(tileType(tile)) ? "・ドラ" : "";
+        state = `（リーチ後${kind}）`;
+      }
+      const note = !forced && danger && (danger.level === "危険度高" || danger.level === "危険度中")
         ? `  ${danger.level}(${danger.seats.map(P).join(",")}リーチ)`
         : "";
-      out.push(`${P(who)} ツモ切り ${tileGlyph(tile, aka)}${rin}${note}${highDanger ? " " + DISCARD_MARK : ""}`);
+      out.push(`${P(who)} ${jmMark}ツモ切り ${tileGlyph(tile, aka)}${rin}${state}${note}${highDanger ? " " + DISCARD_MARK : ""}`);
       if (showAll) for (let s = 0; s < 4; s++) out.push(handLine(s));
       return;
     }
@@ -280,10 +379,16 @@ function renderRound(g: Game, round: Round, opts: RenderOptions, out: string[]):
 
     // build the fact line (a chosen discard from hand)
     const star = advanced || riichi || highDanger || isPush ? " " + DISCARD_MARK : "";
-    const drawTxt = drawn >= 0 ? `ツモ ${tileGlyph(drawn, aka)}${rin} → ` : "";
-    const flagTxt = riichi ? "(リーチ宣言・横向き)" : "";
+    const flagTxt = riichi
+      ? `(${junme}巡目リーチ宣言・横向き)`
+      : tsumogiri
+      ? "(ツモ切り)"
+      : "";
+    const prefix = lead !== undefined
+      ? `${lead}  → `
+      : `${P(who)} ${jmMark}${drawn >= 0 ? `ツモ ${tileGlyph(drawn, aka)}${rin} → ` : ""}`;
     const inlineDanger = isDanger && !isPush ? `  ${danger!.level}(${dangerSeats}リーチ)` : "";
-    out.push(`${P(who)} ${drawTxt}打 ${tileGlyph(tile, aka)}${flagTxt}  ${metricTag(who)}${inlineDanger}${star}`);
+    out.push(`${prefix}打 ${tileGlyph(tile, aka)}${flagTxt}  ${metricTag(who)}${inlineDanger}${star}`);
 
     // reconstructed-hand displays at key beats
     if (riichi) {
