@@ -1,27 +1,38 @@
 # mjrender
 
-Render a Tenhou **mjlog** into an **LLM-ready Japanese commentary transcript** —
-a faithful play-by-play (reconstructed hands, calls, riichi, wins, scores)
-annotated with objective metrics (shanten / ukeire / waits / dora / danger) and
-explicit **commentary-insertion anchors**. The tool makes no API calls; an LLM
-reading the transcript writes the actual TV-style commentary at the marked slots.
+Render a Tenhou **mjlog** into an **LLM-ready Japanese commentary transcript**,
+and serve **recallable board snapshots** for any position in the game.
 
-This is the CLI phase. The core (`src/core.ts` → `render(path)`) is designed to
-be wrapped unchanged by a future MCP server.
+mjrender is a deterministic **game-state oracle** — it never calls an LLM.
+It has two consumption modes:
+
+1. **Transcript** (`render` / `render_game`): a lean, faithful play-by-play
+   (reconstructed hands, calls, riichi, wins, scores) annotated with objective
+   metrics (shanten / ukeire / waits / dora / danger) and explicit
+   **commentary anchors** `〔解説ポイント#N: 種別｜…〕`.
+2. **Snapshot recall** (`snapshot` / `get_snapshot`): the consuming LLM calls
+   *back into* mjrender — via MCP or the CLI — to see the full board (all four
+   rivers with tedashi/tsumogiri marks, melds, live scores + placements, riichi
+   states, dora, remaining wall, every concealed hand + metrics) at any anchor
+   `#N` or any explicit kyoku + junme. The transcript stays lean; state is
+   read, not reconstructed from 40 lines of deltas.
 
 ## Requirements
 
 [Deno](https://deno.land) 2.x (this repo uses `/usr/local/bin/deno`). No Node,
 no `npm install`, no build step — Deno runs the TypeScript directly and fetches
-the one npm dependency (`fast-xml-parser`) via an `npm:` specifier on first run.
+npm dependencies (`fast-xml-parser`; for the MCP server `@modelcontextprotocol/sdk`
++ `zod`) via `npm:` specifiers on first run.
 
-## Usage
+## CLI usage
 
 ```sh
 cd mjrender
-deno task render ../1.mjlog                 # gzipped or plain Xml, both work
-deno run --allow-read src/cli.ts ../1.xml   # equivalent
-deno run --allow-read src/cli.ts --hands=all ../1.xml   # show every hand every turn
+deno task render ../1.mjlog                    # full transcript (gzipped or plain XML)
+deno run --allow-read src/cli.ts kyoku S3 ../1.mjlog        # one round, self-contained
+deno run --allow-read src/cli.ts anchors ../1.mjlog         # list commentary anchors
+deno run --allow-read src/cli.ts snapshot --anchor 12 ../1.mjlog
+deno run --allow-read src/cli.ts snapshot --kyoku E1.2 --junme 8 ../1.mjlog
 ```
 
 Options:
@@ -29,46 +40,83 @@ Options:
 - `--hands key|all` — reconstructed-hand verbosity. `key` (default) shows a
   player's full hand only at flagged beats (advance / riichi / dangerous push /
   win / draw); `all` shows every player's hand after every discard.
+- `--snapshots inline` — embed the full board snapshot above every anchor, for
+  consumers without tool access (token-heavy; default is lean).
+- Kyoku selectors: `S3` / `東1` (wind + number), `E1.2` (= 東1局2本場, when a
+  kyoku repeats), or a 0-based round index like `6`.
 
 Other tasks: `deno task check` (typecheck), `deno task test`.
+
+## MCP server
+
+```sh
+deno task mcp        # stdio MCP server
+```
+
+Register with Claude Code:
+
+```sh
+claude mcp add mjrender -- deno run --allow-read /path/to/mjrender/src/mcp.ts
+```
+
+Tools (thin wrappers over `src/core.ts`):
+
+| tool | arguments | returns |
+|---|---|---|
+| `render_game` | `path`, `hands?`, `snapshots?` | full lean transcript |
+| `render_kyoku` | `path`, `kyoku`, … | one round, self-contained |
+| `list_anchors` | `path` | `#id kind kyoku junme seat topic` per line |
+| `get_snapshot` | `path`, `anchor` \| (`kyoku`, `junme`) | board snapshot block |
+
+Intended flow: the agent renders the transcript once, then while writing
+commentary at each `〔解説ポイント#N〕` recalls that anchor's exact board state
+with `get_snapshot` instead of re-deriving it from the fact lines.
 
 ## The commentary-anchor convention
 
 The transcript is plain Japanese text with three interleaved layers:
 
-1. **Fact lines** — e.g. `P1 ツモ ④ → 打 白  〔シャンテン1 受入5種14枚 ドラ0〕`.
+1. **Fact lines** — e.g. `P1 ツモ ④ → 打 白  〔向聴1 受入5種14枚 ドラ0〕`.
    The `〔…〕` tag carries computed metrics for the acting player after the play.
 2. **Reconstructed hands** — `┗ P1手: …` lines under a flagged beat, showing the
    exact concealed hand (+ melds) at that decision point. `★` marks the beat.
-3. **Commentary anchors** — `〔解説ポイント: …〕` lines. **Each of these is a slot
-   for the consuming LLM to replace with commentary prose**, using the facts and
-   the reconstructed hand shown directly above it.
+3. **Commentary anchors** — `〔解説ポイント#N: 種別｜…〕` lines. **Each is a slot
+   for the consuming LLM to replace with commentary prose.** `#N` is a stable
+   position id: `get_snapshot` (MCP) / `snapshot --anchor N` (CLI) reproduce the
+   exact board state the slot is about, and downstream tooling can merge
+   commentary back by id. 種別 says what the slot wants: 配牌評価 / リーチ判断 /
+   押し引き / 局総括 / 流局評価 / 終局総括.
 
 Anchors are placed after: the deal (配牌), every riichi declaration, any push of
 a flagged dangerous tile, and every win/draw (和了/流局), plus a final 終局 summary.
 
-Metrics vocabulary: `シャンテン` (shanten), `受入 X種Y枚` (ukeire kinds/tiles),
-`テンパイ 待ち…` (tenpai waits), `ドラN` (dora in hand), `危険度低/中/高` (a rough
+Metrics vocabulary: `向聴N` (shanten), `受入 X種Y枚` (ukeire kinds/tiles),
+`聴牌 待ち…` (tenpai waits), `ドラN` (dora in hand), `危険度低/中/高` (a rough
 genbutsu/suji danger heuristic — the LLM supplies real push/fold judgement).
 
 ## Module map
 
 ```
 src/
-  cli.ts     arg parsing → core.render → stdout
-  core.ts    render(path, opts): load → parse → renderGame   (MCP wraps this)
-  load.ts    read file + transparent gzip (DecompressionStream)
-  parse.ts   mjlog XML → faithful Game model (fast-xml-parser, order-preserving)
-  model.ts   domain types
-  tiles.ts   tile id↔type, Japanese notation, red-fives, dora successor
-  meld.ts    decode the packed <N m="…"> meld bitfield
-  yaku.ts    yaku / yakuman id → name tables
-  shanten.ts shanten (standard/chiitoi/kokushi) + ukeire engine
-  danger.ts  riichi discard danger heuristic (genbutsu / suji)
-  render.ts  replay events, reconstruct hands, emit the anchored transcript
+  cli.ts      subcommands (render/kyoku/anchors/snapshot) → core → stdout
+  mcp.ts      stdio MCP server (render_game/render_kyoku/list_anchors/get_snapshot)
+  core.ts     query API: loadGame, renderGame, renderKyoku, listAnchors, getSnapshot
+  load.ts     read file + transparent gzip (DecompressionStream)
+  parse.ts    mjlog XML → faithful Game model (fast-xml-parser, order-preserving)
+  model.ts    domain types (incl. Beat = one addressable commentary anchor)
+  state.ts    BoardState replay engine: rivers/melds/scores/wall/riichi + replayTo
+  beats.ts    beat enumeration (delegates to the annotated render — ids can't drift)
+  snapshot.ts render one BoardState as a self-sufficient board block
+  tiles.ts    tile id↔type, Japanese notation, red-fives, dora successor
+  meld.ts     decode the packed <N m="…"> meld bitfield
+  yaku.ts     yaku / yakuman id → name tables
+  shanten.ts  shanten (standard/chiitoi/kokushi) + ukeire engine
+  danger.ts   riichi discard danger heuristic (genbutsu / suji)
+  render.ts   replay via BoardState, emit the anchored transcript + beat list
 ```
 
 ## Scope
 
 4-player (yonma), log format `ver 2.3`. Sanma (3-player) is detected and
 rejected. Danger scoring is an explicitly-labelled heuristic, not a solver.
+mjrender itself makes no network or LLM calls.

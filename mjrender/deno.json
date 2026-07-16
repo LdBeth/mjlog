@@ -4,8 +4,9 @@
   "exports": "./src/cli.ts",
   "tasks": {
     "render": "deno run --allow-read src/cli.ts",
+    "mcp": "deno run --allow-read src/mcp.ts",
     "check": "deno check src/*.ts",
-    "test": "deno test --allow-read"
+    "test": "deno test --allow-read --allow-run=deno"
   },
   "imports": {
     "fast-xml-parser": "npm:fast-xml-parser@^4.5.0"
