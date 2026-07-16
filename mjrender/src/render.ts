@@ -358,6 +358,10 @@ function renderRound(g: Game, round: Round, opts: RenderOptions, out: string[]):
     const rin = rinshan ? "(嶺上)" : "";
     const highDanger = !!danger && danger.level === "危険度高";
     const showAll = opts.hands === "all";
+    // Letting a dora / red five leave the hand is a value decision worth flagging.
+    // (A red five outranks a plain dora tile in the note; a tile can be both.)
+    const doraKind = aka && isAka(tile) ? "赤ドラ" : doraTypeList().includes(tileType(tile)) ? "ドラ" : "";
+    const isDoraDiscard = doraKind !== "";
 
     // Tsumogiri (and not a riichi declaration): the hand is unchanged, so collapse
     // the redundant "ツモ X → 打 X" into just "X ▽" and drop the metric tag. No
@@ -369,13 +373,15 @@ function renderRound(g: Game, round: Round, opts: RenderOptions, out: string[]):
       const forced = riichiActive[who];
       let state = "";
       if (forced) {
-        const kind = isAka(tile) ? "・赤ドラ" : doraTypeList().includes(tileType(tile)) ? "・ドラ" : "";
-        state = `（リーチ後${kind}）`;
+        state = `（リーチ後${doraKind ? "・" + doraKind : ""}）`;
       }
       const note = !forced && danger && (danger.level === "危険度高" || danger.level === "危険度中")
         ? `  ${danger.level}(${danger.seats.map(P).join(",")}リーチ)`
         : "";
-      out.push(`${P(who)} ${jmMark}${tileGlyph(tile, aka)}${rin} ${TSUMOGIRI_MARK}${state}${note}${highDanger ? " " + DISCARD_MARK : ""}`);
+      // dora note only when the forced-riichi `state` isn't already spelling it out
+      const doraNote = !forced && isDoraDiscard ? `  ${doraKind}切り` : "";
+      const star = highDanger || isDoraDiscard ? " " + DISCARD_MARK : "";
+      out.push(`${P(who)} ${jmMark}${tileGlyph(tile, aka)}${rin} ${TSUMOGIRI_MARK}${state}${note}${doraNote}${star}`);
       if (showAll) for (let s = 0; s < 4; s++) out.push(handLine(s));
       return;
     }
@@ -389,14 +395,17 @@ function renderRound(g: Game, round: Round, opts: RenderOptions, out: string[]):
     const dangerSeats = isDanger ? danger!.seats.map(P).join(",") : "";
 
     // build the fact line (a chosen discard from hand)
-    const star = advanced || riichi || highDanger || isPush ? " " + DISCARD_MARK : "";
+    const star = advanced || riichi || highDanger || isPush || isDoraDiscard ? " " + DISCARD_MARK : "";
     const flagTxt = riichi ? `(${junme}巡目リーチ宣言・横向き)` : "";
     const tgMark = tsumogiri && !riichi ? ` ${TSUMOGIRI_MARK}` : "";
     const prefix = lead !== undefined
       ? `${lead}  → `
       : `${P(who)} ${jmMark}${drawn >= 0 ? `${tileGlyph(drawn, aka)}${rin} → ` : ""}`;
     const inlineDanger = isDanger && !isPush ? `  ${danger!.level}(${dangerSeats}リーチ)` : "";
-    out.push(`${prefix}${tileGlyph(tile, aka)}${flagTxt}${tgMark}  ${metricTag(who)}${inlineDanger}${star}`);
+    // a riichi declaration discarding a dora already reads as notable; skip the
+    // redundant tag there, but flag any other dora/aka discard inline.
+    const inlineDora = isDoraDiscard && !riichi ? `  ${doraKind}切り` : "";
+    out.push(`${prefix}${tileGlyph(tile, aka)}${flagTxt}${tgMark}  ${metricTag(who)}${inlineDanger}${inlineDora}${star}`);
 
     // reconstructed-hand displays at key beats
     if (riichi) {
