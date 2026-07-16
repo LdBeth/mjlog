@@ -60,6 +60,9 @@ export class BoardState {
   readonly doraTypeSet = new Set<number>();
   /** Live scores in units of 100 (riichi sticks debited as declared). */
   readonly scores: number[];
+  /** Riichi sticks actually placed this round (REACH step 2 — a declaration
+   *  whose tile is ronned never places its stick). */
+  sticksPlaced = 0;
   junme = 0;
   /** Live-wall tiles not yet drawn (each kan shifts one tile into the dead wall,
    *  so rinshan draws consume from this budget too). */
@@ -162,6 +165,7 @@ export class BoardState {
     // step 1 is the declaration (the flagged discard carries the state change);
     // step 2 places the 1000-point stick — the log's `ten` is authoritative.
     if (step === 2) {
+      this.sticksPlaced++;
       if (scores && scores.length === 4) {
         for (let s = 0; s < 4; s++) this.scores[s] = scores[s];
       } else {
@@ -257,14 +261,29 @@ export type RoundPosition = { eventIndex: number } | { junme: number };
 export function replayTo(game: Game, round: Round, pos: RoundPosition): BoardState {
   const st = new BoardState(game, round);
   const ev = round.events;
+  let stop = ev.length;
   for (let i = 0; i < ev.length; i++) {
     const e = ev[i];
-    if ("eventIndex" in pos && i > pos.eventIndex) break;
+    if ("eventIndex" in pos && i > pos.eventIndex) {
+      stop = i;
+      break;
+    }
     if (
       "junme" in pos && e.t === "draw" && !e.rinshan && e.who === round.dealer &&
       st.junme >= pos.junme
-    ) break;
+    ) {
+      stop = i;
+      break;
+    }
     st.applyEvent(e);
+  }
+  // Absorb trailing bookkeeping: a riichi discard's stick placement (REACH
+  // step 2) follows the discard event, and a position pointing at the discard
+  // should already see the 1000 debited (the stick is shown as 供託).
+  for (let i = stop; i < ev.length; i++) {
+    const e = ev[i];
+    if (e.t === "reach" && e.step === 2) st.applyEvent(e);
+    else break;
   }
   return st;
 }

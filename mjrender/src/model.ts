@@ -97,6 +97,10 @@ export interface Game {
 
 export interface RenderOptions {
   hands: "key" | "all"; // reconstructed-hand verbosity
+  /** "inline" embeds a full board snapshot above every anchor (for tool-less
+   *  consumption); default "none" keeps the transcript lean — the LLM recalls
+   *  positions via get_snapshot instead. */
+  snapshots?: "none" | "inline";
 }
 
 /** What a commentary anchor is asking the LLM to judge. */

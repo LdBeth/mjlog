@@ -16,6 +16,7 @@ import type {
   Tile,
 } from "./model.ts";
 import { assessDanger } from "./danger.ts";
+import { renderSnapshot } from "./snapshot.ts";
 import { BoardState, type RestInfo } from "./state.ts";
 import { countsFromTiles, shanten } from "./shanten.ts";
 import { limitName, yakuName } from "./yaku.ts";
@@ -98,6 +99,9 @@ function formatInstruction(): string {
 export interface RenderResult {
   text: string;
   beats: Beat[];
+  /** Text split by section, so one kyoku can be served self-contained:
+   *  header = format preamble + game/player block; rounds[i] = round i's lines. */
+  sections: { header: string; rounds: string[]; owari?: string };
 }
 
 export function renderGame(game: Game, opts: RenderOptions): string {
@@ -132,13 +136,18 @@ export function renderGameAnnotated(game: Game, opts: RenderOptions): RenderResu
   }
   out.push("=".repeat(48));
   out.push("");
+  const headerEnd = out.length;
 
   let lastJunme = 0;
+  const roundBounds: Array<[number, number]> = [];
   for (let r = 0; r < g.rounds.length; r++) {
+    const start = out.length;
     lastJunme = renderRound(g, g.rounds[r], r, opts, out, beats);
     out.push("");
+    roundBounds.push([start, out.length]);
   }
 
+  const owariStart = out.length;
   if (g.owari) {
     renderOwari(g, out, beats, {
       round: g.rounds.length - 1,
@@ -146,7 +155,15 @@ export function renderGameAnnotated(game: Game, opts: RenderOptions): RenderResu
       eventIndex: (g.rounds.at(-1)?.events.length ?? 0) - 1,
     });
   }
-  return { text: out.join("\n"), beats };
+  return {
+    text: out.join("\n"),
+    beats,
+    sections: {
+      header: out.slice(0, headerEnd).join("\n"),
+      rounds: roundBounds.map(([s, e]) => out.slice(s, e).join("\n")),
+      owari: g.owari ? out.slice(owariStart).join("\n") : undefined,
+    },
+  };
 }
 
 /** Renders one round; returns its final 巡目 (for the game-end beat's position). */
@@ -168,6 +185,10 @@ function renderRound(
   // `shownJunme` tracks the last 巡目 printed so the `N巡` marker appears once per
   // go-around (at the first discard after the bump), not on every line.
   let shownJunme = 0;
+  // Event index of a REACH step-2 already absorbed by renderDiscard (so the
+  // riichi anchor's state — and its inline snapshot — includes the placed
+  // stick, exactly like replayTo does); the main loop must skip it.
+  let absorbedReach = -1;
 
   const metricTag = (info: RestInfo, seat: number): string => {
     const d = st.countDora(seat);
@@ -195,6 +216,9 @@ function renderRound(
       topic,
     };
     beats.push(beat);
+    // st IS the replayTo(round, eventIndex) state at every anchor site, so the
+    // inline block matches what get_snapshot would serve for this beat.
+    if (opts.snapshots === "inline") out.push(renderSnapshot(g, round, st, `#${beat.id}`));
     out.push(anchorLine(beat.id, kind, topic));
   };
 
@@ -354,7 +378,7 @@ function renderRound(
     if (e.t === "reach") {
       // step 1 is the declaration; the flagged discard follows and is handled there.
       // step 2 places the stick — BoardState keeps the live scores current.
-      st.reach(e.who, e.step, e.scores);
+      if (i !== absorbedReach) st.reach(e.who, e.step, e.scores);
       continue;
     }
 
@@ -488,6 +512,11 @@ function renderRound(
 
     // reconstructed-hand displays at key beats
     if (riichi) {
+      const nxt = ev[eventIndex + 1];
+      if (nxt && nxt.t === "reach" && nxt.step === 2) {
+        st.reach(nxt.who, 2, nxt.scores);
+        absorbedReach = eventIndex + 1;
+      }
       const waits = info.types.map((t) => typeGlyph(t)).join("") || "?";
       out.push(handLine(who, `待ち: ${waits}`));
       pushAnchor(
