@@ -15,7 +15,7 @@ import type {
   RyuukyokuResult,
   Tile,
 } from "./model.ts";
-import { assessDanger } from "./danger.ts";
+import { assessDanger, type DangerAssessment } from "./danger.ts";
 import { overtakeNeeds, placements } from "./scoring.ts";
 import { renderSnapshot } from "./snapshot.ts";
 import { BoardState, type RestInfo } from "./state.ts";
@@ -91,7 +91,9 @@ function formatInstruction(): string {
     "・〔向聴N 受入X種Y枚 ドラZ〕=打牌後の手牌評価、〔聴牌 待ち…〕=聴牌と待ち牌",
     "・「嶺上ツモ」=カン後の嶺上牌ツモ、「＋新ドラ」=カンによる新ドラ表示（表示位置は実際のめくり順）",
     "・★=注目の局面（任意で一言解説を添えてよい／不要ならそのまま） / ┗…手:=その時点の手牌",
-    "・危険度低/中/高=リーチに対する放銃危険度の簡易目安（役牌＝場風/自風/三元は高めに評価）、「← 押し」=脅威に対する押し",
+    "・危険度低/中/高=リーチへの放銃危険度の目安。続く〔…〕が根拠: スジ/半スジ/無スジ、",
+    "  ノーチャンス/ワンチャンス=壁（両面待ちに必要な牌が残0/1枚）、生牌/場にn枚=見えている枚数、",
+    "  役牌（場風/自風/三元）/客風=字牌の種別。「← 押し」=脅威に対する押し",
     "・点況=局開始時の順位と1つ上の順位との点差（▲）、「残り最短N局」=連荘なしと仮定した残り局数",
     "・「逆転条件」=オーラス・延長戦でトップに立つ最低の和了（本場・供託込み。ロン=他家から/直撃=トップから/ツモ）",
     "",
@@ -471,10 +473,21 @@ function renderRound(
     const jmMark = st.junme !== shownJunme ? `${st.junme}巡 ` : "";
     shownJunme = st.junme;
     // Danger is assessed BEFORE the discard mutates state (the tile is judged
-    // against the rivers as the player saw them when choosing it).
+    // against the rivers as the player saw them when choosing it); the
+    // discarder's own concealed tiles feed the kabe/chance evidence.
     const danger = st.riichiActive[who]
       ? null
-      : assessDanger(tileType(tile), st.threats(who), st.publicVisible);
+      : assessDanger(
+        tileType(tile),
+        st.threats(who),
+        st.publicVisible,
+        countsFromTiles(st.hands[who]),
+      );
+    const evidence = (d: DangerAssessment): string =>
+      `〔${
+        d.details.map((t) => `P${t.seat}リーチ${st.riichiJunme[t.seat]}巡・${t.notes.join("・")}`)
+          .join("／")
+      }〕`;
 
     // apply discard to state
     if (!st.discard(who, tile, tsumogiri, riichi)) {
@@ -507,7 +520,7 @@ function renderRound(
         state = `（リーチ後${doraKind ? "・" + doraKind : ""}）`;
       }
       const note = !forced && danger && (danger.level === "危険度高" || danger.level === "危険度中")
-        ? `  ${danger.level}(${danger.seats.map(P).join(",")}リーチ)`
+        ? `  ${danger.level}${evidence(danger)}`
         : "";
       // dora note only when the forced-riichi `state` isn't already spelling it out
       const doraNote = !forced && isDoraDiscard ? `  ${doraKind}切り` : "";
@@ -527,7 +540,6 @@ function renderRound(
     const isDanger = !!danger && danger.seats.length > 0 &&
       (danger.level === "危険度高" || danger.level === "危険度中");
     const isPush = isDanger && st.restShanten[who] <= 1;
-    const dangerSeats = isDanger ? danger!.seats.map(P).join(",") : "";
 
     // build the fact line (a chosen discard from hand)
     const star = advanced || riichi || highDanger || isPush || isDoraDiscard
@@ -538,7 +550,7 @@ function renderRound(
     const prefix = lead !== undefined
       ? `${lead}  → `
       : `${P(who)} ${jmMark}${drawn >= 0 ? `${tileGlyph(drawn, aka)}${rin} → ` : ""}`;
-    const inlineDanger = isDanger && !isPush ? `  ${danger!.level}(${dangerSeats}リーチ)` : "";
+    const inlineDanger = isDanger && !isPush ? `  ${danger!.level}${evidence(danger!)}` : "";
     // a riichi declaration discarding a dora already reads as notable; skip the
     // redundant tag there, but flag any other dora/aka discard inline.
     const inlineDora = isDoraDiscard && !riichi ? `  ${doraKind}切り` : "";
@@ -566,7 +578,7 @@ function renderRound(
     } else if (isPush) {
       const stTxt = st.restShanten[who] <= 0 ? "聴牌" : `向聴${st.restShanten[who]}`;
       const adv = advanced ? `・${tileGlyph(drawn, aka)}ツモで${before}→${after}前進` : "";
-      out.push(handLine(who, `${danger!.level}(${dangerSeats}リーチ) 自分${stTxt}${adv} ← 押し`));
+      out.push(handLine(who, `${danger!.level}${evidence(danger!)} 自分${stTxt}${adv} ← 押し`));
       pushAnchor(
         "押し引き",
         `${P(who)}の押し引き（自分の手牌価値 vs リーチの脅威）`,

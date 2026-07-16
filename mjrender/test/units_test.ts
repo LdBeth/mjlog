@@ -90,6 +90,35 @@ Deno.test("danger: yakuhai honors read hotter than guest honors", () => {
   eq(level(31, seen(31, 0), [31]), "安全", "genbutsu = safe");
 });
 
+Deno.test("danger: evidence notes carry suji, kabe/chance, and live counts", () => {
+  const threat = (safe: number[] = []) => [
+    { seat: 1, safeTypes: new Set<number>(safe), valueHonors: new Set<number>([31]) },
+  ];
+  const notes = (type: number, visible: number[], safe: number[] = [], own?: number[]) =>
+    assessDanger(type, threat(safe), visible, own)!.details[0].notes;
+  const vis = (pairs: Array<[number, number]>) => {
+    const v = new Array<number>(34).fill(0);
+    for (const [t, n] of pairs) v[t] = n;
+    return v;
+  };
+
+  // 5m (type 4) with 2m and 8m safe = double suji
+  eq(notes(4, vis([]), [1, 7]), ["スジ", "生牌"], "full suji + fresh tile");
+  // 5m, all four 4m visible and three 6m visible: lower ryanmen dead, upper has
+  // one bridging copy left ⇒ ワンチャンス
+  eq(notes(4, vis([[3, 4], [5, 3]])), ["無スジ", "ワンチャンス", "生牌"], "one-chance via kabe");
+  // both bridging ranks dead on both sides ⇒ ノーチャンス
+  eq(notes(4, vis([[3, 4], [6, 4]])), ["無スジ", "ノーチャンス", "生牌"], "no-chance");
+  // the discarder's own tiles count toward the wall they can see
+  eq(
+    notes(4, vis([[3, 2], [6, 4]]), [], vis([[3, 2]])),
+    ["無スジ", "ノーチャンス", "生牌"],
+    "own hand completes the kabe",
+  );
+  // yakuhai honor: kind + live-count evidence
+  eq(notes(31, vis([[31, 1]])), ["役牌", "場に1枚"], "dragon with one out");
+});
+
 Deno.test("kan turn integrates into one line; ankan dora before rinshan draw", () => {
   // P0 holds four 東 (108-111). Sequence: draw 4m, ankan 東, new-dora reveal,
   // rinshan draw 5m, tsumogiri 5m. For ankan the dora is revealed BEFORE the
