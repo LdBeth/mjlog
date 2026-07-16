@@ -27,18 +27,17 @@ interface Node {
 const ATTR = "@_";
 
 function toNodes(children: unknown[]): Node[] {
-  const out: Node[] = [];
-  for (const child of children as Array<Record<string, unknown>>) {
+  return (children as Array<Record<string, unknown>>).flatMap((child) => {
     const tag = Object.keys(child).find((k) => k !== ":@");
-    if (!tag) continue;
+    if (!tag) return [];
     const rawAttrs = (child[":@"] ?? {}) as Record<string, string>;
-    const attrs: Record<string, string> = {};
-    for (const [k, v] of Object.entries(rawAttrs)) {
-      attrs[k.startsWith(ATTR) ? k.slice(ATTR.length) : k] = String(v);
-    }
-    out.push({ tag, attrs });
-  }
-  return out;
+    const attrs: Record<string, string> = Object.fromEntries(
+      Object.entries(rawAttrs).map(
+        ([k, v]) => [k.startsWith(ATTR) ? k.slice(ATTR.length) : k, String(v)],
+      ),
+    );
+    return [{ tag, attrs }];
+  });
 }
 
 function intList(s: string | undefined): number[] {
@@ -94,17 +93,18 @@ export function parseGame(xml: string): Game {
     const { tag, attrs } = node;
 
     // draw / discard tags carry the tile in the element name
+    const rest = tag.slice(1);
     const drawSeat = DRAW_SEAT[tag[0]];
-    if (drawSeat !== undefined && /^\d+$/.test(tag.slice(1))) {
-      const tile = Number(tag.slice(1));
+    if (drawSeat !== undefined && /^\d+$/.test(rest)) {
+      const tile = Number(rest);
       lastDraw[drawSeat] = tile;
       cur?.events.push({ t: "draw", who: drawSeat, tile, rinshan: rinshanPending });
       rinshanPending = false;
       continue;
     }
     const discardSeat = DISCARD_SEAT[tag[0]];
-    if (discardSeat !== undefined && /^\d+$/.test(tag.slice(1))) {
-      const tile = Number(tag.slice(1));
+    if (discardSeat !== undefined && /^\d+$/.test(rest)) {
+      const tile = Number(rest);
       const tsumogiri = tile === lastDraw[discardSeat];
       const riichi = reachDeclared[discardSeat];
       reachDeclared[discardSeat] = false;
@@ -214,11 +214,10 @@ function parseAgari(attrs: Record<string, string>): AgariResult {
 }
 
 function parseRyuukyoku(attrs: Record<string, string>): RyuukyokuResult {
-  const tenpaiHands: Array<{ who: number; hand: Tile[] }> = [];
-  for (let i = 0; i < 4; i++) {
-    const h = attrs[`hai${i}`];
-    if (h !== undefined) tenpaiHands.push({ who: i, hand: intList(h) as Tile[] });
-  }
+  const tenpaiHands = [0, 1, 2, 3].flatMap((who) => {
+    const h = attrs[`hai${who}`];
+    return h === undefined ? [] : [{ who, hand: intList(h) as Tile[] }];
+  });
   return { kind: "ryuukyoku", type: attrs.type, sc: intList(attrs.sc), tenpaiHands };
 }
 
