@@ -77,10 +77,7 @@ interface CommentArgs {
   comments: Array<{ anchor: number; text: string }>;
 }
 interface NoteArgs {
-  kyoku: string;
-  junme: number;
-  seat: number;
-  text: string;
+  notes: Array<{ kyoku: string; junme: number; seat: number; text: string }>;
 }
 interface WeaveArgs {
   out: string;
@@ -107,7 +104,7 @@ const KYOKU = z.string().describe(
   'Round selector: wind+number like "S3" / "東1" (optionally ".honba", e.g. "E1.2" when a kyoku repeats), or a 0-based round index like "6"',
 );
 
-const server = new McpServer({ name: "mjrender", version: "0.4.3" });
+const server = new McpServer({ name: "mjrender", version: "0.4.4" });
 
 server.registerTool(
   "mj_open_log",
@@ -227,8 +224,9 @@ server.registerTool(
   {
     description:
       "Save commentary for one or MORE anchors into the session draft — batch several per call " +
-      "(e.g. a finished kyoku's worth) to conserve tool calls; saving an anchor again replaces " +
-      "it. Fill anchors in any order; nothing is written to disk until mj_weave_commentary. The " +
+      "(e.g. a finished kyoku's worth, max 10) to conserve tool calls; saving an anchor again " +
+      "replaces it. Fill anchors in any order; nothing is written to disk until " +
+      "mj_weave_commentary. The " +
       "batch is atomic (one bad entry saves nothing). Returns draft progress and which anchors " +
       "are still unfilled. ★-marked lines you meet in kyoku renders can optionally get a " +
       "one-liner via mj_add_note.",
@@ -238,7 +236,7 @@ server.registerTool(
         text: z.string().min(1).describe(
           "Commentary for this anchor (plain text, may be multiline)",
         ),
-      })).min(1).describe("Anchor comments to save, one entry per anchor"),
+      })).min(1).max(10).describe("Anchor comments to save, one entry per anchor (max 10)"),
     },
   },
   ({ comments }: CommentArgs) =>
@@ -277,36 +275,50 @@ server.registerTool(
   "mj_add_note",
   {
     description:
-      "Save an optional one-liner for a ★-marked line (notable discard/call) into the session " +
-      "draft, addressed by kyoku + junme + seat. One ★ site per call; calling again for the same " +
-      "site replaces it. If the seat has several ★ lines in one go-around (e.g. call then " +
-      "discard), the note lands after the last one.",
+      "Save optional one-liners for ★-marked lines (notable discards/calls) into the session " +
+      "draft, addressed by kyoku + junme + seat — one entry per ★ site, batched up to 10 per " +
+      "call; saving the same site again replaces it. The batch is atomic (one bad entry saves " +
+      "nothing). If the seat has several ★ lines in one go-around (e.g. call then discard), the " +
+      "note lands after the last one.",
     inputSchema: {
-      kyoku: KYOKU,
-      junme: z.number().int().nonnegative().describe("Go-around number of the ★ line"),
-      seat: z.number().int().min(0).max(3).describe("Acting seat 0-3 (P0-P3)"),
-      text: z.string().min(1).describe("Short one-liner for that ★ moment"),
+      notes: z.array(z.object({
+        kyoku: KYOKU,
+        junme: z.number().int().nonnegative().describe("Go-around number of the ★ line"),
+        seat: z.number().int().min(0).max(3).describe("Acting seat 0-3 (P0-P3)"),
+        text: z.string().min(1).describe("Short one-liner for that ★ moment"),
+      })).min(1).max(10).describe("★-line notes to save, one entry per ★ site (max 10)"),
     },
   },
-  ({ kyoku, junme, seat, text }: NoteArgs) =>
+  ({ notes }: NoteArgs) =>
     run(() => {
       const s = current();
-      const t = text.trim();
-      if (!t) throw new Error(`empty ★ note for ${kyoku} ${junme}巡 P${seat}`);
-      const round = uniqueRound(s.game, kyoku);
-      const sites = listStarSites(s.game).filter((x) => x.round === round);
-      if (!sites.some((x) => x.junme === junme && x.seat === seat)) {
-        const here = sites.map((x) => `${x.junme}巡P${x.seat}`).join(" ");
-        throw new Error(
-          `no ★ line for P${seat} at ${roundLabel(s.game, round)} ${junme}巡` +
-            (here ? ` — ★ sites in this kyoku: ${here}` : " — this kyoku has no ★ lines"),
-        );
+      const sites = listStarSites(s.game);
+      // validate the whole batch before touching the draft
+      const staged: Array<{ key: string; note: StarNote; label: string }> = [];
+      const seen = new Set<string>();
+      for (const n of notes) {
+        const t = n.text.trim();
+        if (!t) throw new Error(`empty ★ note for ${n.kyoku} ${n.junme}巡 P${n.seat}`);
+        const round = uniqueRound(s.game, n.kyoku);
+        const label = `${roundLabel(s.game, round)} ${n.junme}巡 P${n.seat}`;
+        const here = sites.filter((x) => x.round === round);
+        if (!here.some((x) => x.junme === n.junme && x.seat === n.seat)) {
+          const list = here.map((x) => `${x.junme}巡P${x.seat}`).join(" ");
+          throw new Error(
+            `no ★ line for P${n.seat} at ${roundLabel(s.game, round)} ${n.junme}巡` +
+              (list ? ` — ★ sites in this kyoku: ${list}` : " — this kyoku has no ★ lines"),
+          );
+        }
+        const key = `${round}:${n.junme}:${n.seat}`;
+        if (seen.has(key)) throw new Error(`duplicate ★ note in this batch: ${label}`);
+        seen.add(key);
+        staged.push({ key, note: { kyoku: String(round), junme: n.junme, seat: n.seat, text: t }, label });
       }
-      const key = `${round}:${junme}:${seat}`;
-      const replaced = s.notes.has(key);
-      s.notes.set(key, { kyoku: String(round), junme, seat, text: t });
-      return `★ note ${replaced ? "replaced" : "saved"} for ` +
-        `${roundLabel(s.game, round)} ${junme}巡 P${seat} — ${s.notes.size} note(s) in draft`;
+      const replaced = staged.filter((x) => s.notes.has(x.key)).map((x) => x.label);
+      for (const x of staged) s.notes.set(x.key, x.note);
+      return `★ note saved: ${staged.map((x) => x.label).join(" / ")}` +
+        `${replaced.length ? ` (replaced: ${replaced.join(" / ")})` : ""} — ` +
+        `${s.notes.size} note(s) in draft`;
     }),
 );
 

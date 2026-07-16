@@ -204,6 +204,40 @@ Deno.test("mcp: stateful open_log → snapshot → add_comment → weave end-to-
         },
       });
       if (!badAdd.isError) throw new Error("expected isError for out-of-range anchor");
+      // batches are capped at 10 entries (schema-level rejection, nothing saved)
+      let oversizedRejected = false;
+      try {
+        const big = Array.from({ length: 11 }, (_, k) => ({ anchor: k + 1, text: "多すぎ。" }));
+        const r = await c.request(20, "tools/call", {
+          name: "mj_add_comment",
+          arguments: { comments: big },
+        });
+        oversizedRejected = !!r.isError;
+      } catch {
+        oversizedRejected = true; // schema violations may surface as JSON-RPC errors
+      }
+      if (!oversizedRejected) throw new Error("expected an 11-entry batch to be rejected");
+
+      // ★ notes batch the same way; a riichi declaration is always a ★ site
+      const noted = await c.request(21, "tools/call", {
+        name: "mj_add_note",
+        arguments: {
+          notes: [{
+            kyoku: String(decls[0].roundIndex),
+            junme: decls[0].junme,
+            seat: decls[0].seat,
+            text: "リーチ一言。",
+          }],
+        },
+      });
+      if (noted.isError || !noted.content[0].text.includes("1 note")) {
+        throw new Error(`unexpected add_note reply: ${noted.content[0].text}`);
+      }
+      const badNote = await c.request(22, "tools/call", {
+        name: "mj_add_note",
+        arguments: { notes: [{ kyoku: "0", junme: 99, seat: 0, text: "場所なし。" }] },
+      });
+      if (!badNote.isError) throw new Error("expected isError for a non-★ position");
 
       const status = await c.request(12, "tools/call", {
         name: "mj_draft_status",

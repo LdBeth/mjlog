@@ -107,8 +107,8 @@ anchor at a time. Tools (thin wrappers over `src/core.ts`):
 | `mj_render_kyoku`            | `kyoku`, `hands?`, `snapshots?`  | one round, self-contained, full per-turn detail       |
 | `mj_list_anchors`            |                                  | `#id kind kyoku junme seat topic` per line            |
 | `mj_get_snapshot`            | `anchor` \| (`kyoku`, `junme`)   | board snapshot block                                  |
-| `mj_add_comment`             | `comments[{anchor,text}]`        | saves anchor comments into the draft (batch, atomic)  |
-| `mj_add_note`                | `kyoku`, `junme`, `seat`, `text` | saves a ★-line one-liner into the draft               |
+| `mj_add_comment`             | `comments[{anchor,text}]`        | saves anchor comments into the draft (batch ≤10, atomic) |
+| `mj_add_note`                | `notes[{kyoku,junme,seat,text}]` | saves ★-line one-liners into the draft (batch ≤10, atomic) |
 | `mj_draft_status`            |                                  | checklist: ✓/・ per anchor, plus saved ★ notes        |
 | `mj_weave_commentary`        | `out`, `missing?`, `hands?`      | writes the woven draft to `out`; returns summary only |
 | `mj_get_kyoku_start`         | `kyoku`                          | JSON: dealer/honba/kyotaku/dora, scores + placements  |

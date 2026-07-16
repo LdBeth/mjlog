@@ -59,8 +59,8 @@ const OUTLINE_NOTE = `■アウトライン表示（この出力について）
   mj_get_snapshot で盤面を確認すること（盤面確認なしで評価しない）
 ・解説は mj_add_comment で保存し（1呼び出しで複数アンカーまとめて可）、最後に
   mj_weave_commentary で完成稿を書き出す
-・局の出力中の★行（注目の打牌・鳴き）には、mj_add_note（局+巡目+席で指定）で任意の一言を
-  1件ずつ添えられる
+・局の出力中の★行（注目の打牌・鳴き）には、mj_add_note（局+巡目+席で指定、1呼び出しで
+  最大10件）で任意の一言を添えられる
 `;
 
 // Outline keeps: kyoku header, 点況/逆転条件, and the condensed result block
