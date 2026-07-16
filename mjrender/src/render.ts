@@ -1,5 +1,8 @@
 // Replay a parsed Game and emit an LLM-ready Japanese commentary transcript:
 // facts + reconstructed hands at key beats + 〔解説ポイント〕 commentary anchors.
+//
+// All game-state tracking lives in BoardState (state.ts); this module is the
+// formatter that steps the state event-by-event and renders what it sees.
 
 import type {
   AgariResult,
@@ -10,9 +13,9 @@ import type {
   RyuukyokuResult,
   Tile,
 } from "./model.ts";
-import { assessDanger, type RiichiThreat } from "./danger.ts";
-import { concealedTilesUsed } from "./meld.ts";
-import { countsFromTiles, shanten, ukeireTypes } from "./shanten.ts";
+import { assessDanger } from "./danger.ts";
+import { BoardState, type RestInfo } from "./state.ts";
+import { countsFromTiles, shanten } from "./shanten.ts";
 import { limitName, yakuName } from "./yaku.ts";
 import {
   doraFromIndicatorType,
@@ -120,82 +123,18 @@ export function renderGame(game: Game, opts: RenderOptions): string {
 
 function renderRound(g: Game, round: Round, opts: RenderOptions, out: string[]): void {
   const aka = g.rules.aka;
+  const st = new BoardState(g, round);
 
   // Each player's seat wind (自風) is their offset from the dealer (東家=親, then
   // 南西北 counterclockwise); it drives yakuhai value, so surface it at 配牌.
   const seatWind = (seat: number) => WIND[(seat - round.dealer + 4) % 4];
-  // Same winds as tile *types* (東=27..北=30) plus the three dragons (31..33):
-  // the yakuhai for a given seat, used to raise discard danger against its riichi.
-  const roundWindType = 27 + (Math.floor(round.kyoku / 4) % 4);
-  const seatWindType = (seat: number) => 27 + ((seat - round.dealer + 4) % 4);
-  // A seat's yakuhai honors are a pure function of seat over {0,1,2,3} within a
-  // round, so build the (read-only) sets once instead of per riichi per discard.
-  const valueHonorsBySeat = [0, 1, 2, 3].map((s) =>
-    new Set<number>([roundWindType, seatWindType(s), 31, 32, 33])
-  );
 
-  // --- per-round mutable state ---
-  const hands: Tile[][] = round.startHands.map((h) => [...h]);
-  const melds: Meld[][] = [[], [], [], []];
-  const discardTypes: Array<Set<number>> = [new Set(), new Set(), new Set(), new Set()];
-  const publicVisible = new Array<number>(34).fill(0);
-  const indicators: Tile[] = [round.firstDora];
-  const riichiActive = [false, false, false, false];
-  const safe: Array<Set<number>> = [new Set(), new Set(), new Set(), new Set()];
-  const lastDraw = [-1, -1, -1, -1];
-  const restShanten = [0, 0, 0, 0];
-  // 巡目 (turn number): a single table-wide counter. One 巡 = one full go-around,
-  // so it advances only when the dealer (親/東家) draws from the wall (rinshan
-  // excluded). Every player shares the same current 巡目. `shownJunme` tracks the
-  // last value printed so the `N巡` marker appears once per go-around (at the
-  // first discard after the bump), not on every line.
-  let junme = 0;
+  // `shownJunme` tracks the last 巡目 printed so the `N巡` marker appears once per
+  // go-around (at the first discard after the bump), not on every line.
   let shownJunme = 0;
 
-  const bumpVisible = (id: Tile) => publicVisible[tileType(id)]++;
-
-  // Derived dora state, kept in sync at the indicator-reveal sites (init + kan +
-  // DORA event) so it never has to be re-mapped per query. `doraCount` preserves
-  // an indicator's multiplicity (duplicate indicators stack — a Set would drop
-  // that), which countDora needs; `doraTypeSet` is the membership set for the
-  // "is this discarded tile a dora?" test.
-  const doraCount = new Int8Array(34);
-  const doraTypeSet = new Set<number>();
-  const addDora = (id: Tile) => {
-    const dt = doraFromIndicatorType(tileType(id));
-    doraCount[dt]++;
-    doraTypeSet.add(dt);
-  };
-  indicators.forEach((id) => {
-    bumpVisible(id);
-    addDora(id);
-  });
-
-  const countDora = (seat: number): number => {
-    let n = 0;
-    const tally = (id: Tile) => {
-      n += doraCount[tileType(id)];
-      if (aka && isAka(id)) n++;
-    };
-    for (const id of hands[seat]) tally(id);
-    for (const m of melds[seat]) for (const id of m.tiles) tally(id);
-    return n;
-  };
-
-  // resting (3n+1) hand analysis for a seat
-  const restInfo = (seat: number) => {
-    const counts = countsFromTiles(hands[seat]);
-    const open = melds[seat].length;
-    const closed = open === 0;
-    const s = shanten(counts, open, closed);
-    const types = ukeireTypes(counts, open, closed);
-    let total = 0;
-    for (const t of types) total += Math.max(0, 4 - publicVisible[t] - counts[t]);
-    return { shanten: s, kinds: types.length, count: total, types };
-  };
-
-  const metricTag = (info: ReturnType<typeof restInfo>, seat: number): string => {
-    const d = countDora(seat);
+  const metricTag = (info: RestInfo, seat: number): string => {
+    const d = st.countDora(seat);
     if (info.shanten <= 0) {
       const waits = info.types.map((t) => typeGlyph(t)).join("");
       return `〔聴牌 待ち${waits || "?"} ドラ${d}〕`;
@@ -204,7 +143,7 @@ function renderRound(g: Game, round: Round, opts: RenderOptions, out: string[]):
   };
 
   const handLine = (seat: number, note = ""): string =>
-    `  ┗ ${P(seat)}手: ${renderHand(hands[seat], melds[seat], aka)}${note ? "  " + note : ""}`;
+    `  ┗ ${P(seat)}手: ${renderHand(st.hands[seat], st.melds[seat], aka)}${note ? "  " + note : ""}`;
 
   // --- header ---
   const indGlyph = tileGlyph(round.firstDora, aka);
@@ -221,11 +160,11 @@ function renderRound(g: Game, round: Round, opts: RenderOptions, out: string[]):
   // --- 配牌 (all four starting hands) ---
   out.push("◆配牌");
   for (let seat = 0; seat < 4; seat++) {
-    const info = restInfo(seat);
-    restShanten[seat] = info.shanten;
+    const info = st.restInfo(seat);
+    st.restShanten[seat] = info.shanten;
     const swMark = `${seatWind(seat)}家${seat === round.dealer ? "・親" : ""}`;
     out.push(
-      `  ${P(seat)}(${swMark}): ${renderHand(hands[seat], [], aka)}  ${metricTag(info, seat)}`,
+      `  ${P(seat)}(${swMark}): ${renderHand(st.hands[seat], [], aka)}  ${metricTag(info, seat)}`,
     );
   }
   out.push(anchor("各家の配牌評価（手役の見込み・スピード・押し引きの構え）"));
@@ -237,12 +176,10 @@ function renderRound(g: Game, round: Round, opts: RenderOptions, out: string[]):
     const e = ev[i];
 
     if (e.t === "draw") {
-      if (!e.rinshan && e.who === round.dealer) junme++; // dealer's wall draw = new 巡
-      hands[e.who].push(e.tile);
-      lastDraw[e.who] = e.tile;
-      const before = restShanten[e.who];
-      const open = melds[e.who].length;
-      const after = shanten(countsFromTiles(hands[e.who]), open, open === 0);
+      const before = st.restShanten[e.who];
+      st.draw(e.who, e.tile, e.rinshan);
+      const open = st.melds[e.who].length;
+      const after = shanten(countsFromTiles(st.hands[e.who]), open, open === 0);
       const advanced = after < before;
 
       // peek: draw usually immediately followed by that player's discard
@@ -277,17 +214,17 @@ function renderRound(g: Game, round: Round, opts: RenderOptions, out: string[]):
         -1,
         false,
         false,
-        restShanten[e.who],
-        restShanten[e.who],
+        st.restShanten[e.who],
+        st.restShanten[e.who],
       );
       continue;
     }
 
     if (e.t === "call") {
       const m = e.meld;
-      const beforeCall = restShanten[m.who];
-      applyMeld(m); // updates restShanten[m.who] to the post-call value
-      const afterCall = restShanten[m.who];
+      const beforeCall = st.restShanten[m.who];
+      st.applyMeld(m); // updates restShanten[m.who] to the post-call value
+      const afterCall = st.restShanten[m.who];
       const fromTxt = m.kind === "ankan" || m.kind === "nuki" ? "" : ` (${P(m.fromWho)}から)`;
       const label = meldVerb(m);
       const meldHead = `${P(m.who)} ${label}${renderMeldTiles(m)}${fromTxt}`;
@@ -306,9 +243,7 @@ function renderRound(g: Game, round: Round, opts: RenderOptions, out: string[]):
         while (j < ev.length) {
           const n = ev[j];
           if (n.t === "dora") {
-            indicators.push(n.indicator);
-            bumpVisible(n.indicator);
-            addDora(n.indicator);
+            st.revealDora(n.indicator);
             lead.push(doraSeg(n.indicator));
             j++;
             continue;
@@ -316,9 +251,8 @@ function renderRound(g: Game, round: Round, opts: RenderOptions, out: string[]):
           if (n.t === "draw" && n.who === m.who && drawn < 0) {
             drawn = n.tile;
             rinshan = n.rinshan;
-            hands[m.who].push(n.tile);
-            lastDraw[m.who] = n.tile;
-            after = restInfo(m.who).shanten;
+            st.draw(m.who, n.tile, n.rinshan);
+            after = st.restInfo(m.who).shanten;
             lead.push(`嶺上ツモ ${tileGlyph(n.tile, aka)}`);
             j++;
             continue;
@@ -355,7 +289,7 @@ function renderRound(g: Game, round: Round, opts: RenderOptions, out: string[]):
       const delta = `向聴${beforeCall}→${afterTxt}`;
       const shText = advanced ? delta : afterCall <= 0 ? "聴牌" : `向聴${afterCall}`;
       out.push(
-        `${meldHead}  〔${shText} ドラ${countDora(m.who)}〕${advanced ? " " + DISCARD_MARK : ""}`,
+        `${meldHead}  〔${shText} ドラ${st.countDora(m.who)}〕${advanced ? " " + DISCARD_MARK : ""}`,
       );
       if (advanced) out.push(handLine(m.who, `(${label}で${delta}前進)`));
       continue;
@@ -363,14 +297,13 @@ function renderRound(g: Game, round: Round, opts: RenderOptions, out: string[]):
 
     if (e.t === "reach") {
       // step 1 is the declaration; the flagged discard follows and is handled there.
-      // step 2 carries post-stick scores (informational).
+      // step 2 places the stick — BoardState keeps the live scores current.
+      st.reach(e.who, e.step, e.scores);
       continue;
     }
 
     if (e.t === "dora") {
-      indicators.push(e.indicator);
-      bumpVisible(e.indicator);
-      addDora(e.indicator);
+      st.revealDora(e.indicator);
       out.push(
         `＊新ドラ表示: ${tileGlyph(e.indicator, aka)}(→ドラ${
           typeGlyph(doraFromIndicatorType(tileType(e.indicator)))
@@ -384,7 +317,7 @@ function renderRound(g: Game, round: Round, opts: RenderOptions, out: string[]):
   for (const res of round.results) {
     if (res.kind === "agari") {
       // consistency guard: reconstructed concealed hand (+ ron tile) vs log `hai`
-      const rec = [...hands[res.who]];
+      const rec = [...st.hands[res.who]];
       if (res.who !== res.fromWho) rec.push(res.machi);
       const a = rec.map(tileType).sort((x, y) => x - y).join(",");
       const b = res.hand.map(tileType).sort((x, y) => x - y).join(",");
@@ -393,7 +326,7 @@ function renderRound(g: Game, round: Round, opts: RenderOptions, out: string[]):
       }
       renderAgari(g, round, res, out);
     } else {
-      renderRyuukyoku(g, res, hands, melds, out);
+      renderRyuukyoku(g, res, st.hands, st.melds, out);
     }
   }
   out.push("―".repeat(20));
@@ -413,39 +346,30 @@ function renderRound(g: Game, round: Round, opts: RenderOptions, out: string[]):
     lead?: string, // when set (kan turn), replaces the "P# X →" prefix
   ): void {
     // Print the 巡 marker only when it just advanced (first discard of the go-around).
-    const jmMark = junme !== shownJunme ? `${junme}巡 ` : "";
-    shownJunme = junme;
-    const threats: RiichiThreat[] = [];
-    for (let s = 0; s < 4; s++) {
-      if (s !== who && riichiActive[s]) {
-        threats.push({ seat: s, safeTypes: safe[s], valueHonors: valueHonorsBySeat[s] });
-      }
-    }
-    const danger = riichiActive[who] ? null : assessDanger(tileType(tile), threats, publicVisible);
+    const jmMark = st.junme !== shownJunme ? `${st.junme}巡 ` : "";
+    shownJunme = st.junme;
+    // Danger is assessed BEFORE the discard mutates state (the tile is judged
+    // against the rivers as the player saw them when choosing it).
+    const danger = st.riichiActive[who]
+      ? null
+      : assessDanger(tileType(tile), st.threats(who), st.publicVisible);
 
     // apply discard to state
-    const di = hands[who].indexOf(tile);
-    if (di < 0) warnInconsistent(`${P(who)} discarded ${tile} not in hand (round ${round.kyoku})`);
-    else hands[who].splice(di, 1);
-    discardTypes[who].add(tileType(tile));
-    bumpVisible(tile);
-    if (riichi) {
-      riichiActive[who] = true;
-      safe[who] = new Set(discardTypes[who]);
+    if (!st.discard(who, tile, tsumogiri, riichi)) {
+      warnInconsistent(`${P(who)} discarded ${tile} not in hand (round ${round.kyoku})`);
     }
-    for (let s = 0; s < 4; s++) if (riichiActive[s]) safe[s].add(tileType(tile));
 
-    // hands[who]/melds[who]/publicVisible are now stable through the rest of this
-    // function, so resolve the resting-hand analysis ONCE and reuse it below
-    // (restShanten, metricTag, and the riichi-wait readout) instead of 2–3 times.
-    const info = restInfo(who);
-    restShanten[who] = info.shanten;
+    // hands/melds/publicVisible are now stable through the rest of this function,
+    // so resolve the resting-hand analysis ONCE and reuse it below (restShanten,
+    // metricTag, and the riichi-wait readout) instead of 2–3 times.
+    const info = st.restInfo(who);
+    st.restShanten[who] = info.shanten;
     const rin = rinshan ? "(嶺上)" : "";
     const highDanger = !!danger && danger.level === "危険度高";
     const showAll = opts.hands === "all";
     // Letting a dora / red five leave the hand is a value decision worth flagging.
     // (A red five outranks a plain dora tile in the note; a tile can be both.)
-    const doraKind = aka && isAka(tile) ? "赤ドラ" : doraTypeSet.has(tileType(tile)) ? "ドラ" : "";
+    const doraKind = aka && isAka(tile) ? "赤ドラ" : st.doraTypeSet.has(tileType(tile)) ? "ドラ" : "";
     const isDoraDiscard = doraKind !== "";
 
     // Tsumogiri (and not a riichi declaration): the hand is unchanged, so collapse
@@ -455,7 +379,7 @@ function renderRound(g: Game, round: Round, opts: RenderOptions, out: string[]):
     if (tsumogiri && !riichi && lead === undefined) {
       // After riichi the discard is forced (hand locked), not a choice — mark it,
       // and flag when the player is forced to pass a dora / red five.
-      const forced = riichiActive[who];
+      const forced = st.riichiActive[who];
       let state = "";
       if (forced) {
         state = `（リーチ後${doraKind ? "・" + doraKind : ""}）`;
@@ -480,14 +404,14 @@ function renderRound(g: Game, round: Round, opts: RenderOptions, out: string[]):
     // tenpai players discarding into a riichi are folding/forced — just tag it.
     const isDanger = !!danger && danger.seats.length > 0 &&
       (danger.level === "危険度高" || danger.level === "危険度中");
-    const isPush = isDanger && restShanten[who] <= 1;
+    const isPush = isDanger && st.restShanten[who] <= 1;
     const dangerSeats = isDanger ? danger!.seats.map(P).join(",") : "";
 
     // build the fact line (a chosen discard from hand)
     const star = advanced || riichi || highDanger || isPush || isDoraDiscard
       ? " " + DISCARD_MARK
       : "";
-    const flagTxt = riichi ? `(${junme}巡目リーチ宣言・横向き)` : "";
+    const flagTxt = riichi ? `(${st.junme}巡目リーチ宣言・横向き)` : "";
     const tgMark = tsumogiri && !riichi ? ` ${TSUMOGIRI_MARK}` : "";
     const prefix = lead !== undefined
       ? `${lead}  → `
@@ -508,39 +432,15 @@ function renderRound(g: Game, round: Round, opts: RenderOptions, out: string[]):
       out.push(handLine(who, `待ち: ${waits}`));
       out.push(anchor(`${P(who)}のリーチ判断と待ちの良し悪し（打点・待ち枚数・巡目）`));
     } else if (isPush) {
-      const st = restShanten[who] <= 0 ? "聴牌" : `向聴${restShanten[who]}`;
+      const stTxt = st.restShanten[who] <= 0 ? "聴牌" : `向聴${st.restShanten[who]}`;
       const adv = advanced ? `・${tileGlyph(drawn, aka)}ツモで${before}→${after}前進` : "";
-      out.push(handLine(who, `${danger!.level}(${dangerSeats}リーチ) 自分${st}${adv} ← 押し`));
+      out.push(handLine(who, `${danger!.level}(${dangerSeats}リーチ) 自分${stTxt}${adv} ← 押し`));
       out.push(anchor(`${P(who)}の押し引き（自分の手牌価値 vs リーチの脅威）`));
     } else if (advanced) {
       out.push(handLine(who, `(${tileGlyph(drawn, aka)}ツモで向聴${before}→${after})`));
     } else if (showAll) {
       for (let s = 0; s < 4; s++) out.push(handLine(s));
     }
-  }
-
-  function applyMeld(m: Meld): void {
-    if (m.kind === "shouminkan") {
-      // upgrade the existing pon of this type to a kan
-      const tt = tileType(m.calledTile);
-      const idx = melds[m.who].findIndex((x) => x.kind === "pon" && tileType(x.tiles[0]) === tt);
-      if (idx >= 0) melds[m.who].splice(idx, 1);
-      const i = hands[m.who].indexOf(m.calledTile);
-      if (i >= 0) hands[m.who].splice(i, 1);
-      melds[m.who].push(m);
-    } else {
-      for (const t of concealedTilesUsed(m)) {
-        const i = hands[m.who].indexOf(t);
-        if (i >= 0) hands[m.who].splice(i, 1);
-      }
-      melds[m.who].push(m);
-    }
-    for (const t of m.tiles) publicVisible[tileType(t)]++;
-    restShanten[m.who] = shanten(
-      countsFromTiles(hands[m.who]),
-      melds[m.who].length,
-      false,
-    );
   }
 }
 
