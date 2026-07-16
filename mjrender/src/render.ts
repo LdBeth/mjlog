@@ -6,6 +6,8 @@
 
 import type {
   AgariResult,
+  Beat,
+  BeatKind,
   Game,
   Meld,
   RenderOptions,
@@ -73,10 +75,13 @@ function formatInstruction(): string {
   return [
     "■この牌譜の読み方（解説者への指示）",
     "これは天鳳の対局記録です。あなたは麻雀の実況解説者として、文中の",
-    "〔解説ポイント: …〕 の各箇所を、その直前の局面・手牌をふまえた解説コメントに",
+    "〔解説ポイント#N: 種別｜…〕 の各箇所を、その直前の局面・手牌をふまえた解説コメントに",
     "置き換えてください。それ以外の行は事実情報なので改変しないでください。",
     "また ★ の付いた行（注目の局面）には、任意でその行の直後に短い一言解説を",
     "添えてもよい。不要と判断すれば事実行のまま残してよい（★行への追記は任意）。",
+    "・〔解説ポイント#N: 種別｜…〕のNは局面ID。この牌譜を出力したツール（mjrender）の",
+    "  snapshot機能（MCPツール get_snapshot / CLI snapshot コマンド）にIDを渡すと、その時点の",
+    "  全員の河・点数・手牌つき盤面を呼び出せる（利用できる場合のみ）。",
     "・牌表記: 一〜九=萬子 / ①〜⑨=筒子 / １〜９=索子 / 東南西北白發中=字牌 / 赤=赤ドラ",
     "・場風=局名で決まる風（東n局→東、南n局→南）、配牌の(東家/南家/西家/北家)=各家の自風。役牌判断に用いる",
     "・「N巡」=巡目。親（東家）が山からツモるたび1巡進む卓全体共有のカウンタで、各巡の最初の打牌にのみ表示",
@@ -89,8 +94,24 @@ function formatInstruction(): string {
   ].join("\n");
 }
 
+/** Transcript text plus the machine-readable beat list behind its anchors. */
+export interface RenderResult {
+  text: string;
+  beats: Beat[];
+}
+
 export function renderGame(game: Game, opts: RenderOptions): string {
+  return renderGameAnnotated(game, opts).text;
+}
+
+/**
+ * Render the transcript AND enumerate its commentary beats in the same pass.
+ * Anchor IDs are assigned here and nowhere else — the query side (list_anchors /
+ * get_snapshot) reads this enumeration, so IDs can never drift from the text.
+ */
+export function renderGameAnnotated(game: Game, opts: RenderOptions): RenderResult {
   const out: string[] = [];
+  const beats: Beat[] = [];
   const g = game;
 
   out.push(formatInstruction());
@@ -112,16 +133,31 @@ export function renderGame(game: Game, opts: RenderOptions): string {
   out.push("=".repeat(48));
   out.push("");
 
-  for (const round of g.rounds) {
-    renderRound(g, round, opts, out);
+  let lastJunme = 0;
+  for (let r = 0; r < g.rounds.length; r++) {
+    lastJunme = renderRound(g, g.rounds[r], r, opts, out, beats);
     out.push("");
   }
 
-  if (g.owari) renderOwari(g, out);
-  return out.join("\n");
+  if (g.owari) {
+    renderOwari(g, out, beats, {
+      round: g.rounds.length - 1,
+      junme: lastJunme,
+      eventIndex: (g.rounds.at(-1)?.events.length ?? 0) - 1,
+    });
+  }
+  return { text: out.join("\n"), beats };
 }
 
-function renderRound(g: Game, round: Round, opts: RenderOptions, out: string[]): void {
+/** Renders one round; returns its final 巡目 (for the game-end beat's position). */
+function renderRound(
+  g: Game,
+  round: Round,
+  roundIndex: number,
+  opts: RenderOptions,
+  out: string[],
+  beats: Beat[],
+): number {
   const aka = g.rules.aka;
   const st = new BoardState(g, round);
 
@@ -145,6 +181,23 @@ function renderRound(g: Game, round: Round, opts: RenderOptions, out: string[]):
   const handLine = (seat: number, note = ""): string =>
     `  ┗ ${P(seat)}手: ${renderHand(st.hands[seat], st.melds[seat], aka)}${note ? "  " + note : ""}`;
 
+  // Record a beat and emit its anchor line. The beat's board position is
+  // (roundIndex, eventIndex): replayTo that position reproduces the state the
+  // commentary slot is about.
+  const pushAnchor = (kind: BeatKind, topic: string, eventIndex: number, seat?: number): void => {
+    const beat: Beat = {
+      id: beats.length + 1,
+      kind,
+      round: roundIndex,
+      junme: st.junme,
+      seat,
+      eventIndex,
+      topic,
+    };
+    beats.push(beat);
+    out.push(anchorLine(beat.id, kind, topic));
+  };
+
   // --- header ---
   const indGlyph = tileGlyph(round.firstDora, aka);
   const doraGlyph = typeGlyph(doraFromIndicatorType(tileType(round.firstDora)));
@@ -167,7 +220,7 @@ function renderRound(g: Game, round: Round, opts: RenderOptions, out: string[]):
       `  ${P(seat)}(${swMark}): ${renderHand(st.hands[seat], [], aka)}  ${metricTag(info, seat)}`,
     );
   }
-  out.push(anchor("各家の配牌評価（手役の見込み・スピード・押し引きの構え）"));
+  pushAnchor("配牌評価", "各家の配牌評価（手役の見込み・スピード・押し引きの構え）", -1);
   out.push("――");
 
   // --- event replay ---
@@ -187,6 +240,7 @@ function renderRound(g: Game, round: Round, opts: RenderOptions, out: string[]):
       if (nxt && nxt.t === "discard" && nxt.who === e.who) {
         i++;
         renderDiscard(
+          i,
           e.who,
           nxt.tile,
           nxt.tsumogiri,
@@ -207,6 +261,7 @@ function renderRound(g: Game, round: Round, opts: RenderOptions, out: string[]):
     if (e.t === "discard") {
       // a discard not preceded by this player's draw (e.g. right after a call)
       renderDiscard(
+        i,
         e.who,
         e.tile,
         e.tsumogiri,
@@ -260,6 +315,7 @@ function renderRound(g: Game, round: Round, opts: RenderOptions, out: string[]):
           if (n.t === "discard" && n.who === m.who) {
             i = j;
             renderDiscard(
+              j,
               m.who,
               n.tile,
               n.tsumogiri,
@@ -325,15 +381,19 @@ function renderRound(g: Game, round: Round, opts: RenderOptions, out: string[]):
         warnInconsistent(`round ${round.kyoku} agari hand mismatch: rec=[${a}] log=[${b}]`);
       }
       renderAgari(g, round, res, out);
+      pushAnchor("局総括", "決着の評価と局全体の総括（勝負の分かれ目）", ev.length - 1, res.who);
     } else {
       renderRyuukyoku(g, res, st.hands, st.melds, out);
+      pushAnchor("流局評価", "流局時の聴牌・ノーテンと点棒状況の評価", ev.length - 1);
     }
   }
   out.push("―".repeat(20));
+  return st.junme;
 
   // ===== nested helpers that close over round state =====
 
   function renderDiscard(
+    eventIndex: number,
     who: number,
     tile: Tile,
     tsumogiri: boolean,
@@ -430,12 +490,22 @@ function renderRound(g: Game, round: Round, opts: RenderOptions, out: string[]):
     if (riichi) {
       const waits = info.types.map((t) => typeGlyph(t)).join("") || "?";
       out.push(handLine(who, `待ち: ${waits}`));
-      out.push(anchor(`${P(who)}のリーチ判断と待ちの良し悪し（打点・待ち枚数・巡目）`));
+      pushAnchor(
+        "リーチ判断",
+        `${P(who)}のリーチ判断と待ちの良し悪し（打点・待ち枚数・巡目）`,
+        eventIndex,
+        who,
+      );
     } else if (isPush) {
       const stTxt = st.restShanten[who] <= 0 ? "聴牌" : `向聴${st.restShanten[who]}`;
       const adv = advanced ? `・${tileGlyph(drawn, aka)}ツモで${before}→${after}前進` : "";
       out.push(handLine(who, `${danger!.level}(${dangerSeats}リーチ) 自分${stTxt}${adv} ← 押し`));
-      out.push(anchor(`${P(who)}の押し引き（自分の手牌価値 vs リーチの脅威）`));
+      pushAnchor(
+        "押し引き",
+        `${P(who)}の押し引き（自分の手牌価値 vs リーチの脅威）`,
+        eventIndex,
+        who,
+      );
     } else if (advanced) {
       out.push(handLine(who, `(${tileGlyph(drawn, aka)}ツモで向聴${before}→${after})`));
     } else if (showAll) {
@@ -465,8 +535,8 @@ function renderMeldTiles(m: Meld): string {
   return m.tiles.map((t) => tileGlyph(t)).join("");
 }
 
-function anchor(topic: string): string {
-  return `〔解説ポイント: ${topic}〕`;
+function anchorLine(id: number, kind: BeatKind, topic: string): string {
+  return `〔解説ポイント#${id}: ${kind}｜${topic}〕`;
 }
 
 /** Dev-time self-check: replay inconsistencies go to stderr, never to the transcript. */
@@ -511,7 +581,6 @@ function renderAgari(g: Game, round: Round, res: AgariResult, out: string[]): vo
     );
   }
   out.push(`  点棒: ${scoreDeltaLine(res.sc)}`);
-  out.push(anchor("決着の評価と局全体の総括（勝負の分かれ目）"));
 }
 
 function renderRyuukyoku(
@@ -536,7 +605,6 @@ function renderRyuukyoku(
     out.push(`  ${P(th.who)} 聴牌: ${renderHand(th.hand, melds[th.who], aka)}`);
   }
   if (res.sc.length) out.push(`  点棒: ${scoreDeltaLine(res.sc)}`);
-  out.push(anchor("流局時の聴牌・ノーテンと点棒状況の評価"));
 }
 
 function scoreDeltaLine(sc: number[]): string {
@@ -550,7 +618,12 @@ function scoreDeltaLine(sc: number[]): string {
   return parts.join(" / ");
 }
 
-function renderOwari(g: Game, out: string[]): void {
+function renderOwari(
+  g: Game,
+  out: string[],
+  beats: Beat[],
+  pos: { round: number; junme: number; eventIndex: number },
+): void {
   const o = g.owari!;
   out.push("=".repeat(48));
   out.push("◆終局");
@@ -566,6 +639,9 @@ function renderOwari(g: Game, out: string[]): void {
       }${r.pt})`,
     );
   });
-  out.push(anchor("対局全体の総括（着順・打ち回しの評価）"));
+  const topic = "対局全体の総括（着順・打ち回しの評価）";
+  const beat: Beat = { id: beats.length + 1, kind: "終局総括", topic, ...pos };
+  beats.push(beat);
+  out.push(anchorLine(beat.id, beat.kind, topic));
   out.push("=".repeat(48));
 }

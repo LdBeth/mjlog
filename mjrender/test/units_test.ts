@@ -243,7 +243,7 @@ Deno.test("end-to-end: sample renders, no inconsistency warnings", async () => {
     console.error = orig;
   }
   if (!text.includes("◆終局")) throw new Error("missing 終局 block");
-  if (!text.includes("〔解説ポイント:")) throw new Error("missing commentary anchors");
+  if (!/〔解説ポイント#1: 配牌評価｜/.test(text)) throw new Error("missing commentary anchors");
   // seat winds (自風) label every 配牌 line; the dealer is 東家・親
   if (!text.includes("(東家・親):")) throw new Error("missing dealer seat wind");
   for (const w of ["(南家):", "(西家):", "(北家):"]) {

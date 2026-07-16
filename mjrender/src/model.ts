@@ -98,3 +98,28 @@ export interface Game {
 export interface RenderOptions {
   hands: "key" | "all"; // reconstructed-hand verbosity
 }
+
+/** What a commentary anchor is asking the LLM to judge. */
+export type BeatKind =
+  | "配牌評価"
+  | "リーチ判断"
+  | "押し引き"
+  | "副露判断"
+  | "局総括"
+  | "流局評価"
+  | "終局総括";
+
+/**
+ * A commentary beat: one 〔解説ポイント#N〕 anchor, addressable from outside.
+ * `eventIndex` is a replayTo position within the round: -1 = right after the
+ * deal, `events.length - 1` = end of the round.
+ */
+export interface Beat {
+  id: number; // 1-based, sequential over the whole game
+  kind: BeatKind;
+  round: number; // index into game.rounds
+  junme: number;
+  seat?: number; // acting seat, when the beat is about one player
+  eventIndex: number;
+  topic: string; // anchor topic text as rendered
+}
