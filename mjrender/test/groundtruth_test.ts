@@ -58,7 +58,9 @@ Deno.test("ground truth: passed win tile is a 見逃し; own-wait discard flags 
     [{ kind: "ryuukyoku", type: "yao9", sc: [], tenpaiHands: [] }],
   ));
   if (!text.includes("◇見逃し: P1が1巡目 P0の②をロンせず（待ち②）")) {
-    throw new Error(`missing 見逃し line:\n${text.split("\n").filter((l) => l.includes("◇")).join("\n")}`);
+    throw new Error(
+      `missing 見逃し line:\n${text.split("\n").filter((l) => l.includes("◇")).join("\n")}`,
+    );
   }
   // (id 16 in the crafted hand is the red 5m, hence ドラ1)
   if (!/P1: .*〔聴牌 待ち② 残2枚 ドラ1〕（振聴）/.test(text)) {

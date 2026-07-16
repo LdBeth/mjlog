@@ -16,7 +16,7 @@ import type {
   Tile,
 } from "./model.ts";
 import { assessDanger, type DangerAssessment } from "./danger.ts";
-import { overtakeNeeds, placements } from "./scoring.ts";
+import { overtakeNeeds, owariRows, placements } from "./scoring.ts";
 import { renderSnapshot } from "./snapshot.ts";
 import { BoardState, type RestInfo } from "./state.ts";
 import { countsFromTiles, shanten, ukeireTypes } from "./shanten.ts";
@@ -25,18 +25,15 @@ import {
   doraFromIndicatorType,
   isAka,
   renderHand,
+  roundName,
   tileGlyph,
   tileType,
   typeGlyph,
+  WIND,
 } from "./tiles.ts";
 
-const WIND = ["東", "南", "西", "北"];
 const DISCARD_MARK = "★"; // salience flag on a commentary-worthy beat
 const TSUMOGIRI_MARK = "▽"; // marks a tsumogiri (drawn tile discarded unchanged)
-
-function roundName(kyoku: number): string {
-  return `${WIND[Math.floor(kyoku / 4) % 4]}${(kyoku % 4) + 1}局`;
-}
 
 function P(seat: number): string {
   return `P${seat}`;
@@ -82,7 +79,7 @@ function formatInstruction(): string {
     "また ★ の付いた行（注目の局面）には、任意でその行の直後に短い一言解説を",
     "添えてもよい。不要と判断すれば事実行のまま残してよい（★行への追記は任意）。",
     "・〔解説ポイント#N: 種別｜…〕のNは局面ID。この牌譜を出力したツール（mjrender）の",
-    "  snapshot機能（MCPツール get_snapshot / CLI snapshot コマンド）にIDを渡すと、その時点の",
+    "  snapshot機能（MCPツール mj_get_snapshot / CLI snapshot コマンド）にIDを渡すと、その時点の",
     "  全員の河・点数・手牌つき盤面を呼び出せる（利用できる場合のみ）。",
     "・牌表記: 一〜九=萬子 / ①〜⑨=筒子 / １〜９=索子 / 東南西北白發中=字牌 / 赤=赤ドラ",
     "・場風=局名で決まる風（東n局→東、南n局→南）、配牌の(東家/南家/西家/北家)=各家の自風。役牌判断に用いる",
@@ -225,7 +222,9 @@ function renderRound(
   };
 
   const handLine = (seat: number, note = ""): string =>
-    `  ┗ ${P(seat)}手: ${renderHand(st.hands[seat], st.melds[seat], aka)}${note ? "  " + note : ""}`;
+    `  ┗ ${P(seat)}手: ${renderHand(st.hands[seat], st.melds[seat], aka)}${
+      note ? "  " + note : ""
+    }`;
 
   // What-if table for a flagged discard: every alternative from the same
   // 14-tile hand, evaluated on the PRE-discard view (the table as the player
@@ -244,7 +243,7 @@ function renderRound(
       if (counts[t] === 0) continue;
       counts[t]--;
       const sh = shanten(counts, open, closed);
-      const waits = ukeireTypes(counts, open, closed);
+      const waits = ukeireTypes(counts, open, closed, sh);
       let live = 0;
       for (const u of waits) live += Math.max(0, 4 - visible[u] - counts[u]);
       cands.push({ t, sh, kinds: waits.length, live, waits });
@@ -260,7 +259,9 @@ function renderRound(
     const fmt = (c: typeof cands[number]): string => {
       const mark = c.t === dt ? "◎" : "";
       if (c.sh <= 0) {
-        return `打${typeGlyph(c.t)}${mark}=聴牌・待ち${c.waits.map(typeGlyph).join("")}(${c.live}枚)`;
+        return `打${typeGlyph(c.t)}${mark}=聴牌・待ち${
+          c.waits.map(typeGlyph).join("")
+        }(${c.live}枚)`;
       }
       return `打${typeGlyph(c.t)}${mark}=向聴${c.sh}・受入${c.kinds}種${c.live}枚`;
     };
@@ -356,13 +357,13 @@ function renderRound(
       const before = st.restShanten[e.who];
       st.draw(e.who, e.tile, e.rinshan);
       waitsCache[e.who] = null;
-      const open = st.melds[e.who].length;
-      const after = shanten(countsFromTiles(st.hands[e.who]), open, open === 0);
-      const advanced = after < before;
 
       // peek: draw usually immediately followed by that player's discard
       const nxt = ev[i + 1];
       if (nxt && nxt.t === "discard" && nxt.who === e.who) {
+        const open = st.melds[e.who].length;
+        const after = shanten(countsFromTiles(st.hands[e.who]), open, open === 0);
+        const advanced = after < before;
         i++;
         renderDiscard(
           i,
@@ -434,7 +435,10 @@ function renderRound(
             rinshan = n.rinshan;
             st.draw(m.who, n.tile, n.rinshan);
             waitsCache[m.who] = null;
-            after = st.restInfo(m.who).shanten;
+            // only the shanten is needed here; restInfo would also solve the
+            // full 34-type ukeire just to throw it away
+            const openNow = st.melds[m.who].length;
+            after = shanten(countsFromTiles(st.hands[m.who]), openNow, openNow === 0);
             lead.push(`嶺上ツモ ${tileGlyph(n.tile, aka)}`);
             j++;
             continue;
@@ -472,7 +476,9 @@ function renderRound(
       const delta = `向聴${beforeCall}→${afterTxt}`;
       const shText = advanced ? delta : afterCall <= 0 ? "聴牌" : `向聴${afterCall}`;
       out.push(
-        `${meldHead}  〔${shText} ドラ${st.countDora(m.who)}〕${advanced ? " " + DISCARD_MARK : ""}`,
+        `${meldHead}  〔${shText} ドラ${st.countDora(m.who)}〕${
+          advanced ? " " + DISCARD_MARK : ""
+        }`,
       );
       if (advanced) out.push(handLine(m.who, `(${label}で${delta}前進)`));
       continue;
@@ -544,7 +550,7 @@ function renderRound(
       if (a !== b) {
         warnInconsistent(`round ${round.kyoku} agari hand mismatch: rec=[${a}] log=[${b}]`);
       }
-      renderAgari(g, round, res, out);
+      renderAgari(g, res, out);
       if (!truthShown) {
         groundTruth();
         truthShown = true;
@@ -596,14 +602,12 @@ function renderRound(
     // Danger is assessed BEFORE the discard mutates state (the tile is judged
     // against the rivers as the player saw them when choosing it); the
     // discarder's own concealed tiles feed the kabe/chance evidence.
-    const danger = st.riichiActive[who]
-      ? null
-      : assessDanger(
-        tileType(tile),
-        st.threats(who),
-        st.publicVisible,
-        countsFromTiles(st.hands[who]),
-      );
+    const danger = st.riichiActive[who] ? null : assessDanger(
+      tileType(tile),
+      st.threats(who),
+      st.publicVisible,
+      countsFromTiles(st.hands[who]),
+    );
     const evidence = (d: DangerAssessment): string =>
       `〔${
         d.details.map((t) => `P${t.seat}リーチ${st.riichiJunme[t.seat]}巡・${t.notes.join("・")}`)
@@ -627,7 +631,11 @@ function renderRound(
     const showAll = opts.hands === "all";
     // Letting a dora / red five leave the hand is a value decision worth flagging.
     // (A red five outranks a plain dora tile in the note; a tile can be both.)
-    const doraKind = aka && isAka(tile) ? "赤ドラ" : st.doraTypeSet.has(tileType(tile)) ? "ドラ" : "";
+    const doraKind = aka && isAka(tile)
+      ? "赤ドラ"
+      : st.doraTypeSet.has(tileType(tile))
+      ? "ドラ"
+      : "";
     const isDoraDiscard = doraKind !== "";
 
     // Tsumogiri (and not a riichi declaration): the hand is unchanged, so collapse
@@ -747,7 +755,7 @@ function warnInconsistent(msg: string): void {
   console.error(`[warn] ${msg}`);
 }
 
-function renderAgari(g: Game, round: Round, res: AgariResult, out: string[]): void {
+function renderAgari(g: Game, res: AgariResult, out: string[]): void {
   const aka = g.rules.aka;
   const tsumo = res.who === res.fromWho;
   const how = tsumo ? "ツモ" : `ロン(${P(res.fromWho)}から)`;
@@ -816,19 +824,13 @@ function renderOwari(
   beats: Beat[],
   pos: { round: number; junme: number; eventIndex: number },
 ): void {
-  const o = g.owari!;
   out.push("=".repeat(48));
   out.push("◆終局");
-  const rows = [];
-  for (let s = 0; s < 4 && s * 2 + 1 < o.length; s++) {
-    rows.push({ seat: s, score: o[s * 2] * 100, pt: o[s * 2 + 1] });
-  }
-  rows.sort((a, b) => b.score - a.score);
-  rows.forEach((r, idx) => {
+  owariRows(g.owari!).forEach((r, idx) => {
     out.push(
       `  ${idx + 1}位 ${P(r.seat)}(${g.players[r.seat].name})  ${r.score}点  (${
-        r.pt >= 0 ? "+" : ""
-      }${r.pt})`,
+        r.points >= 0 ? "+" : ""
+      }${r.points})`,
     );
   });
   const topic = "対局全体の総括（着順・打ち回しの評価）";

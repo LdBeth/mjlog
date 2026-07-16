@@ -2,3 +2,6 @@ out
 .DS_Store
 *.mjlog
 *.xml
+mjrender/bundle/server/
+*.mcpb
+.claude/

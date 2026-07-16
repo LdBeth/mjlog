@@ -143,7 +143,10 @@ Deno.test("kan turn integrates into one line; ankan dora before rinshan draw", (
       firstDora: 104,
       events: [
         { t: "draw", who: 0, tile: 12, rinshan: false },
-        { t: "call", meld: { kind: "ankan", who: 0, fromWho: 0, tiles: [108, 109, 110, 111], calledTile: 108 } },
+        {
+          t: "call",
+          meld: { kind: "ankan", who: 0, fromWho: 0, tiles: [108, 109, 110, 111], calledTile: 108 },
+        },
         { t: "dora", indicator: 20 },
         { t: "draw", who: 0, tile: 17, rinshan: true },
         { t: "discard", who: 0, tile: 17, tsumogiri: true, riichi: false },
@@ -186,9 +189,9 @@ Deno.test("parse: double ron yields multiple agari results with per-sc scoring",
   const xml = `<mjloggm ver="2.3">
 <GO type="169"/>
 <UN n0="alice" n1="bob" n2="carol" n3="dave" dan="10,11,12,13" rate="1500,1600,1700,1800"/>
-<INIT seed="0,0,0,0,0,4" ten="250,250,250,250" oya="0" hai0="${hai13(0)}" hai1="${hai13(16)}" hai2="${
-    hai13(32)
-  }" hai3="${hai13(48)}"/>
+<INIT seed="0,0,0,0,0,4" ten="250,250,250,250" oya="0" hai0="${hai13(0)}" hai1="${
+    hai13(16)
+  }" hai2="${hai13(32)}" hai3="${hai13(48)}"/>
 <T64/><D64/>
 <AGARI ba="0,0" hai="16,17,18" machi="64" ten="30,3900,0" who="1" fromWho="0" sc="250,-39,250,39,250,0,250,0"/>
 <AGARI ba="0,0" hai="32,33,34" machi="64" ten="40,5200,0" who="2" fromWho="0" sc="250,0,250,0,250,52,250,0" owari="211,-45.0,289,15.0,250,0.0,250,30.0"/>
@@ -228,16 +231,20 @@ Deno.test("parse: UN reconnect with missing n{i} preserves omitted seats", () =>
   const xml = `<mjloggm ver="2.3">
 <GO type="169"/>
 <UN n0="alice" n1="bob" n2="carol" n3="dave" dan="10,11,12,13" rate="1500,1600,1700,1800" sx="M,M,F,M"/>
-<INIT seed="0,0,0,0,0,4" ten="250,250,250,250" oya="0" hai0="${hai13(0)}" hai1="${hai13(16)}" hai2="${
-    hai13(32)
-  }" hai3="${hai13(48)}"/>
+<INIT seed="0,0,0,0,0,4" ten="250,250,250,250" oya="0" hai0="${hai13(0)}" hai1="${
+    hai13(16)
+  }" hai2="${hai13(32)}" hai3="${hai13(48)}"/>
 <T64/><D64/>
 <UN n2="carolX"/>
 <U80/><E80/>
 </mjloggm>`;
   const g = parseGame(xml);
   eq(g.players.map((p) => p.name), ["alice", "bob", "carolX", "dave"], "only seat 2 renamed");
-  eq(g.players.map((p) => p.dan), ["10", "11", "12", "13"], "dan not clobbered by dan-less reconnect UN");
+  eq(
+    g.players.map((p) => p.dan),
+    ["10", "11", "12", "13"],
+    "dan not clobbered by dan-less reconnect UN",
+  );
   eq(g.players[2].rate, 1700, "rate not clobbered for the reconnecting seat");
 });
 
@@ -248,9 +255,9 @@ Deno.test("parse: BYE (disconnect) is ignored and does not corrupt replay", () =
   const xml = `<mjloggm ver="2.3">
 <GO type="169"/>
 <UN n0="alice" n1="bob" n2="carol" n3="dave" dan="10,11,12,13"/>
-<INIT seed="0,0,0,0,0,4" ten="250,250,250,250" oya="0" hai0="${hai13(0)}" hai1="${hai13(16)}" hai2="${
-    hai13(32)
-  }" hai3="${hai13(48)}"/>
+<INIT seed="0,0,0,0,0,4" ten="250,250,250,250" oya="0" hai0="${hai13(0)}" hai1="${
+    hai13(16)
+  }" hai2="${hai13(32)}" hai3="${hai13(48)}"/>
 <T64/><BYE who="1"/><D64/><U80/><E80/>
 </mjloggm>`;
   const g = parseGame(xml);

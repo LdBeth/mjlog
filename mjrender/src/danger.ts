@@ -67,7 +67,7 @@ export function assessDanger(
     if (RANK[d.level] > RANK[worst]) worst = d.level;
   }
 
-  if (seats.length === 0) return { level: "安全", seats: [], details: [] };
+  // when every threat was genbutsu, worst is still 安全 and the lists are empty
   return { level: worst, seats, details };
 }
 

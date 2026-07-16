@@ -50,7 +50,11 @@ Deno.test("query: riichi anchor snapshot is coherent (stick debited AND on the t
   if (!(kyotaku >= 1)) throw new Error(`stick not on the table: ${snap.split("\n")[0]}`);
   const startTotal = g.rounds[beat.round].startScores.reduce((a, b) => a + b, 0);
   const liveTotal = [...snap.matchAll(/ (\d+)点/g)].reduce((a, m) => a + Number(m[1]) / 100, 0);
-  eq(liveTotal, startTotal - (kyotaku - g.rounds[beat.round].kyotaku) * 10, "scores account for placed sticks");
+  eq(
+    liveTotal,
+    startTotal - (kyotaku - g.rounds[beat.round].kyotaku) * 10,
+    "scores account for placed sticks",
+  );
 });
 
 Deno.test("query: junme addressing replays to end of the go-around", async () => {

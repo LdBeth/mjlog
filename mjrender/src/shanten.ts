@@ -126,9 +126,14 @@ export function shanten(counts: number[], openMelds = 0, closed = true): number 
 /**
  * Tile types whose addition lowers shanten of a resting (3n+1) hand.
  * At shanten 0 these are exactly the winning (wait) tiles.
+ * Callers that already computed the hand's shanten can pass it as `base`.
  */
-export function ukeireTypes(counts: number[], openMelds = 0, closed = true): number[] {
-  const base = shanten(counts, openMelds, closed);
+export function ukeireTypes(
+  counts: number[],
+  openMelds = 0,
+  closed = true,
+  base = shanten(counts, openMelds, closed),
+): number[] {
   const out: number[] = [];
   for (let t = 0; t < 34; t++) {
     if (counts[t] >= 4) continue;

@@ -2,14 +2,15 @@
 //
 //   deno task mcp        (equivalent: deno run --allow-read src/mcp.ts)
 //
-// Four tools, all thin wrappers over core.ts — render_game, render_kyoku,
-// list_anchors, get_snapshot. The intended flow: the agent renders the (lean)
+// All tools are thin wrappers over core.ts and share the mj_ name prefix —
+// mj_render_game, mj_render_kyoku, mj_list_anchors, mj_get_snapshot, plus the
+// structured fact tools. The intended flow: the agent renders the (lean)
 // transcript once, then recalls full board state for any 〔解説ポイント#N〕
 // anchor — or any explicit kyoku+junme — while writing commentary.
 
-import { McpServer } from "npm:@modelcontextprotocol/sdk@^1.12.0/server/mcp.js";
-import { StdioServerTransport } from "npm:@modelcontextprotocol/sdk@^1.12.0/server/stdio.js";
-import { z } from "npm:zod@^3.24.0";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { z } from "zod";
 import {
   anchorTable,
   finalStandings,
@@ -21,12 +22,15 @@ import {
   renderKyoku,
   riichiDeclarations,
 } from "./core.ts";
+import { isUrl } from "./load.ts";
 import type { Game } from "./model.ts";
 
 // Parsed-game cache keyed by path, invalidated when the file's mtime changes.
+// URL sources have no mtime; a finished game's log is immutable, so 0 pins
+// them in the cache for the process lifetime.
 const cache = new Map<string, { mtime: number; game: Game }>();
 async function game(path: string): Promise<Game> {
-  const mtime = (await Deno.stat(path)).mtime?.getTime() ?? 0;
+  const mtime = isUrl(path) ? 0 : (await Deno.stat(path)).mtime?.getTime() ?? 0;
   const hit = cache.get(path);
   if (hit && hit.mtime === mtime) return hit.game;
   const g = await loadGame(path);
@@ -68,7 +72,10 @@ async function run(fn: () => Promise<string>): Promise<ToolResult> {
   }
 }
 
-const PATH = z.string().describe("Path to a Tenhou mjlog file (gzipped .mjlog or plain .xml)");
+const PATH = z.string().describe(
+  "Tenhou mjlog source: local file path (gzipped .mjlog or plain .xml), or a tenhou.net URL — " +
+    "a replay link like https://tenhou.net/0/?log=<id>&tw=1 or the raw log endpoint",
+);
 const KYOKU = z.string().describe(
   'Round selector: wind+number like "S3" / "東1" (optionally ".honba", e.g. "E1.2" when a kyoku repeats), or a 0-based round index like "6"',
 );
@@ -76,12 +83,11 @@ const KYOKU = z.string().describe(
 const server = new McpServer({ name: "mjrender", version: "0.2.0" });
 
 server.registerTool(
-  "render_game",
+  "mj_render_game",
   {
-    description:
-      "Render a full Tenhou game log as an LLM-ready Japanese commentary transcript. " +
+    description: "Render a full Tenhou game log as an LLM-ready Japanese commentary transcript. " +
       "Fact lines + computed metrics (shanten/ukeire/waits/dora/danger) + 〔解説ポイント#N〕 " +
-      "commentary anchors whose #N ids are addressable via get_snapshot.",
+      "commentary anchors whose #N ids are addressable via mj_get_snapshot.",
     inputSchema: {
       path: PATH,
       hands: z.enum(["key", "all"]).optional()
@@ -95,11 +101,11 @@ server.registerTool(
 );
 
 server.registerTool(
-  "render_kyoku",
+  "mj_render_kyoku",
   {
     description:
       "Render ONE round (kyoku) of the game, self-contained (format preamble included). " +
-      "Anchor ids inside are game-global, so they agree with list_anchors/get_snapshot.",
+      "Anchor ids inside are game-global, so they agree with mj_list_anchors/mj_get_snapshot.",
     inputSchema: {
       path: PATH,
       kyoku: KYOKU,
@@ -112,10 +118,9 @@ server.registerTool(
 );
 
 server.registerTool(
-  "list_anchors",
+  "mj_list_anchors",
   {
-    description:
-      "List every commentary anchor of the game, one per line: " +
+    description: "List every commentary anchor of the game, one per line: " +
       "#id, kind (配牌評価/リーチ判断/押し引き/局総括/流局評価/終局総括), kyoku, junme, seat, topic.",
     inputSchema: { path: PATH },
   },
@@ -123,13 +128,13 @@ server.registerTool(
 );
 
 server.registerTool(
-  "get_snapshot",
+  "mj_get_snapshot",
   {
     description:
       "Recall the full board state at a position: all four rivers (▽=tsumogiri, *=riichi tile, " +
       "(→Pn)=called away), melds, live scores + placements, riichi states, dora, remaining wall, " +
       "and each seat's concealed hand with shanten/ukeire. Address by anchor id (from the " +
-      "transcript's 〔解説ポイント#N〕 / list_anchors), or by kyoku + junme (state at the end of " +
+      "transcript's 〔解説ポイント#N〕 / mj_list_anchors), or by kyoku + junme (state at the end of " +
       "that go-around).",
     inputSchema: {
       path: PATH,
@@ -153,7 +158,7 @@ server.registerTool(
 const json = (v: unknown) => JSON.stringify(v, null, 1);
 
 server.registerTool(
-  "get_kyoku_start",
+  "mj_get_kyoku_start",
   {
     description:
       "Start conditions of one round: dealer, honba, kyotaku, dora indicator, and per-seat " +
@@ -165,7 +170,7 @@ server.registerTool(
 );
 
 server.registerTool(
-  "get_kyoku_result",
+  "mj_get_kyoku_result",
   {
     description:
       "Outcome(s) of one round: winner, tsumo/ron + discarder, winning tile, points/fu/limit " +
@@ -177,7 +182,7 @@ server.registerTool(
 );
 
 server.registerTool(
-  "get_riichi_declarations",
+  "mj_get_riichi_declarations",
   {
     description:
       "Every riichi declaration (whole game, or one kyoku): seat, junme, wait tiles, live " +
@@ -189,7 +194,7 @@ server.registerTool(
 );
 
 server.registerTool(
-  "get_final_standings",
+  "mj_get_final_standings",
   {
     description: "Final standings: place, seat, name, score, placement points. JSON.",
     inputSchema: { path: PATH },

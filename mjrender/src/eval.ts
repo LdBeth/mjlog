@@ -8,7 +8,14 @@
 // separately and score its answers against these.
 
 import type { Game } from "./model.ts";
-import { finalStandings, kyokuResults, kyokuStart, loadGame, riichiDeclarations, roundLabel } from "./core.ts";
+import {
+  finalStandings,
+  kyokuResults,
+  kyokuStart,
+  loadGame,
+  riichiDeclarations,
+  roundLabel,
+} from "./core.ts";
 
 export interface EvalItem {
   question: string;
@@ -70,7 +77,8 @@ export function generateEval(game: Game): EvalItem[] {
       category: "riichi_wait",
     });
     items.push({
-      question: `${r.kyoku}のP${r.seat}のリーチ（${r.junme}巡目）宣言時、待ち牌は場に何枚残っていた？`,
+      question:
+        `${r.kyoku}のP${r.seat}のリーチ（${r.junme}巡目）宣言時、待ち牌は場に何枚残っていた？`,
       answer: `${r.waitCount}枚`,
       kyoku: r.kyoku,
       category: "riichi_wait_count",
@@ -93,7 +101,7 @@ export function generateEval(game: Game): EvalItem[] {
 if (import.meta.main) {
   const file = Deno.args[0];
   if (!file) {
-    console.error("usage: deno run --allow-read src/eval.ts <file.mjlog|xml>");
+    console.error("usage: deno task eval <file.mjlog|xml | tenhou.net URL>");
     Deno.exit(2);
   }
   try {

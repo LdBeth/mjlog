@@ -51,16 +51,18 @@ consumes it two ways: (1) an **LLM-ready Japanese commentary transcript**
 (play-by-play with reconstructed hands, calls, riichi, wins/scores, computed
 metrics — shanten/ukeire/waits/dora/danger evidence — discard comparisons,
 end-of-hand ground truth, and `〔解説ポイント#N: 種別｜…〕` anchors), and
-(2) **snapshot recall**: `get_snapshot` reproduces the full board (rivers with
+(2) **snapshot recall**: `mj_get_snapshot` reproduces the full board (rivers with
 tsumogiri/riichi marks, melds, live scores/placements, hands) at any anchor
 `#N` or kyoku+junme.
 
-Run: `cd mjrender && deno task render ../1.mjlog`; CLI subcommands
-`kyoku`/`anchors`/`snapshot`; `deno task mcp` starts the stdio MCP server
-(render_game / render_kyoku / list_anchors / get_snapshot); `deno task eval`
-emits ground-truth Q/A JSONL. Tests: `deno task test` (golden transcript test —
-regenerate deliberately with `test/golden_update.ts` after output changes).
-See `mjrender/README.md`. Uses Deno, not Node/npm.
+Run: `cd mjrender && deno task render ../1.mjlog` (file args also accept
+tenhou.net replay/log URLs); CLI subcommands `kyoku`/`anchors`/`snapshot`;
+`deno task mcp` starts the stdio MCP server (tools prefixed `mj_`:
+mj_render_game / mj_render_kyoku / mj_list_anchors / mj_get_snapshot + fact
+tools); `deno task eval` emits ground-truth Q/A JSONL; `deno task bundle`
+builds the `mjrender.mcpb` Claude Desktop extension. Tests: `deno task test`
+(golden transcript test — regenerate deliberately with `test/golden_update.ts`
+after output changes). See `mjrender/README.md`. Uses Deno, not Node/npm.
 
 ## Maude Specification (`mahjong.maude`)
 

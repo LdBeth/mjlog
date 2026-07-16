@@ -213,7 +213,7 @@ export class BoardState {
     const open = this.melds[seat].length;
     const closed = open === 0;
     const s = shanten(counts, open, closed);
-    const types = ukeireTypes(counts, open, closed);
+    const types = ukeireTypes(counts, open, closed, s);
     let total = 0;
     for (const t of types) total += Math.max(0, 4 - this.publicVisible[t] - counts[t]);
     return { shanten: s, kinds: types.length, count: total, types };

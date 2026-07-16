@@ -4,14 +4,12 @@
 import { loadXml } from "./load.ts";
 import { parseGame } from "./parse.ts";
 import { renderGameAnnotated } from "./render.ts";
-import { placements } from "./scoring.ts";
+import { owariRows, placements } from "./scoring.ts";
 import { renderSnapshot } from "./snapshot.ts";
 import { replayTo } from "./state.ts";
-import { tileGlyph, typeGlyph } from "./tiles.ts";
+import { roundName, tileGlyph, typeGlyph, WIND } from "./tiles.ts";
 import type { AgariResult, Beat, Game, RenderOptions } from "./model.ts";
 import { limitName, yakuName } from "./yaku.ts";
-
-const WIND = ["東", "南", "西", "北"];
 
 export async function loadGame(path: string): Promise<Game> {
   const game = parseGame(await loadXml(path));
@@ -51,8 +49,7 @@ export function renderKyoku(
 
 export function roundLabel(game: Game, roundIndex: number): string {
   const round = game.rounds[roundIndex];
-  const k = round.kyoku;
-  return `${WIND[Math.floor(k / 4) % 4]}${(k % 4) + 1}局${round.honba}本場`;
+  return `${roundName(round.kyoku)}${round.honba}本場`;
 }
 
 /**
@@ -76,10 +73,9 @@ export function resolveKyoku(game: Game, selector: string): number[] {
     : WIND.indexOf(m[1]);
   const kyoku = windIdx * 4 + (Number(m[2]) - 1);
   const honba = m[3] === undefined ? undefined : Number(m[3]);
-  const hits = game.rounds
-    .map((r, i) => ({ r, i }))
-    .filter(({ r }) => r.kyoku === kyoku && (honba === undefined || r.honba === honba))
-    .map(({ i }) => i);
+  const hits = game.rounds.flatMap((r, i) =>
+    r.kyoku === kyoku && (honba === undefined || r.honba === honba) ? [i] : []
+  );
   if (hits.length === 0) throw new Error(`no round matches "${selector}"`);
   return hits;
 }
@@ -217,11 +213,7 @@ export function finalStandings(
   game: Game,
 ): Array<{ place: number; seat: number; name: string; score: number; points: number }> | null {
   if (!game.owari) return null;
-  const rows = [0, 1, 2, 3]
-    .filter((s) => s * 2 + 1 < game.owari!.length)
-    .map((s) => ({ seat: s, score: game.owari![s * 2] * 100, points: game.owari![s * 2 + 1] }))
-    .sort((a, b) => b.score - a.score);
-  return rows.map((r, i) => ({
+  return owariRows(game.owari).map((r, i) => ({
     place: i + 1,
     seat: r.seat,
     name: game.players[r.seat].name,
@@ -251,7 +243,7 @@ export type SnapshotQuery =
 export function getSnapshot(game: Game, q: SnapshotQuery): string {
   if ("anchor" in q) {
     const beat = listAnchors(game).find((b) => b.id === q.anchor);
-    if (!beat) throw new Error(`no anchor #${q.anchor} (use list_anchors / anchors)`);
+    if (!beat) throw new Error(`no anchor #${q.anchor} (use mj_list_anchors / anchors)`);
     const round = game.rounds[beat.round];
     const st = replayTo(game, round, { eventIndex: beat.eventIndex });
     return renderSnapshot(game, round, st, `#${beat.id} ${beat.kind}｜${beat.topic}`);

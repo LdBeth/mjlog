@@ -34,6 +34,13 @@ const PIN = ["①", "②", "③", "④", "⑤", "⑥", "⑦", "⑧", "⑨"];
 const SOU = ["１", "２", "３", "４", "５", "６", "７", "８", "９"];
 const HONOR = ["東", "南", "西", "北", "白", "發", "中"];
 
+export const WIND = ["東", "南", "西", "北"];
+
+/** Round name from a kyoku index, e.g. 0→"東1局", 4→"南1局". */
+export function roundName(kyoku: number): string {
+  return `${WIND[Math.floor(kyoku / 4) % 4]}${(kyoku % 4) + 1}局`;
+}
+
 /** Glyph for a tile *type* (no aka distinction). */
 export function typeGlyph(type: number): string {
   const suit = suitOfType(type);
@@ -90,18 +97,21 @@ export function doraFromIndicatorType(indType: number): number {
  * e.g. "一二三 ④⑤⑥ ３４５ 東東 白白白". Sorted within each suit.
  */
 export function renderHand(concealed: Tile[], melds: Meld[] = [], aka = true): string {
-  const groups: Record<Suit, Tile[]> = { m: [], p: [], s: [], z: [] };
-  for (const id of concealed) groups[suitOfType(tileType(id))].push(id);
+  // Sorting by id already orders by (type, id) — type = id >> 2 is monotone in
+  // id — and puts the suits in m/p/s/z order, so one global sort replaces the
+  // per-suit grouping: each consecutive same-suit run IS a suit group.
+  const sorted = [...concealed].sort((a, b) => a - b);
   const parts: string[] = [];
-  for (const suit of ["m", "p", "s", "z"] as Suit[]) {
-    const g = groups[suit];
-    if (g.length === 0) continue;
-    g.sort((a, b) => tileType(a) - tileType(b) || a - b);
-    parts.push(g.map((id) => tileGlyph(id, aka)).join(""));
+  for (let i = 0; i < sorted.length;) {
+    const suit = suitOfType(tileType(sorted[i]));
+    let body = "";
+    while (i < sorted.length && suitOfType(tileType(sorted[i])) === suit) {
+      body += tileGlyph(sorted[i++], aka);
+    }
+    parts.push(body);
   }
-  let out = parts.join(" ");
-  for (const m of melds) out += " " + renderMeld(m, aka);
-  return out.trim();
+  for (const m of melds) parts.push(renderMeld(m, aka));
+  return parts.join(" ");
 }
 
 const MELD_LABEL: Record<Meld["kind"], string> = {
@@ -114,7 +124,7 @@ const MELD_LABEL: Record<Meld["kind"], string> = {
 };
 
 export function renderMeld(m: Meld, aka = true): string {
-  const tiles = [...m.tiles].sort((a, b) => tileType(a) - tileType(b) || a - b);
-  const body = tiles.map((id) => tileGlyph(id, aka)).join("");
+  // m.tiles is sorted ascending (Meld invariant), which is the (type, id) order.
+  const body = m.tiles.map((id) => tileGlyph(id, aka)).join("");
   return `[${MELD_LABEL[m.kind]}${body}]`;
 }

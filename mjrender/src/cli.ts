@@ -25,7 +25,7 @@ import type { RenderOptions } from "./model.ts";
 function usage(): never {
   console.error(
     [
-      "usage: cli.ts [command] [options] <file.mjlog|xml>",
+      "usage: cli.ts [command] [options] <file.mjlog|xml | tenhou.net URL>",
       "  render (default)  --hands key|all   --snapshots inline",
       "  kyoku <sel>       one round, self-contained (sel: S3 / 東1 / E1.2 / round index)",
       "  anchors           list commentary anchors (#id kind kyoku junme seat topic)",

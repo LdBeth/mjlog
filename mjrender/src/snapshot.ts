@@ -13,16 +13,12 @@ import {
   doraFromIndicatorType,
   renderHand,
   renderMeld,
+  roundName,
   tileGlyph,
   tileType,
   typeGlyph,
+  WIND,
 } from "./tiles.ts";
-
-const WIND = ["東", "南", "西", "北"];
-
-function roundName(kyoku: number): string {
-  return `${WIND[Math.floor(kyoku / 4) % 4]}${(kyoku % 4) + 1}局`;
-}
 
 function riverLine(st: BoardState, seat: number, aka: boolean): string {
   if (st.rivers[seat].length === 0) return "河:（なし）";

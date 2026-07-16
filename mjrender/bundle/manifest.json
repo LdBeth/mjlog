@@ -1,0 +1,33 @@
+{
+  "manifest_version": "0.2",
+  "name": "mjrender",
+  "display_name": "mjrender",
+  "version": "0.2.0",
+  "description": "Deterministic game-state oracle over Tenhou mjlog files: commentary transcript, board snapshots, and structured fact queries.",
+  "long_description": "Renders a Tenhou mahjong log as an LLM-ready Japanese commentary transcript with computed metrics (shanten/ukeire/waits/dora/danger evidence) and 〔解説ポイント#N〕 anchors, and answers queries against the same replay engine: mj_render_game, mj_render_kyoku, mj_list_anchors, mj_get_snapshot, plus structured fact tools (kyoku start/result, riichi declarations, final standings). Give tools absolute paths to .mjlog/.xml files, or tenhou.net replay/log URLs.",
+  "author": {
+    "name": "LdBeth"
+  },
+  "server": {
+    "type": "binary",
+    "entry_point": "server/mjrender-mcp",
+    "mcp_config": {
+      "command": "${__dirname}/server/mjrender-mcp",
+      "args": []
+    }
+  },
+  "tools": [
+    { "name": "mj_render_game", "description": "Full game as an annotated Japanese commentary transcript" },
+    { "name": "mj_render_kyoku", "description": "One round, self-contained, with game-global anchor ids" },
+    { "name": "mj_list_anchors", "description": "All commentary anchors (#id, kind, kyoku, junme, seat, topic)" },
+    { "name": "mj_get_snapshot", "description": "Full board state at an anchor or kyoku+junme" },
+    { "name": "mj_get_kyoku_start", "description": "Round start conditions (JSON)" },
+    { "name": "mj_get_kyoku_result", "description": "Round outcome(s) (JSON)" },
+    { "name": "mj_get_riichi_declarations", "description": "Riichi declarations with waits (JSON)" },
+    { "name": "mj_get_final_standings", "description": "Final standings (JSON)" }
+  ],
+  "keywords": ["mahjong", "tenhou", "mjlog", "replay"],
+  "compatibility": {
+    "platforms": ["darwin"]
+  }
+}

@@ -88,44 +88,55 @@ export function overtakeNeeds(args: {
   const beats = (a: number, b: number) =>
     a > b || (a === b && prio(seat, initialEast) < prio(leader, initialEast));
 
-  const needs: OvertakeNeeds = { impossible: false };
-
-  for (const c of CANDS) {
-    if (needs.ron) break;
-    const pay = ronPay(isDealer, c.base);
-    if (beats(my + pay + bonusRon, ld)) {
-      needs.ron = `ロン${c.limit ?? pay}`;
-    }
-  }
-  for (const c of CANDS) {
-    if (needs.direct) break;
-    const pay = ronPay(isDealer, c.base);
-    if (beats(my + pay + bonusRon, ld - pay - 300 * honba)) {
-      needs.direct = `直撃${c.limit ?? pay}`;
-    }
-  }
-  for (const c of CANDS) {
-    if (needs.tsumo) break;
-    let gain: number, leaderPays: number, label: string;
+  // CANDS is sorted ascending, so the minimum winning hand per mode is the
+  // FIRST candidate whose payment overtakes the leader.
+  const ronLabel = (c: Cand) => c.limit ?? `${ronPay(isDealer, c.base)}`;
+  const tsumoOf = (c: Cand) => {
     if (isDealer) {
       const each = ru(c.base * 2);
-      gain = each * 3;
-      leaderPays = each;
-      label = c.limit ?? `${each}オール`;
-    } else {
-      const fromDealer = ru(c.base * 2);
-      const fromOther = ru(c.base);
-      gain = fromDealer + fromOther * 2;
-      leaderPays = leader === dealer ? fromDealer : fromOther;
-      label = c.limit ?? `${fromOther}-${fromDealer}`;
+      return { gain: each * 3, leaderPays: each, label: c.limit ?? `${each}オール` };
     }
-    gain += 100 * honba * 3 + 1000 * kyotaku;
-    leaderPays += 100 * honba;
-    if (beats(my + gain, ld - leaderPays)) {
-      needs.tsumo = `ツモ${label}`;
-    }
-  }
+    const fromDealer = ru(c.base * 2);
+    const fromOther = ru(c.base);
+    return {
+      gain: fromDealer + fromOther * 2,
+      leaderPays: leader === dealer ? fromDealer : fromOther,
+      label: c.limit ?? `${fromOther}-${fromDealer}`,
+    };
+  };
 
-  needs.impossible = !needs.ron && !needs.direct && !needs.tsumo;
-  return needs;
+  const ron = CANDS.find((c) => beats(my + ronPay(isDealer, c.base) + bonusRon, ld));
+  const direct = CANDS.find((c) => {
+    const pay = ronPay(isDealer, c.base);
+    return beats(my + pay + bonusRon, ld - pay - 300 * honba);
+  });
+  const tsumo = CANDS.find((c) => {
+    const t = tsumoOf(c);
+    return beats(
+      my + t.gain + 100 * honba * 3 + 1000 * kyotaku,
+      ld - t.leaderPays - 100 * honba,
+    );
+  });
+
+  return {
+    ron: ron && `ロン${ronLabel(ron)}`,
+    direct: direct && `直撃${ronLabel(direct)}`,
+    tsumo: tsumo && `ツモ${tsumoOf(tsumo).label}`,
+    impossible: !ron && !direct && !tsumo,
+  };
+}
+
+/**
+ * Decode the log's `owari` pairs (score, placement points) into per-seat rows,
+ * sorted 1st→4th (score descending; stable, so seat order breaks ties).
+ * Scores are converted to points (×100).
+ */
+export function owariRows(
+  owari: number[],
+): Array<{ seat: number; score: number; points: number }> {
+  const rows = [];
+  for (let s = 0; s < 4 && s * 2 + 1 < owari.length; s++) {
+    rows.push({ seat: s, score: owari[s * 2] * 100, points: owari[s * 2 + 1] });
+  }
+  return rows.sort((a, b) => b.score - a.score);
 }

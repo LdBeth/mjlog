@@ -10,10 +10,8 @@ import { parseYaku, parseYakuman } from "./yaku.ts";
 import type {
   AgariResult,
   Game,
-  GameEvent,
   PlayerInfo,
   Round,
-  RoundResult,
   RuleSet,
   RyuukyokuResult,
   Tile,
