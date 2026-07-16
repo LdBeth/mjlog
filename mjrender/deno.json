@@ -3,12 +3,12 @@
   "version": "0.1.0",
   "exports": "./src/cli.ts",
   "tasks": {
-    "render": "deno run --allow-read --allow-net=tenhou.net src/cli.ts",
-    "mcp": "deno run --allow-read --allow-net=tenhou.net src/mcp.ts",
+    "render": "deno run --allow-read --allow-write --allow-net=tenhou.net src/cli.ts",
+    "mcp": "deno run --allow-read --allow-write --allow-env=HOME --allow-net=tenhou.net src/mcp.ts",
     "eval": "deno run --allow-read --allow-net=tenhou.net src/eval.ts",
     "check": "deno check src/*.ts",
-    "test": "deno test --allow-read --allow-run=deno",
-    "bundle": "deno compile --allow-read --allow-net=tenhou.net --output bundle/server/mjrender-mcp src/mcp.ts && deno run -A npm:@anthropic-ai/mcpb pack bundle mjrender.mcpb"
+    "test": "deno test --allow-read --allow-write --allow-run=deno",
+    "bundle": "deno bundle -o mcp.mjs src/mcp.ts && deno compile --allow-read --allow-write --allow-env=HOME --allow-net=tenhou.net --output bundle/server/mjrender-mcp mcp.mjs && deno run -A npm:@anthropic-ai/mcpb pack bundle mjrender.mcpb"
   },
   "imports": {
     "fast-xml-parser": "npm:fast-xml-parser@^4.5.0",

@@ -20,7 +20,7 @@ import { overtakeNeeds, owariRows, placements } from "./scoring.ts";
 import { renderSnapshot } from "./snapshot.ts";
 import { BoardState, type RestInfo } from "./state.ts";
 import { countsFromTiles, shanten, ukeireTypes } from "./shanten.ts";
-import { limitName, yakuName } from "./yaku.ts";
+import { limitName, openYakuRead, yakuName } from "./yaku.ts";
 import {
   doraFromIndicatorType,
   isAka,
@@ -33,6 +33,7 @@ import {
 } from "./tiles.ts";
 
 const DISCARD_MARK = "★"; // salience flag on a commentary-worthy beat
+const EARLY_FURO_JUNME = 6; // a 2nd meld by this junme is a 副露判断 moment
 const TSUMOGIRI_MARK = "▽"; // marks a tsumogiri (drawn tile discarded unchanged)
 
 function P(seat: number): string {
@@ -69,18 +70,41 @@ function danName(dan: string): string {
   return Number.isInteger(i) && i >= 0 && i < DAN_NAMES.length ? DAN_NAMES[i] : `段位${dan}`;
 }
 
-/** Self-describing preamble so any LLM receiving only the transcript knows how to read it. */
-function formatInstruction(): string {
+/**
+ * Self-describing preamble so any LLM receiving only the transcript knows how
+ * to read it. Two audiences:
+ *  - "fill": the commentator LLM. It must NOT copy the transcript back (long
+ *    verbatim reproduction is where models corrupt tile facts) — it produces
+ *    only an anchor-id→comment table, which weaveCommentary() splices in
+ *    deterministically.
+ *  - "final": the reader of a woven document (◆解説 lines already in place).
+ */
+export function formatInstruction(mode: "fill" | "final" = "fill"): string {
+  const head = mode === "fill"
+    ? [
+      "■この牌譜の読み方（解説者への指示）",
+      "これは天鳳の対局記録です。あなたは麻雀の実況解説者として、各",
+      "〔解説ポイント#N: 種別｜…〕 の局面について、その直前の局面・手牌をふまえた解説コメントを",
+      "書いてください。牌譜本文を書き写してはいけません（長文の転記は牌情報の誤写のもと）。",
+      "成果物は アンカーID→コメント の対応表だけです:",
+      '  {"1": "コメント…", "2": "コメント…"}',
+      "この対応表を mjrender の weave 機能（MCPツール mj_weave_commentary / CLI weave コマンド）に",
+      "渡すと、事実行はツール側が原文のまま再現し、解説だけが差し込まれた完成稿が生成される。",
+      "★の付いた行（注目の局面）には、局・巡目・席（例: 東1局・5巡・P2）を指定した短い一言を",
+      "任意で添えられる（weave の notes 入力。その★行の直後に差し込まれる）。",
+      "・〔解説ポイント#N: 種別｜…〕のNは局面ID。この牌譜を出力したツール（mjrender）の",
+      "  snapshot機能（MCPツール mj_get_snapshot / CLI snapshot コマンド）にIDを渡すと、その時点の",
+      "  全員の河・点数・手牌つき盤面を呼び出せる（利用できる場合のみ）。",
+    ]
+    : [
+      "■この牌譜の読み方",
+      "これは天鳳の対局記録に解説コメントを織り込んだ観戦記です。",
+      "・「◆解説（種別）:」=解説者のコメント / 「◆一言:」=★の局面への解説者の一言。",
+      "  それ以外の行は対局の事実情報",
+      "・〔解説ポイント#N: …〕=解説が未記入のまま残された局面（あれば）",
+    ];
   return [
-    "■この牌譜の読み方（解説者への指示）",
-    "これは天鳳の対局記録です。あなたは麻雀の実況解説者として、文中の",
-    "〔解説ポイント#N: 種別｜…〕 の各箇所を、その直前の局面・手牌をふまえた解説コメントに",
-    "置き換えてください。それ以外の行は事実情報なので改変しないでください。",
-    "また ★ の付いた行（注目の局面）には、任意でその行の直後に短い一言解説を",
-    "添えてもよい。不要と判断すれば事実行のまま残してよい（★行への追記は任意）。",
-    "・〔解説ポイント#N: 種別｜…〕のNは局面ID。この牌譜を出力したツール（mjrender）の",
-    "  snapshot機能（MCPツール mj_get_snapshot / CLI snapshot コマンド）にIDを渡すと、その時点の",
-    "  全員の河・点数・手牌つき盤面を呼び出せる（利用できる場合のみ）。",
+    ...head,
     "・牌表記: 一〜九=萬子 / ①〜⑨=筒子 / １〜９=索子 / 東南西北白發中=字牌 / 赤=赤ドラ",
     "・場風=局名で決まる風（東n局→東、南n局→南）、配牌の(東家/南家/西家/北家)=各家の自風。役牌判断に用いる",
     "・「N巡」=巡目。親（東家）が山からツモるたび1巡進む卓全体共有のカウンタで、各巡の最初の打牌にのみ表示",
@@ -89,8 +113,10 @@ function formatInstruction(): string {
     "・「◇結果時点の各家手牌」=和了/流局時の全員の手牌と聴牌/向聴の事実。（振聴）=待ち牌を自分で捨てているフリテン",
     "・「◇見逃し」=聴牌者がロン可能な牌を見送った事実（フリテン選択・黙聴の見送りを含む。直後の状況判断は解説対象）",
     "・「嶺上ツモ」=カン後の嶺上牌ツモ、「＋新ドラ」=カンによる新ドラ表示（表示位置は実際のめくり順）",
-    "・★=注目の局面（任意で一言解説を添えてよい／不要ならそのまま） / ┗…手:=その時点の手牌",
+    "・★=注目の局面 / ┗…手:=その時点の手牌",
     "・「┗ 比較:」=★の打牌の代替候補との比較（◎=実際の打牌。牌種単位、赤は区別しない）",
+    "・「┗ 役読み:」=早い2副露（6巡以内）/3副露時点の役の見通し（確定=副露で確定済 / 可=阻害なし /",
+    "  後付け可=手内の役牌対子 / 見込み=必要ブロックの過半が実現済。役なし懸念=現状確定役なし）",
     "・危険度低/中/高=リーチへの放銃危険度の目安。続く〔…〕が根拠: スジ/半スジ/無スジ、",
     "  ノーチャンス/ワンチャンス=壁（両面待ちに必要な牌が残0/1枚）、生牌/場にn枚=見えている枚数、",
     "  役牌（場風/自風/三元）/客風=字牌の種別。「← 押し」=脅威に対する押し",
@@ -100,10 +126,20 @@ function formatInstruction(): string {
   ].join("\n");
 }
 
+/** A ★-flagged line, addressable by game position (round + junme + seat). */
+export interface StarSite {
+  round: number; // index into game.rounds
+  junme: number;
+  seat: number;
+  line: number; // line index into RenderResult.text
+}
+
 /** Transcript text plus the machine-readable beat list behind its anchors. */
 export interface RenderResult {
   text: string;
   beats: Beat[];
+  /** Every ★ line, so weaveCommentary can attach optional one-liner notes. */
+  stars: StarSite[];
   /** Text split by section, so one kyoku can be served self-contained:
    *  header = format preamble + game/player block; rounds[i] = round i's lines. */
   sections: { header: string; rounds: string[]; owari?: string };
@@ -121,6 +157,7 @@ export function renderGame(game: Game, opts: RenderOptions): string {
 export function renderGameAnnotated(game: Game, opts: RenderOptions): RenderResult {
   const out: string[] = [];
   const beats: Beat[] = [];
+  const stars: StarSite[] = [];
   const g = game;
 
   out.push(formatInstruction());
@@ -147,7 +184,7 @@ export function renderGameAnnotated(game: Game, opts: RenderOptions): RenderResu
   const roundBounds: Array<[number, number]> = [];
   for (let r = 0; r < g.rounds.length; r++) {
     const start = out.length;
-    lastJunme = renderRound(g, g.rounds[r], r, opts, out, beats);
+    lastJunme = renderRound(g, g.rounds[r], r, opts, out, beats, stars);
     out.push("");
     roundBounds.push([start, out.length]);
   }
@@ -160,9 +197,20 @@ export function renderGameAnnotated(game: Game, opts: RenderOptions): RenderResu
       eventIndex: (g.rounds.at(-1)?.events.length ?? 0) - 1,
     });
   }
+  // markStar records indices into `out`, whose elements can be multi-line
+  // blocks (preamble, snapshots) — convert them to text line numbers.
+  let acc = 0;
+  const lineStart = out.map((el) => {
+    const start = acc;
+    acc += el.split("\n").length;
+    return start;
+  });
+  for (const s of stars) s.line = lineStart[s.line];
+
   return {
     text: out.join("\n"),
     beats,
+    stars,
     sections: {
       header: out.slice(0, headerEnd).join("\n"),
       rounds: roundBounds.map(([s, e]) => out.slice(s, e).join("\n")),
@@ -179,9 +227,15 @@ function renderRound(
   opts: RenderOptions,
   out: string[],
   beats: Beat[],
+  stars: StarSite[],
 ): number {
   const aka = g.rules.aka;
   const st = new BoardState(g, round);
+
+  // The NEXT line pushed is a ★ line — register it as a note-addressable site.
+  const markStar = (seat: number): void => {
+    stars.push({ round: roundIndex, junme: st.junme, seat, line: out.length });
+  };
 
   // Each player's seat wind (自風) is their offset from the dealer (東家=親, then
   // 南西北 counterclockwise); it drives yakuhai value, so surface it at 配牌.
@@ -412,6 +466,30 @@ function renderRound(
       const meldHead = `${P(m.who)} ${label}${renderMeldTiles(m)}${fromTxt}`;
       const isKan = m.kind === "ankan" || m.kind === "daiminkan" || m.kind === "shouminkan";
 
+      // 副露判断 moments: an early 2nd meld (≤EARLY_FURO_JUNME巡 — committing
+      // the hand while the board is young) and the 3rd meld. 加槓 upgrades its
+      // pon in place, so it never NEWLY reaches either count. Capture the
+      // open-hand yaku read NOW — the post-call state that replaying to this
+      // event reproduces — before a rinshan draw mutates the hand. The lines
+      // are emitted after the call/kan-turn line.
+      const callIdx = i;
+      const opened = st.melds[m.who].length;
+      const furoRead = m.kind !== "shouminkan" &&
+          (opened === 3 || (opened === 2 && st.junme <= EARLY_FURO_JUNME))
+        ? openYakuRead(st.melds[m.who], st.hands[m.who], st.valueHonorsBySeat[m.who], g.rules.kuitan)
+        : null;
+      const pushFuroBeat = (): void => {
+        if (!furoRead) return;
+        out.push(`  ┗ 役読み: ${furoRead.join(" ／ ")}`);
+        const moment = opened === 2 ? `${st.junme}巡での2副露` : "3副露";
+        pushAnchor(
+          "副露判断",
+          `${P(m.who)}の${moment}、狙いと押し引き（鳴きの是非・役の見通し）`,
+          callIdx,
+          m.who,
+        );
+      };
+
       if (isKan) {
         // Integrate the kan turn into one line: kan → (dora) → rinshan draw →
         // (dora) → discard, keeping each new-dora reveal at its true stream
@@ -467,6 +545,7 @@ function renderRound(
           out.push(lead.join("  ")); // no discard (e.g. 嶺上開花 tsumo); win renders next
           i = j - 1;
         }
+        pushFuroBeat();
         continue;
       }
 
@@ -475,12 +554,15 @@ function renderRound(
       const afterTxt = afterCall <= 0 ? "聴牌" : `${afterCall}`;
       const delta = `向聴${beforeCall}→${afterTxt}`;
       const shText = advanced ? delta : afterCall <= 0 ? "聴牌" : `向聴${afterCall}`;
+      if (advanced) markStar(m.who);
       out.push(
         `${meldHead}  〔${shText} ドラ${st.countDora(m.who)}〕${
           advanced ? " " + DISCARD_MARK : ""
         }`,
       );
       if (advanced) out.push(handLine(m.who, `(${label}で${delta}前進)`));
+      if (furoRead && !advanced) out.push(handLine(m.who, `(${opened}副露時点)`));
+      pushFuroBeat();
       continue;
     }
 
@@ -656,6 +738,7 @@ function renderRound(
       // dora note only when the forced-riichi `state` isn't already spelling it out
       const doraNote = !forced && isDoraDiscard ? `  ${doraKind}切り` : "";
       const star = highDanger || isDoraDiscard ? " " + DISCARD_MARK : "";
+      if (star !== "") markStar(who);
       out.push(
         `${P(who)} ${jmMark}${
           tileGlyph(tile, aka)
@@ -685,6 +768,7 @@ function renderRound(
     // a riichi declaration discarding a dora already reads as notable; skip the
     // redundant tag there, but flag any other dora/aka discard inline.
     const inlineDora = isDoraDiscard && !riichi ? `  ${doraKind}切り` : "";
+    if (star !== "") markStar(who);
     out.push(
       `${prefix}${tileGlyph(tile, aka)}${flagTxt}${tgMark}  ${
         metricTag(info, who)

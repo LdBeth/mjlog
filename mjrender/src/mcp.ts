@@ -2,11 +2,15 @@
 //
 //   deno task mcp        (equivalent: deno run --allow-read src/mcp.ts)
 //
-// All tools are thin wrappers over core.ts and share the mj_ name prefix —
-// mj_render_game, mj_render_kyoku, mj_list_anchors, mj_get_snapshot, plus the
-// structured fact tools. The intended flow: the agent renders the (lean)
-// transcript once, then recalls full board state for any 〔解説ポイント#N〕
-// anchor — or any explicit kyoku+junme — while writing commentary.
+// All tools are thin wrappers over core.ts and share the mj_ name prefix.
+// The server is STATEFUL: mj_open_log is the only tool that takes a path — it
+// parses the log once into session state, and every other tool operates on
+// that state (erroring until a log is opened). The commentary draft also
+// lives server-side: the agent fills one anchor at a time with mj_add_comment
+// (plus mj_add_note for ★ lines), checks progress with mj_draft_status, and
+// mj_weave_commentary splices the accumulated draft into a re-rendered
+// transcript written to a file. The agent never reproduces fact lines and the
+// woven document never passes through the model's context.
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -17,51 +21,78 @@ import {
   getSnapshot,
   kyokuResults,
   kyokuStart,
+  listAnchors,
+  listStarSites,
   loadGame,
-  renderGame,
   renderKyoku,
+  renderOutline,
   riichiDeclarations,
+  roundLabel,
+  type StarNote,
+  uniqueRound,
+  weaveCommentary,
+  weaveSummary,
 } from "./core.ts";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { isUrl } from "./load.ts";
 import type { Game } from "./model.ts";
 
-// Parsed-game cache keyed by path, invalidated when the file's mtime changes.
-// URL sources have no mtime; a finished game's log is immutable, so 0 pins
-// them in the cache for the process lifetime.
-const cache = new Map<string, { mtime: number; game: Game }>();
-async function game(path: string): Promise<Game> {
-  const mtime = isUrl(path) ? 0 : (await Deno.stat(path)).mtime?.getTime() ?? 0;
-  const hit = cache.get(path);
-  if (hit && hit.mtime === mtime) return hit.game;
-  const g = await loadGame(path);
-  cache.set(path, { mtime, game: g });
-  return g;
+// ---- session state ----
+// One log at a time: the parsed game plus the commentary draft being built
+// against it. mj_open_log replaces it; reopening the same (unchanged) log
+// keeps the draft so an accidental re-open loses nothing.
+interface Session {
+  path: string;
+  mtime: number; // 0 for URL sources (a finished game's log is immutable)
+  game: Game;
+  comments: Map<number, string>; // anchor id → commentary text
+  notes: Map<string, StarNote>; // "round:junme:seat" → ★-line note
+}
+let session: Session | undefined;
+
+function current(): Session {
+  if (!session) throw new Error("no log loaded — call mj_open_log with the mjlog path/URL first");
+  return session;
+}
+
+function draftLine(s: Session): string {
+  return `draft: ${s.comments.size}/${listAnchors(s.game).length} comments, ${s.notes.size} notes`;
 }
 
 type ToolResult = { content: Array<{ type: "text"; text: string }>; isError?: boolean };
 
 // Handler arg shapes, stated explicitly: the SDK's zod-based inference degrades
 // to `any` when `zod` resolves to a different npm instance than the SDK's own.
-interface RenderArgs {
-  path: string;
+interface KyokuArgs {
+  kyoku: string;
   hands?: "key" | "all";
   snapshots?: "none" | "inline";
 }
-interface KyokuArgs extends RenderArgs {
-  kyoku: string;
-}
 interface SnapshotArgs {
-  path: string;
   anchor?: number;
   kyoku?: string;
   junme?: number;
+}
+interface CommentArgs {
+  comments: Array<{ anchor: number; text: string }>;
+}
+interface NoteArgs {
+  kyoku: string;
+  junme: number;
+  seat: number;
+  text: string;
+}
+interface WeaveArgs {
+  out: string;
+  missing?: "keep" | "strip";
+  hands?: "key" | "all";
 }
 
 function ok(text: string): ToolResult {
   return { content: [{ type: "text", text }] };
 }
 
-async function run(fn: () => Promise<string>): Promise<ToolResult> {
+async function run(fn: () => Promise<string> | string): Promise<ToolResult> {
   try {
     return ok(await fn());
   } catch (e) {
@@ -72,59 +103,95 @@ async function run(fn: () => Promise<string>): Promise<ToolResult> {
   }
 }
 
-const PATH = z.string().describe(
-  "Tenhou mjlog source: local file path (gzipped .mjlog or plain .xml), or a tenhou.net URL — " +
-    "a replay link like https://tenhou.net/0/?log=<id>&tw=1 or the raw log endpoint",
-);
 const KYOKU = z.string().describe(
   'Round selector: wind+number like "S3" / "東1" (optionally ".honba", e.g. "E1.2" when a kyoku repeats), or a 0-based round index like "6"',
 );
 
-const server = new McpServer({ name: "mjrender", version: "0.2.0" });
+const server = new McpServer({ name: "mjrender", version: "0.4.3" });
+
+server.registerTool(
+  "mj_open_log",
+  {
+    description:
+      "Open a Tenhou game log and parse it into the session — the ONLY tool that takes a path; " +
+      "every other mj_ tool operates on the opened log. Also starts an empty commentary draft " +
+      "(reopening the same unchanged log keeps the draft; fresh=true discards it). Workflow: " +
+      "open → mj_render_game for the game outline → mj_render_kyoku one round at a time for " +
+      "per-turn detail → mj_get_snapshot at riichi/tenpai moments → save anchor comments with " +
+      "mj_add_comment (several per call is fine) → mj_weave_commentary writes the finished " +
+      "document.",
+    inputSchema: {
+      path: z.string().describe(
+        "Tenhou mjlog source: local file path (gzipped .mjlog or plain .xml), or a tenhou.net " +
+          "URL — a replay link like https://tenhou.net/0/?log=<id>&tw=1 or the raw log endpoint",
+      ),
+      fresh: z.boolean().optional()
+        .describe("Discard the existing commentary draft when reopening the same log"),
+    },
+  },
+  ({ path, fresh }: { path: string; fresh?: boolean }) =>
+    run(async () => {
+      const mtime = isUrl(path) ? 0 : (await Deno.stat(path)).mtime?.getTime() ?? 0;
+      const keep = !fresh && session !== undefined && session.path === path &&
+        session.mtime === mtime;
+      session = {
+        path,
+        mtime,
+        game: keep ? session!.game : await loadGame(path),
+        comments: keep ? session!.comments : new Map(),
+        notes: keep ? session!.notes : new Map(),
+      };
+      const g = session.game;
+      const players = g.players.map((p) => `P${p.seat} ${p.name}`).join(" / ");
+      return `opened ${path}\n${players}\n` +
+        `kyoku: ${g.rounds.length} / anchors: ${listAnchors(g).length} (mj_list_anchors)\n` +
+        draftLine(session);
+    }),
+);
 
 server.registerTool(
   "mj_render_game",
   {
-    description: "Render a full Tenhou game log as an LLM-ready Japanese commentary transcript. " +
-      "Fact lines + computed metrics (shanten/ukeire/waits/dora/danger) + 〔解説ポイント#N〕 " +
-      "commentary anchors whose #N ids are addressable via mj_get_snapshot.",
-    inputSchema: {
-      path: PATH,
-      hands: z.enum(["key", "all"]).optional()
-        .describe("Reconstructed-hand verbosity: key beats only (default) or every turn"),
-      snapshots: z.enum(["none", "inline"]).optional()
-        .describe("inline = embed a full board snapshot above every anchor (token-heavy)"),
-    },
+    description:
+      "OUTLINE of the opened game (crude, cheap): the players block, then per kyoku only the " +
+      "header with start scores, the condensed result (winner/yaku/points/score movements), and " +
+      "the 〔解説ポイント#N〕 anchor index with junme+seat — NO per-turn lines (the notation " +
+      "legend arrives with each mj_render_kyoku). Read this first to " +
+      "orient, then fetch full per-turn detail ONE ROUND AT A TIME with mj_render_kyoku. At " +
+      "riichi declarations and tenpai moments, check mj_get_snapshot BEFORE writing the comment. " +
+      "Commentary goes through mj_add_comment — do NOT reproduce transcript lines yourself.",
+    inputSchema: {},
   },
-  ({ path, hands, snapshots }: RenderArgs) =>
-    run(async () => renderGame(await game(path), { hands, snapshots })),
+  () => run(() => renderOutline(current().game)),
 );
 
 server.registerTool(
   "mj_render_kyoku",
   {
     description:
-      "Render ONE round (kyoku) of the game, self-contained (format preamble included). " +
-      "Anchor ids inside are game-global, so they agree with mj_list_anchors/mj_get_snapshot.",
+      "Render ONE round (kyoku) of the opened game in full per-turn detail, self-contained " +
+      "(format preamble included). Anchor ids inside are game-global, so they agree with " +
+      "mj_list_anchors/mj_get_snapshot. When the round has riichi declarations or tenpai, pull " +
+      "mj_get_snapshot for those moments before commenting on them.",
     inputSchema: {
-      path: PATH,
       kyoku: KYOKU,
       hands: z.enum(["key", "all"]).optional(),
       snapshots: z.enum(["none", "inline"]).optional(),
     },
   },
-  ({ path, kyoku, hands, snapshots }: KyokuArgs) =>
-    run(async () => renderKyoku(await game(path), kyoku, { hands, snapshots })),
+  ({ kyoku, hands, snapshots }: KyokuArgs) =>
+    run(() => renderKyoku(current().game, kyoku, { hands, snapshots })),
 );
 
 server.registerTool(
   "mj_list_anchors",
   {
-    description: "List every commentary anchor of the game, one per line: " +
-      "#id, kind (配牌評価/リーチ判断/押し引き/局総括/流局評価/終局総括), kyoku, junme, seat, topic.",
-    inputSchema: { path: PATH },
+    description: "List every commentary anchor of the opened game, one per line: " +
+      "#id, kind (配牌評価/リーチ判断/押し引き/副露判断/局総括/流局評価/終局総括), kyoku, junme, " +
+      "seat, topic.",
+    inputSchema: {},
   },
-  ({ path }: { path: string }) => run(async () => anchorTable(await game(path))),
+  () => run(() => anchorTable(current().game)),
 );
 
 server.registerTool(
@@ -135,23 +202,195 @@ server.registerTool(
       "(→Pn)=called away), melds, live scores + placements, riichi states, dora, remaining wall, " +
       "and each seat's concealed hand with shanten/ukeire. Address by anchor id (from the " +
       "transcript's 〔解説ポイント#N〕 / mj_list_anchors), or by kyoku + junme (state at the end of " +
-      "that go-around).",
+      "that go-around). ALWAYS check this at riichi declarations and tenpai moments before " +
+      "writing commentary (リーチ判断/押し引き anchors) — do not judge them from the outline alone.",
     inputSchema: {
-      path: PATH,
       anchor: z.number().int().positive().optional().describe("Anchor id #N"),
       kyoku: KYOKU.optional(),
       junme: z.number().int().nonnegative().optional()
         .describe("Go-around number (requires kyoku)"),
     },
   },
-  ({ path, anchor, kyoku, junme }: SnapshotArgs) =>
-    run(async () => {
-      const g = await game(path);
+  ({ anchor, kyoku, junme }: SnapshotArgs) =>
+    run(() => {
+      const g = current().game;
       if (anchor !== undefined) return getSnapshot(g, { anchor });
       if (kyoku !== undefined && junme !== undefined) return getSnapshot(g, { kyoku, junme });
       throw new Error("provide either `anchor`, or both `kyoku` and `junme`");
     }),
 );
+
+// ---- commentary draft (server-side state, filled one entry at a time) ----
+
+server.registerTool(
+  "mj_add_comment",
+  {
+    description:
+      "Save commentary for one or MORE anchors into the session draft — batch several per call " +
+      "(e.g. a finished kyoku's worth) to conserve tool calls; saving an anchor again replaces " +
+      "it. Fill anchors in any order; nothing is written to disk until mj_weave_commentary. The " +
+      "batch is atomic (one bad entry saves nothing). Returns draft progress and which anchors " +
+      "are still unfilled. ★-marked lines you meet in kyoku renders can optionally get a " +
+      "one-liner via mj_add_note.",
+    inputSchema: {
+      comments: z.array(z.object({
+        anchor: z.number().int().positive().describe("Anchor id #N"),
+        text: z.string().min(1).describe(
+          "Commentary for this anchor (plain text, may be multiline)",
+        ),
+      })).min(1).describe("Anchor comments to save, one entry per anchor"),
+    },
+  },
+  ({ comments }: CommentArgs) =>
+    run(() => {
+      const s = current();
+      const beats = listAnchors(s.game);
+      // validate the whole batch before touching the draft
+      const seen = new Set<number>();
+      for (const { anchor, text } of comments) {
+        if (anchor > beats.length) {
+          throw new Error(
+            `unknown anchor #${anchor} — this game has #1..#${beats.length} (mj_list_anchors)`,
+          );
+        }
+        if (seen.has(anchor)) throw new Error(`anchor #${anchor} appears twice in this batch`);
+        seen.add(anchor);
+        if (!text.trim()) throw new Error(`empty comment for anchor #${anchor}`);
+      }
+      const replaced: number[] = [];
+      for (const { anchor, text } of comments) {
+        if (s.comments.has(anchor)) replaced.push(anchor);
+        s.comments.set(anchor, text.trim());
+      }
+      const ids = comments.map((c) => `#${c.anchor}`).join(" ");
+      const open = beats.filter((x) => !s.comments.has(x.id)).map((x) => `#${x.id}`);
+      const rest = open.length === 0
+        ? " — all anchors filled; mj_weave_commentary writes the document"
+        : ` / 未記入: ${open.slice(0, 16).join(" ")}${open.length > 16 ? ` …(+${open.length - 16})` : ""}`;
+      return `saved ${ids}${
+        replaced.length ? ` (replaced ${replaced.map((i) => `#${i}`).join(" ")})` : ""
+      } — ${s.comments.size}/${beats.length}${rest}`;
+    }),
+);
+
+server.registerTool(
+  "mj_add_note",
+  {
+    description:
+      "Save an optional one-liner for a ★-marked line (notable discard/call) into the session " +
+      "draft, addressed by kyoku + junme + seat. One ★ site per call; calling again for the same " +
+      "site replaces it. If the seat has several ★ lines in one go-around (e.g. call then " +
+      "discard), the note lands after the last one.",
+    inputSchema: {
+      kyoku: KYOKU,
+      junme: z.number().int().nonnegative().describe("Go-around number of the ★ line"),
+      seat: z.number().int().min(0).max(3).describe("Acting seat 0-3 (P0-P3)"),
+      text: z.string().min(1).describe("Short one-liner for that ★ moment"),
+    },
+  },
+  ({ kyoku, junme, seat, text }: NoteArgs) =>
+    run(() => {
+      const s = current();
+      const t = text.trim();
+      if (!t) throw new Error(`empty ★ note for ${kyoku} ${junme}巡 P${seat}`);
+      const round = uniqueRound(s.game, kyoku);
+      const sites = listStarSites(s.game).filter((x) => x.round === round);
+      if (!sites.some((x) => x.junme === junme && x.seat === seat)) {
+        const here = sites.map((x) => `${x.junme}巡P${x.seat}`).join(" ");
+        throw new Error(
+          `no ★ line for P${seat} at ${roundLabel(s.game, round)} ${junme}巡` +
+            (here ? ` — ★ sites in this kyoku: ${here}` : " — this kyoku has no ★ lines"),
+        );
+      }
+      const key = `${round}:${junme}:${seat}`;
+      const replaced = s.notes.has(key);
+      s.notes.set(key, { kyoku: String(round), junme, seat, text: t });
+      return `★ note ${replaced ? "replaced" : "saved"} for ` +
+        `${roundLabel(s.game, round)} ${junme}巡 P${seat} — ${s.notes.size} note(s) in draft`;
+    }),
+);
+
+server.registerTool(
+  "mj_draft_status",
+  {
+    description:
+      "Progress of the session's commentary draft: every anchor as a checklist line " +
+      "(✓ filled / ・ unfilled), plus the saved ★ notes.",
+    inputSchema: {},
+  },
+  () =>
+    run(() => {
+      const s = current();
+      const list = listAnchors(s.game).map((b) =>
+        `${s.comments.has(b.id) ? "✓" : "・"} #${b.id}\t${b.kind}\t` +
+        `${roundLabel(s.game, b.round)}\t${b.junme}巡` +
+        `${b.seat !== undefined ? `\tP${b.seat}` : "\t"}\t${b.topic}`
+      );
+      const notes = [...s.notes.values()].map((n) =>
+        `★ ${roundLabel(s.game, uniqueRound(s.game, n.kyoku))} ${n.junme}巡 P${n.seat}: ${n.text}`
+      );
+      return [`${s.path} — ${draftLine(s)}`, ...list, ...notes].join("\n");
+    }),
+);
+
+server.registerTool(
+  "mj_weave_commentary",
+  {
+    description:
+      "Produce the finished commentary document: deterministically splice the session draft " +
+      "(everything accumulated via mj_add_comment / mj_add_note) into a re-rendered transcript " +
+      "and WRITE IT TO `out` — never copy transcript lines yourself; every fact line comes from " +
+      "the renderer verbatim. Returns only a one-line summary (filled/missing counts) — the " +
+      "document itself never enters the conversation; unfilled anchors stay as placeholders " +
+      "(missing=keep) so partial drafts are valid and you can weave again after more " +
+      "mj_add_comment calls.",
+    inputSchema: {
+      out: z.string().describe(
+        "Where to write the woven document (UTF-8). This server runs on the USER'S machine — " +
+          "paths from your own sandbox/workspace do not exist here. Best: a bare filename like " +
+          "'commentary.txt', which lands next to the log file (for URL sources: in the user's " +
+          "home directory). The summary reports the absolute path — relay it to the user",
+      ),
+      missing: z.enum(["keep", "strip"]).optional()
+        .describe("Anchors you did not fill: keep their placeholder lines (default) or strip them"),
+      hands: z.enum(["key", "all"]).optional()
+        .describe("Reconstructed-hand verbosity of the woven transcript (default key)"),
+    },
+  },
+  ({ out, missing, hands }: WeaveArgs) =>
+    run(async () => {
+      const s = current();
+      if (s.comments.size === 0 && s.notes.size === 0) {
+        throw new Error("draft is empty — save commentary first with mj_add_comment / mj_add_note");
+      }
+      const r = weaveCommentary(s.game, {
+        anchors: [...s.comments].map(([anchor, text]) => ({ anchor, text })),
+        notes: [...s.notes.values()],
+      }, { missing, hands });
+      const dest = resolveOut(out, s.path);
+      try {
+        await Deno.writeTextFile(dest, r.text + "\n");
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        throw new Error(
+          `cannot write ${dest}: ${msg}\nThis MCP server runs on the user's machine — paths from ` +
+            `your own environment (e.g. /mnt/…) don't exist here. Pass a bare filename to write ` +
+            `next to the log file, or an absolute path that exists on the user's machine.`,
+        );
+      }
+      return weaveSummary(r, dest);
+    }),
+);
+
+// The caller may live in a different filesystem than this server (an agent
+// sandbox vs the user's machine), so a relative `out` must resolve somewhere
+// predictable from the input: beside the log file, or under $HOME for URL
+// sources. The summary always reports the resulting absolute path.
+function resolveOut(out: string, srcPath: string): string {
+  if (isAbsolute(out)) return out;
+  const base = isUrl(srcPath) ? Deno.env.get("HOME") ?? Deno.cwd() : dirname(resolve(srcPath));
+  return join(base, out);
+}
 
 // ---- structured fact tools (JSON responses; same source as the transcript) ----
 
@@ -163,10 +402,9 @@ server.registerTool(
     description:
       "Start conditions of one round: dealer, honba, kyotaku, dora indicator, and per-seat " +
       "start scores with placements. JSON.",
-    inputSchema: { path: PATH, kyoku: KYOKU },
+    inputSchema: { kyoku: KYOKU },
   },
-  ({ path, kyoku }: { path: string; kyoku: string }) =>
-    run(async () => json(kyokuStart(await game(path), kyoku))),
+  ({ kyoku }: { kyoku: string }) => run(() => json(kyokuStart(current().game, kyoku))),
 );
 
 server.registerTool(
@@ -175,10 +413,9 @@ server.registerTool(
     description:
       "Outcome(s) of one round: winner, tsumo/ron + discarder, winning tile, points/fu/limit " +
       "and yaku — or draw reason + tenpai seats. Multiple entries = double/triple ron. JSON.",
-    inputSchema: { path: PATH, kyoku: KYOKU },
+    inputSchema: { kyoku: KYOKU },
   },
-  ({ path, kyoku }: { path: string; kyoku: string }) =>
-    run(async () => json(kyokuResults(await game(path), kyoku))),
+  ({ kyoku }: { kyoku: string }) => run(() => json(kyokuResults(current().game, kyoku))),
 );
 
 server.registerTool(
@@ -187,21 +424,20 @@ server.registerTool(
     description:
       "Every riichi declaration (whole game, or one kyoku): seat, junme, wait tiles, live " +
       "(unseen) wait count at declaration time, and the リーチ判断 anchor id. JSON.",
-    inputSchema: { path: PATH, kyoku: KYOKU.optional() },
+    inputSchema: { kyoku: KYOKU.optional() },
   },
-  ({ path, kyoku }: { path: string; kyoku?: string }) =>
-    run(async () => json(riichiDeclarations(await game(path), kyoku))),
+  ({ kyoku }: { kyoku?: string }) => run(() => json(riichiDeclarations(current().game, kyoku))),
 );
 
 server.registerTool(
   "mj_get_final_standings",
   {
     description: "Final standings: place, seat, name, score, placement points. JSON.",
-    inputSchema: { path: PATH },
+    inputSchema: {},
   },
-  ({ path }: { path: string }) =>
-    run(async () => {
-      const s = finalStandings(await game(path));
+  () =>
+    run(() => {
+      const s = finalStandings(current().game);
       if (!s) throw new Error("log has no 終局 record (game did not finish?)");
       return json(s);
     }),

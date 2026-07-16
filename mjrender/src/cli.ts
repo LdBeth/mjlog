@@ -1,10 +1,11 @@
 // CLI over the core query API. An LLM agent (or a human) can call every core
-// capability from the shell; the MCP server exposes the same four verbs.
+// capability from the shell; the MCP server exposes the same verbs.
 //
 //   deno run --allow-read src/cli.ts [render] [--hands key|all] [--snapshots inline] <file>
 //   deno run --allow-read src/cli.ts kyoku <sel> [--hands key|all] <file>
 //   deno run --allow-read src/cli.ts anchors <file>
 //   deno run --allow-read src/cli.ts snapshot (--anchor N | --kyoku <sel> --junme N) <file>
+//   deno run --allow-read [--allow-write] src/cli.ts weave <comments.json> [--out <file>] <file>
 //
 // <sel> = 0-based round index, or wind+number(+".honba"): "S3", "東1", "E1.2".
 
@@ -17,8 +18,11 @@ import {
   loadGame,
   renderGame,
   renderKyoku,
+  renderOutline,
   riichiDeclarations,
   type SnapshotQuery,
+  weaveCommentary,
+  weaveSummary,
 } from "./core.ts";
 import type { RenderOptions } from "./model.ts";
 
@@ -27,25 +31,35 @@ function usage(): never {
     [
       "usage: cli.ts [command] [options] <file.mjlog|xml | tenhou.net URL>",
       "  render (default)  --hands key|all   --snapshots inline",
+      "  outline           crude game outline (headers, results, anchor index; no turns)",
       "  kyoku <sel>       one round, self-contained (sel: S3 / 東1 / E1.2 / round index)",
       "  anchors           list commentary anchors (#id kind kyoku junme seat topic)",
       "  snapshot          --anchor N | --kyoku <sel> --junme N",
       "  facts <kind>      structured JSON: start <sel> | result <sel> | riichi [sel] | standings",
+      "  weave <comments.json>  splice anchor-keyed commentary into the transcript",
+      '                    JSON: {"12": "コメント"} / [{"anchor": 12, "text": "…"}], or',
+      '                    {"anchors": …, "notes": [{"kyoku": "E1", "junme": 5, "seat": 2,',
+      '                    "text": "…"}]} to also attach one-liners to ★ lines;',
+      "                    --out <file> writes the document (needs --allow-write), else stdout;",
+      "                    --missing keep|strip for unfilled anchors (default keep)",
     ].join("\n"),
   );
   Deno.exit(2);
 }
 
-const COMMANDS = ["render", "kyoku", "anchors", "snapshot", "facts"] as const;
+const COMMANDS = ["render", "outline", "kyoku", "anchors", "snapshot", "facts", "weave"] as const;
 
 interface Args {
   cmd: (typeof COMMANDS)[number];
   file: string;
   sel?: string; // kyoku positional
   factKind?: string; // facts positional
+  commentsPath?: string; // weave positional
   anchor?: number;
   kyoku?: string;
   junme?: number;
+  out?: string;
+  missing?: "keep" | "strip";
   opts: Partial<RenderOptions>;
 }
 
@@ -78,6 +92,10 @@ function parseArgs(argv: string[]): Args {
       args.kyoku = val("--kyoku");
     } else if (a === "--junme" || a.startsWith("--junme=")) {
       args.junme = Number(val("--junme"));
+    } else if (a === "--out" || a.startsWith("--out=")) {
+      args.out = val("--out");
+    } else if (a === "--missing" || a.startsWith("--missing=")) {
+      args.missing = val("--missing") === "strip" ? "strip" : "keep";
     } else if (a === "-h" || a === "--help") {
       usage();
     } else if (!a.startsWith("-")) {
@@ -90,6 +108,9 @@ function parseArgs(argv: string[]): Args {
   if (args.cmd === "kyoku") {
     if (positional.length !== 2) usage();
     [args.sel, args.file] = positional;
+  } else if (args.cmd === "weave") {
+    if (positional.length !== 2) usage();
+    [args.commentsPath, args.file] = positional;
   } else if (args.cmd === "facts") {
     // facts <kind> [sel] <file>
     if (positional.length === 3) [args.factKind, args.sel, args.file] = positional;
@@ -129,6 +150,9 @@ if (import.meta.main) {
       case "render":
         console.log(renderGame(game, a.opts));
         break;
+      case "outline":
+        console.log(renderOutline(game));
+        break;
       case "kyoku":
         console.log(renderKyoku(game, a.sel!, a.opts));
         break;
@@ -138,6 +162,18 @@ if (import.meta.main) {
       case "snapshot":
         console.log(getSnapshot(game, snapshotQuery(a)));
         break;
+      case "weave": {
+        const comments = JSON.parse(await Deno.readTextFile(a.commentsPath!));
+        const r = weaveCommentary(game, comments, { ...a.opts, missing: a.missing });
+        if (a.out !== undefined) {
+          await Deno.writeTextFile(a.out, r.text + "\n");
+          console.log(weaveSummary(r, a.out));
+        } else {
+          console.log(r.text);
+          if (r.missing.length) console.error(`[warn] ${weaveSummary(r)}`);
+        }
+        break;
+      }
       case "facts": {
         const json = (v: unknown) => console.log(JSON.stringify(v, null, 1));
         const need = (): string => {

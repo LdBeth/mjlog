@@ -2,9 +2,9 @@
   "manifest_version": "0.2",
   "name": "mjrender",
   "display_name": "mjrender",
-  "version": "0.2.0",
-  "description": "Deterministic game-state oracle over Tenhou mjlog files: commentary transcript, board snapshots, and structured fact queries.",
-  "long_description": "Renders a Tenhou mahjong log as an LLM-ready Japanese commentary transcript with computed metrics (shanten/ukeire/waits/dora/danger evidence) and 〔解説ポイント#N〕 anchors, and answers queries against the same replay engine: mj_render_game, mj_render_kyoku, mj_list_anchors, mj_get_snapshot, plus structured fact tools (kyoku start/result, riichi declarations, final standings). Give tools absolute paths to .mjlog/.xml files, or tenhou.net replay/log URLs.",
+  "version": "0.4.3",
+  "description": "Deterministic game-state oracle over Tenhou mjlog files: commentary transcript, board snapshots, structured fact queries, and incremental commentary weaving.",
+  "long_description": "Stateful session over a Tenhou mahjong log: mj_open_log parses the log once (absolute path to a .mjlog/.xml file, or a tenhou.net replay/log URL) and every other tool operates on it. Renders an LLM-ready Japanese commentary transcript with computed metrics (shanten/ukeire/waits/dora/danger evidence) and 〔解説ポイント#N〕 anchors, and answers queries against the same replay engine: mj_render_game (crude game outline), mj_render_kyoku (one round in full detail), mj_list_anchors, mj_get_snapshot, plus structured fact tools (kyoku start/result, riichi declarations, final standings). Commentary is saved server-side one anchor at a time (mj_add_comment, mj_add_note for ★ lines, mj_draft_status for progress); mj_weave_commentary splices the accumulated draft into a re-rendered transcript and writes the finished document to a file, so the model never copies fact lines.",
   "author": {
     "name": "LdBeth"
   },
@@ -17,10 +17,15 @@
     }
   },
   "tools": [
-    { "name": "mj_render_game", "description": "Full game as an annotated Japanese commentary transcript" },
-    { "name": "mj_render_kyoku", "description": "One round, self-contained, with game-global anchor ids" },
+    { "name": "mj_open_log", "description": "Parse a mjlog (path or tenhou.net URL) into the session; all other tools use it" },
+    { "name": "mj_render_game", "description": "Crude game outline: per-kyoku headers, results, and anchor index" },
+    { "name": "mj_render_kyoku", "description": "One round in full per-turn detail, with game-global anchor ids" },
     { "name": "mj_list_anchors", "description": "All commentary anchors (#id, kind, kyoku, junme, seat, topic)" },
     { "name": "mj_get_snapshot", "description": "Full board state at an anchor or kyoku+junme" },
+    { "name": "mj_add_comment", "description": "Save commentary for one or more anchors into the session draft" },
+    { "name": "mj_add_note", "description": "Save a one-liner for a ★ line (kyoku+junme+seat) into the draft" },
+    { "name": "mj_draft_status", "description": "Draft checklist: filled/unfilled anchors and saved ★ notes" },
+    { "name": "mj_weave_commentary", "description": "Weave the accumulated draft into the transcript, written to a file" },
     { "name": "mj_get_kyoku_start", "description": "Round start conditions (JSON)" },
     { "name": "mj_get_kyoku_result", "description": "Round outcome(s) (JSON)" },
     { "name": "mj_get_riichi_declarations", "description": "Riichi declarations with waits (JSON)" },

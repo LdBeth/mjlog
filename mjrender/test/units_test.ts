@@ -8,7 +8,8 @@ import { doraFromIndicatorType, isAka, tileType, typeGlyph } from "../src/tiles.
 import { render } from "../src/core.ts";
 import { renderGame } from "../src/render.ts";
 import { parseGame } from "../src/parse.ts";
-import type { AgariResult, Game } from "../src/model.ts";
+import { openYakuRead } from "../src/yaku.ts";
+import type { AgariResult, Game, Meld } from "../src/model.ts";
 
 function eq<T>(a: T, b: T, msg: string): void {
   const as = JSON.stringify(a), bs = JSON.stringify(b);
@@ -54,6 +55,81 @@ Deno.test("meld decode from 1.xml samples", () => {
   eq([pon2.kind, pon2.fromWho], ["pon", 2], "47658 = pon 白 from P2");
   const chi = decodeMeld(0, 13343);
   eq([chi.kind, chi.calledTile, chi.fromWho], ["chi", 20, 3], "13343 = chi 567m called 6m from P3");
+});
+
+Deno.test("meld decode: shouminkan bit set without the pon bit (real-log samples)", () => {
+  // Tenhou marks added kan with bit 4 alone (bit 3 clear); a wrong fallthrough
+  // decoded these as daiminkan of an out-of-range tile / nuki in a 4p game.
+  const kita = decodeMeld(1, 46673);
+  eq([kita.kind, kita.tiles.join(","), kita.calledTile, kita.fromWho], [
+    "shouminkan",
+    "120,121,122,123",
+    122,
+    2,
+  ], "46673 = 加槓 北, pon was from P2");
+  const niman = decodeMeld(1, 1587);
+  eq([niman.kind, niman.tiles.join(","), niman.calledTile, niman.fromWho], [
+    "shouminkan",
+    "4,5,6,7",
+    5,
+    0,
+  ], "1587 = 加槓 二萬, pon was from P0");
+});
+
+// openYakuRead: deterministic yaku outlook for an opened hand (副露判断 evidence)
+const EAST_DRAGONS = new Set<number>([27, 31, 32, 33]); // round/seat wind 東 + 三元
+function meld(kind: Meld["kind"], s: string): Meld {
+  const ts = tiles(s);
+  return { kind, who: 0, fromWho: kind === "ankan" ? 0 : 1, tiles: ts, calledTile: ts[0] };
+}
+const read = (melds: Meld[], hand: string, kuitan = true) =>
+  openYakuRead(melds, tiles(hand), EAST_DRAGONS, kuitan);
+
+Deno.test("yaku read: confirmed yakuhai, honitsu with off-suit count, toitoi, chanta", () => {
+  eq(
+    read([meld("pon", "111m"), meld("pon", "111z")], "23m11p"),
+    ["役牌東確定", "混一色(萬)可（他色手内2枚）", "対々和可", "混全帯可"],
+    "east pon locks yaku; terminal+honor melds keep chanta/toitoi",
+  );
+  eq(
+    read([meld("pon", "555s"), meld("pon", "555z")], "666s77s"),
+    ["役牌白確定", "混一色(索)可", "対々和可"],
+    "clean one-suit hand with a dragon pon",
+  );
+});
+
+Deno.test("yaku read: tanyao gated by melds and the kuitan rule", () => {
+  eq(
+    read([meld("chi", "234m"), meld("pon", "555p")], "67m889s"),
+    ["断幺九可（手内幺九1枚）"],
+    "simple melds leave tanyao open; 9s still to cut",
+  );
+  eq(
+    read([meld("chi", "234m"), meld("pon", "555p")], "67m88s", false),
+    ["役なし懸念（現状、確定役なし）"],
+    "kuitan off kills the only read",
+  );
+});
+
+Deno.test("yaku read: chinitsu, sanshoku and ittsu candidates, yakuhai backup", () => {
+  eq(
+    read([meld("chi", "234s"), meld("chi", "345s")], "6789s9s"),
+    ["断幺九可（手内幺九2枚）", "清一色(索)可"],
+    "one suit, no honors anywhere → chinitsu",
+  );
+  eq(
+    read([meld("chi", "123m"), meld("chi", "123p")], "456m789m11z"),
+    ["役牌東後付け可", "純全帯可", "三色(123)見込み", "一通(萬)見込み"],
+    "melded 123 in two suits + hand runs: sanshoku and ittsu candidates, east pair backup",
+  );
+});
+
+Deno.test("yaku read: yakuless double guest-wind call falls back to 役なし懸念", () => {
+  eq(
+    read([meld("pon", "444z"), meld("chi", "456p")], "148m59s"),
+    ["役なし懸念（現状、確定役なし）"],
+    "north pon (guest) + mixed junk = the classic no-yaku hazard",
+  );
 });
 
 Deno.test("tiles: aka, glyphs, dora successor", () => {

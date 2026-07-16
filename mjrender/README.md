@@ -8,7 +8,9 @@ modes:
 
 1. **Transcript** (`render` / `mj_render_game`): a lean, faithful play-by-play (reconstructed hands,
    calls, riichi, wins, scores) annotated with objective metrics (shanten / ukeire / waits / dora /
-   danger) and explicit **commentary anchors** `〔解説ポイント#N: 種別｜…〕`.
+   danger) and explicit **commentary anchors** `〔解説ポイント#N: 種別｜…〕` — deal, riichi,
+   push/fold, open-hand judgement (副露判断 at an early 2nd or the 3rd meld, with a deterministic
+   `┗ 役読み:` yaku outlook), and end-of-hand/game summaries.
 2. **Snapshot recall** (`snapshot` / `mj_get_snapshot`): the consuming LLM calls _back into_ mjrender —
    via MCP or the CLI — to see the full board (all four rivers with tedashi/tsumogiri marks, melds,
    live scores + placements, riichi states, dora, remaining wall, every concealed hand + metrics) at
@@ -28,13 +30,32 @@ the MCP server `@modelcontextprotocol/sdk`
 ```sh
 cd mjrender
 deno task render ../1.mjlog                    # full transcript (gzipped or plain XML)
+deno run --allow-read src/cli.ts outline ../1.mjlog         # crude outline: headers/results/anchor index
 deno run --allow-read src/cli.ts kyoku S3 ../1.mjlog        # one round, self-contained
 deno run --allow-read src/cli.ts anchors ../1.mjlog         # list commentary anchors
 deno run --allow-read src/cli.ts snapshot --anchor 12 ../1.mjlog
 deno run --allow-read src/cli.ts snapshot --kyoku E1.2 --junme 8 ../1.mjlog
 deno run --allow-read src/cli.ts facts start S3 ../1.mjlog    # also: result <sel> / riichi [sel] / standings
+deno run --allow-read --allow-write src/cli.ts weave comments.json --out final.txt ../1.mjlog
 deno task render "https://tenhou.net/0/?log=<id>&tw=1"        # fetch straight from tenhou.net
 ```
+
+`weave` splices LLM-written commentary into a re-rendered transcript deterministically — the model
+never copies fact lines (long verbatim reproduction is where tile facts get corrupted); it only
+produces the comments. `comments.json` is either a bare anchor map / list, or the full form with
+optional ★-line notes addressed by game position:
+
+```json
+{
+ "anchors": { "1": "配牌についての解説…", "2": "…" },
+ "notes": [{ "kyoku": "E1", "junme": 5, "seat": 3, "text": "このドラ切りは早い。" }]
+}
+```
+
+With `--out <file>` it writes the woven document and prints a one-line summary; without it the
+document goes to stdout. `--missing keep|strip` controls unfilled anchor placeholders (default
+keep, so partial drafts are valid and can be re-woven with a fuller comment set later). The woven
+document swaps the commentator instructions for a reader-facing legend.
 
 Every `<file>` argument also accepts a tenhou.net URL — a replay-viewer link (`/0/?log=<id>&tw=N`)
 is rewritten to the raw log endpoint (`/0/log/find.cgi`) automatically (needs
@@ -63,28 +84,46 @@ deno task mcp        # stdio MCP server
 Register with Claude Code:
 
 ```sh
-claude mcp add mjrender -- deno run --allow-read --allow-net=tenhou.net /path/to/mjrender/src/mcp.ts
+claude mcp add mjrender -- deno run --allow-read --allow-write --allow-env=HOME --allow-net=tenhou.net /path/to/mjrender/src/mcp.ts
 ```
+
+(`--allow-write`/`--allow-env=HOME` are only needed for `mj_weave_commentary`, which writes the
+woven document to a file so it never round-trips through the model's context. A relative `out`
+lands next to the log file — or under `$HOME` for URL sources — since the calling agent may not
+share a filesystem with the server at all.)
 
 For the Claude Desktop app, build the self-contained extension instead: `deno task bundle`, then
 install `mjrender.mcpb` via Settings → Extensions (no Deno needed on the target machine).
 
-Tools (thin wrappers over `src/core.ts`); `path` is a local file or a tenhou.net URL:
+The server is **stateful**: `mj_open_log` is the only tool that takes a path (a local file or a
+tenhou.net URL) — it parses the log once into the session, and every other tool operates on the
+opened log (erroring until one is opened). The commentary draft also lives server-side, filled one
+anchor at a time. Tools (thin wrappers over `src/core.ts`):
 
-| tool                         | arguments                              | returns                                               |
-| ---------------------------- | -------------------------------------- | ----------------------------------------------------- |
-| `mj_render_game`             | `path`, `hands?`, `snapshots?`         | full lean transcript                                  |
-| `mj_render_kyoku`            | `path`, `kyoku`, …                     | one round, self-contained                             |
-| `mj_list_anchors`            | `path`                                 | `#id kind kyoku junme seat topic` per line            |
-| `mj_get_snapshot`            | `path`, `anchor` \| (`kyoku`, `junme`) | board snapshot block                                  |
-| `mj_get_kyoku_start`         | `path`, `kyoku`                        | JSON: dealer/honba/kyotaku/dora, scores + placements  |
-| `mj_get_kyoku_result`        | `path`, `kyoku`                        | JSON: winner/tile/points/yaku, or draw + tenpai seats |
-| `mj_get_riichi_declarations` | `path`, `kyoku?`                       | JSON: seat/junme/waits/live count/anchor id           |
-| `mj_get_final_standings`     | `path`                                 | JSON: place/seat/name/score/±pt                       |
+| tool                         | arguments                        | returns                                               |
+| ---------------------------- | -------------------------------- | ----------------------------------------------------- |
+| `mj_open_log`                | `path`, `fresh?`                 | parses the log into the session; starts/keeps a draft |
+| `mj_render_game`             |                                  | crude game outline: headers, results, anchor index    |
+| `mj_render_kyoku`            | `kyoku`, `hands?`, `snapshots?`  | one round, self-contained, full per-turn detail       |
+| `mj_list_anchors`            |                                  | `#id kind kyoku junme seat topic` per line            |
+| `mj_get_snapshot`            | `anchor` \| (`kyoku`, `junme`)   | board snapshot block                                  |
+| `mj_add_comment`             | `comments[{anchor,text}]`        | saves anchor comments into the draft (batch, atomic)  |
+| `mj_add_note`                | `kyoku`, `junme`, `seat`, `text` | saves a ★-line one-liner into the draft               |
+| `mj_draft_status`            |                                  | checklist: ✓/・ per anchor, plus saved ★ notes        |
+| `mj_weave_commentary`        | `out`, `missing?`, `hands?`      | writes the woven draft to `out`; returns summary only |
+| `mj_get_kyoku_start`         | `kyoku`                          | JSON: dealer/honba/kyotaku/dora, scores + placements  |
+| `mj_get_kyoku_result`        | `kyoku`                          | JSON: winner/tile/points/yaku, or draw + tenpai seats |
+| `mj_get_riichi_declarations` | `kyoku?`                         | JSON: seat/junme/waits/live count/anchor id           |
+| `mj_get_final_standings`     |                                  | JSON: place/seat/name/score/±pt                       |
 
-Intended flow: the agent renders the transcript once, then while writing commentary at each
-`〔解説ポイント#N〕` recalls that anchor's exact board state with `mj_get_snapshot` instead of
-re-deriving it from the fact lines.
+Intended flow: the agent opens the log once, orients with the `mj_render_game` outline (per-kyoku
+headers, results, and the anchor index — no per-turn lines), then pulls full detail one round at a
+time with `mj_render_kyoku`, recalling any position's exact board state with `mj_get_snapshot`
+while writing — especially at riichi declarations and tenpai moments, before commenting on them.
+Commentary is saved with `mj_add_comment` — one anchor or a batch per call (e.g. a finished
+kyoku's worth; batches are atomic, re-saving an anchor replaces it, partial drafts are fine) —
+and finally `mj_weave_commentary` splices the accumulated draft into a re-rendered transcript. The agent never reproduces fact lines, and the finished document is
+written to a file rather than passed back through the model.
 
 ## Eval harness (ground truth only)
 
@@ -105,11 +144,12 @@ The transcript is plain Japanese text with three interleaved layers:
    computed metrics for the acting player after the play.
 2. **Reconstructed hands** — `┗ P1手: …` lines under a flagged beat, showing the exact concealed
    hand (+ melds) at that decision point. `★` marks the beat.
-3. **Commentary anchors** — `〔解説ポイント#N: 種別｜…〕` lines. **Each is a slot for the consuming
-   LLM to replace with commentary prose.** `#N` is a stable position id: `mj_get_snapshot` (MCP) /
-   `snapshot --anchor N` (CLI) reproduce the exact board state the slot is about, and downstream
-   tooling can merge commentary back by id. 種別 says what the slot wants: 配牌評価 / リーチ判断 /
-   押し引き / 局総括 / 流局評価 / 終局総括.
+3. **Commentary anchors** — `〔解説ポイント#N: 種別｜…〕` lines. **Each is a slot the consuming LLM
+   writes a comment for — by id, not by rewriting the transcript** (`weave` does the merging).
+   `#N` is a stable position id: `mj_get_snapshot` (MCP) / `snapshot --anchor N` (CLI) reproduce
+   the exact board state the slot is about. 種別 says what the slot wants: 配牌評価 / リーチ判断 /
+   押し引き / 局総括 / 流局評価 / 終局総括. ★ lines can additionally take an optional one-liner
+   note, addressed by kyoku + junme + seat.
 
 Anchors are placed after: the deal (配牌), every riichi declaration, any push of a flagged dangerous
 tile, and every win/draw (和了/流局), plus a final 終局 summary.
@@ -122,9 +162,9 @@ supplies real push/fold judgement).
 
 ```
 src/
-  cli.ts      subcommands (render/kyoku/anchors/snapshot) → core → stdout
-  mcp.ts      stdio MCP server (mj_render_game/mj_render_kyoku/mj_list_anchors/mj_get_snapshot/…)
-  core.ts     query API: loadGame, renderGame, renderKyoku, listAnchors, getSnapshot
+  cli.ts      subcommands (render/outline/kyoku/anchors/snapshot/facts/weave) → core → stdout
+  mcp.ts      stdio MCP server (mj_render_game/…/mj_get_snapshot/mj_weave_commentary/…)
+  core.ts     query API: loadGame, renderGame, renderKyoku, listAnchors, getSnapshot, weaveCommentary
   load.ts     read file or tenhou.net URL + transparent gzip (DecompressionStream)
   parse.ts    mjlog XML → faithful Game model (fast-xml-parser, order-preserving)
   model.ts    domain types (incl. Beat = one addressable commentary anchor)

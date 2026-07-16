@@ -4,7 +4,7 @@
 //   bits 0-1 : caller-relative source (0=self, 1=shimocha, 2=toimen, 3=kamicha)
 //   bit  2   : chi
 //   bit  3   : pon
-//   bit  4   : added-kan (shouminkan)
+//   bit  4   : added-kan (shouminkan) — may appear WITHOUT bit 3
 //   bit  5   : nuki (kita, sanma)
 //   (none of 2-5 set) ⇒ kan: daiminkan if source != self, else ankan.
 
@@ -29,8 +29,9 @@ export function decodeMeld(who: number, m: number): Meld {
     return finalize("chi", who, from, tiles, tiles[called]);
   }
 
-  if (m & 0x8) {
-    // --- Pon or added-kan (shouminkan) ---
+  if (m & 0x18) {
+    // --- Pon or added-kan (shouminkan; bit 4 alone, without the pon bit,
+    // is still a shouminkan — both fields share the pon-style layout) ---
     const unused = (m & 0x0060) >> 5; // which of the 4 copies is not in the pon
     let t = (m & 0xfe00) >> 9;
     const called = t % 3;

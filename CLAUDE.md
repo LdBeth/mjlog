@@ -47,22 +47,39 @@ The codebase is three Objective-C++ source files:
 
 A **separate Deno/TypeScript tool** (not part of the C++ build): a
 deterministic game-state oracle over a mjlog. It never calls an LLM; an LLM
-consumes it two ways: (1) an **LLM-ready Japanese commentary transcript**
+consumes it three ways: (1) an **LLM-ready Japanese commentary transcript**
 (play-by-play with reconstructed hands, calls, riichi, wins/scores, computed
 metrics — shanten/ukeire/waits/dora/danger evidence — discard comparisons,
-end-of-hand ground truth, and `〔解説ポイント#N: 種別｜…〕` anchors), and
+end-of-hand ground truth, and `〔解説ポイント#N: 種別｜…〕` anchors; 副露判断
+anchors fire at an early 2nd meld (≤6巡) or the 3rd meld with a deterministic
+`┗ 役読み:` yaku outlook),
 (2) **snapshot recall**: `mj_get_snapshot` reproduces the full board (rivers with
 tsumogiri/riichi marks, melds, live scores/placements, hands) at any anchor
-`#N` or kyoku+junme.
+`#N` or kyoku+junme, and (3) **incremental commentary weaving**: the LLM saves
+anchor comments in batches of one or more per call (plus optional ★-line
+notes addressed by kyoku+junme+seat) into a server-side draft, and
+`weave`/`mj_weave_commentary`
+splices the accumulated draft into a re-rendered transcript written to a
+file — the model never copies fact lines and the woven document never passes
+through its context.
 
 Run: `cd mjrender && deno task render ../1.mjlog` (file args also accept
-tenhou.net replay/log URLs); CLI subcommands `kyoku`/`anchors`/`snapshot`;
-`deno task mcp` starts the stdio MCP server (tools prefixed `mj_`:
-mj_render_game / mj_render_kyoku / mj_list_anchors / mj_get_snapshot + fact
-tools); `deno task eval` emits ground-truth Q/A JSONL; `deno task bundle`
-builds the `mjrender.mcpb` Claude Desktop extension. Tests: `deno task test`
-(golden transcript test — regenerate deliberately with `test/golden_update.ts`
-after output changes). See `mjrender/README.md`. Uses Deno, not Node/npm.
+tenhou.net replay/log URLs); CLI subcommands `outline`/`kyoku`/`anchors`/
+`snapshot`/`facts`/`weave` (the CLI weave takes a one-shot comments JSON);
+`deno task mcp` starts the stdio MCP server — **stateful**: `mj_open_log` is
+the only tool taking a path, parsing the log into the session; the rest
+(mj_render_game / mj_render_kyoku / mj_list_anchors / mj_get_snapshot /
+mj_add_comment / mj_add_note / mj_draft_status / mj_weave_commentary + fact
+tools) operate on the opened log and error until one is opened.
+mj_render_game returns a crude outline (per-kyoku headers, condensed results,
+anchor index — no per-turn lines) and directs the LLM to mj_render_kyoku for
+one round at a time and to mj_get_snapshot at riichi/tenpai moments.
+`deno task eval` emits ground-truth Q/A JSONL; `deno task bundle` builds the
+`mjrender.mcpb` Claude Desktop extension (regenerating `mcp.mjs`, the bundled
+compile input, from `src/mcp.ts` first).
+Tests: `deno task test` (golden transcript test — regenerate deliberately with
+`test/golden_update.ts` after output changes). See `mjrender/README.md`. Uses
+Deno, not Node/npm.
 
 ## Maude Specification (`mahjong.maude`)
 
