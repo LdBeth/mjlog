@@ -2,11 +2,13 @@
 // tile notation, and a full end-to-end render of the bundled sample.
 
 import { countsFromTiles, shanten, ukeireTypes } from "../src/shanten.ts";
+import { assessDanger } from "../src/danger.ts";
 import { decodeMeld } from "../src/meld.ts";
 import { doraFromIndicatorType, isAka, tileType, typeGlyph } from "../src/tiles.ts";
 import { render } from "../src/core.ts";
 import { renderGame } from "../src/render.ts";
-import type { Game } from "../src/model.ts";
+import { parseGame } from "../src/parse.ts";
+import type { AgariResult, Game } from "../src/model.ts";
 
 function eq<T>(a: T, b: T, msg: string): void {
   const as = JSON.stringify(a), bs = JSON.stringify(b);
@@ -63,6 +65,31 @@ Deno.test("tiles: aka, glyphs, dora successor", () => {
   eq(doraFromIndicatorType(33), 31, "中 indicator → 白 dora (wrap)");
 });
 
+Deno.test("danger: yakuhai honors read hotter than guest honors", () => {
+  const value = new Set<number>([27, 31, 32, 33]); // round-east wind + 3 dragons
+  const threat = (safe: number[] = []) => [
+    { seat: 1, safeTypes: new Set<number>(safe), valueHonors: value },
+  ];
+  const seen = (t: number, n: number) => {
+    const v = new Array<number>(34).fill(0);
+    v[t] = n;
+    return v;
+  };
+  const level = (type: number, visible: number[], safe: number[] = []) =>
+    assessDanger(type, threat(safe), visible)!.level;
+
+  // 白 (type 31) is a dragon = yakuhai: fully live ⇒ 危険度高
+  eq(level(31, seen(31, 0)), "危険度高", "live dragon = high");
+  // guest wind (南=28, not a value honor here) fully live ⇒ 危険度中
+  eq(level(28, seen(28, 0)), "危険度中", "guest wind = mid");
+  // two copies already public ⇒ shanpon unlikely ⇒ 危険度中 even for a dragon
+  eq(level(31, seen(31, 2)), "危険度中", "dragon w/ 2 out = mid");
+  // three out ⇒ at most a tanki ⇒ 危険度低
+  eq(level(31, seen(31, 3)), "危険度低", "dragon w/ 3 out = low");
+  // genbutsu (in safeTypes) ⇒ 安全
+  eq(level(31, seen(31, 0), [31]), "安全", "genbutsu = safe");
+});
+
 Deno.test("kan turn integrates into one line; ankan dora before rinshan draw", () => {
   // P0 holds four 東 (108-111). Sequence: draw 4m, ankan 東, new-dora reveal,
   // rinshan draw 5m, tsumogiri 5m. For ankan the dora is revealed BEFORE the
@@ -107,12 +134,102 @@ Deno.test("kan turn integrates into one line; ankan dora before rinshan draw", (
   }
   eq(warns, [], "no replay inconsistencies");
   const line = text.split("\n").find((l) => l.includes("暗槓")) ?? "";
-  if (!line.includes("P0 暗槓東東東東  ＋新ドラ六(→ドラ七)  嶺上ツモ 五  → 打 五(ツモ切り)")) {
+  if (!line.includes("P0 暗槓東東東東  ＋新ドラ六(→ドラ七)  嶺上ツモ 五  → 五 ▽")) {
     throw new Error(`unexpected kan line: ${line}`);
   }
   if (line.indexOf("＋新ドラ") > line.indexOf("嶺上ツモ")) {
     throw new Error(`ankan dora must precede the rinshan draw: ${line}`);
   }
+});
+
+// --- parse.ts XML edge cases (previously zero coverage) ---
+// These parse a minimal but valid <mjloggm> string through the *real* parser
+// rather than hand-building a Game object, so the parser itself is exercised.
+
+// 13 sequential tile ids from a base, comma-joined: a valid-shape (if arbitrary)
+// starting hand — parse.ts does not validate deal legality.
+const hai13 = (base: number) => Array.from({ length: 13 }, (_, i) => base + i).join(",");
+
+Deno.test("parse: double ron yields multiple agari results with per-sc scoring", () => {
+  // P0 discards 64; P1 and P2 both ron it — two <AGARI> in one round, the last
+  // carrying `owari`. The TS parser has no endRound (the C++ "only the first
+  // triggers endRound" note doesn't apply here); both AGARI must be captured.
+  const xml = `<mjloggm ver="2.3">
+<GO type="169"/>
+<UN n0="alice" n1="bob" n2="carol" n3="dave" dan="10,11,12,13" rate="1500,1600,1700,1800"/>
+<INIT seed="0,0,0,0,0,4" ten="250,250,250,250" oya="0" hai0="${hai13(0)}" hai1="${hai13(16)}" hai2="${
+    hai13(32)
+  }" hai3="${hai13(48)}"/>
+<T64/><D64/>
+<AGARI ba="0,0" hai="16,17,18" machi="64" ten="30,3900,0" who="1" fromWho="0" sc="250,-39,250,39,250,0,250,0"/>
+<AGARI ba="0,0" hai="32,33,34" machi="64" ten="40,5200,0" who="2" fromWho="0" sc="250,0,250,0,250,52,250,0" owari="211,-45.0,289,15.0,250,0.0,250,30.0"/>
+</mjloggm>`;
+  const g = parseGame(xml);
+  eq(g.rounds.length, 1, "one round");
+  eq(g.rounds[0].results.length, 2, "both AGARI captured (parser doesn't stop at the first)");
+  const res = g.rounds[0].results as AgariResult[];
+  eq(
+    res.map((r) => [r.kind, r.who, r.fromWho]),
+    [["agari", 1, 0], ["agari", 2, 0]],
+    "two rons, both off P0",
+  );
+  eq(res[0].sc, [250, -39, 250, 39, 250, 0, 250, 0], "first ron sc preserved verbatim");
+  eq(res[1].points, 5200, "second ron points");
+  eq(g.owari, [211, -45, 289, 15, 250, 0, 250, 30], "owari taken from the AGARI that carries it");
+
+  // Rendered scores follow the raw sc (delta*100): +3900 to P1, +5200 to P2,
+  // and two separate 和了 blocks. (Synthetic hands mismatch the reconstruction,
+  // so the consistency guard warns — expected here; we capture and ignore it.)
+  const orig = console.error;
+  console.error = () => {};
+  let text: string;
+  try {
+    text = renderGame(g, { hands: "key" });
+  } finally {
+    console.error = orig;
+  }
+  eq((text.match(/◆和了/g) ?? []).length, 2, "two 和了 blocks rendered");
+  if (!text.includes("P1 +3900")) throw new Error("missing P1 +3900 score delta");
+  if (!text.includes("P2 +5200")) throw new Error("missing P2 +5200 score delta");
+});
+
+Deno.test("parse: UN reconnect with missing n{i} preserves omitted seats", () => {
+  // A mid-game <UN> carrying only n2 (a seat 2 reconnect) must update seat 2 and
+  // leave the other seats' names — and their dan/rate the reconnect omits — intact.
+  const xml = `<mjloggm ver="2.3">
+<GO type="169"/>
+<UN n0="alice" n1="bob" n2="carol" n3="dave" dan="10,11,12,13" rate="1500,1600,1700,1800" sx="M,M,F,M"/>
+<INIT seed="0,0,0,0,0,4" ten="250,250,250,250" oya="0" hai0="${hai13(0)}" hai1="${hai13(16)}" hai2="${
+    hai13(32)
+  }" hai3="${hai13(48)}"/>
+<T64/><D64/>
+<UN n2="carolX"/>
+<U80/><E80/>
+</mjloggm>`;
+  const g = parseGame(xml);
+  eq(g.players.map((p) => p.name), ["alice", "bob", "carolX", "dave"], "only seat 2 renamed");
+  eq(g.players.map((p) => p.dan), ["10", "11", "12", "13"], "dan not clobbered by dan-less reconnect UN");
+  eq(g.players[2].rate, 1700, "rate not clobbered for the reconnecting seat");
+});
+
+Deno.test("parse: BYE (disconnect) is ignored and does not corrupt replay", () => {
+  // BYE has no case in the parser's switch, so it's silently skipped. This only
+  // guards that an unknown mid-round element doesn't disturb the surrounding
+  // draw/discard replay — essentially confirming the no-op default path.
+  const xml = `<mjloggm ver="2.3">
+<GO type="169"/>
+<UN n0="alice" n1="bob" n2="carol" n3="dave" dan="10,11,12,13"/>
+<INIT seed="0,0,0,0,0,4" ten="250,250,250,250" oya="0" hai0="${hai13(0)}" hai1="${hai13(16)}" hai2="${
+    hai13(32)
+  }" hai3="${hai13(48)}"/>
+<T64/><BYE who="1"/><D64/><U80/><E80/>
+</mjloggm>`;
+  const g = parseGame(xml);
+  eq(
+    g.rounds[0].events.map((e) => e.t),
+    ["draw", "discard", "draw", "discard"],
+    "BYE skipped; draws/discards intact",
+  );
 });
 
 Deno.test("end-to-end: sample renders, no inconsistency warnings", async () => {

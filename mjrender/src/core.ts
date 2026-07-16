@@ -12,6 +12,6 @@ export async function render(path: string, opts: Partial<RenderOptions> = {}): P
   if (game.rules.sanma) {
     throw new Error("三人打ち（サンマ）はこのバージョンでは未対応です。");
   }
-  const options: RenderOptions = { player: opts.player, hands: opts.hands ?? "key" };
+  const options: RenderOptions = { hands: opts.hands ?? "key" };
   return renderGame(game, options);
 }

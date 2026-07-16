@@ -22,7 +22,6 @@ cd mjrender
 deno task render ../1.mjlog                 # gzipped or plain Xml, both work
 deno run --allow-read src/cli.ts ../1.xml   # equivalent
 deno run --allow-read src/cli.ts --hands=all ../1.xml   # show every hand every turn
-deno run --allow-read src/cli.ts --player 0 ../1.xml    # tilt anchors toward P0
 ```
 
 Options:
@@ -30,7 +29,6 @@ Options:
 - `--hands key|all` — reconstructed-hand verbosity. `key` (default) shows a
   player's full hand only at flagged beats (advance / riichi / dangerous push /
   win / draw); `all` shows every player's hand after every discard.
-- `--player N` — bias commentary anchors toward seat `N`'s perspective.
 
 Other tasks: `deno task check` (typecheck), `deno task test`.
 

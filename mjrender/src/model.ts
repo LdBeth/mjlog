@@ -96,6 +96,5 @@ export interface Game {
 }
 
 export interface RenderOptions {
-  player?: number; // tilt commentary anchors toward one seat (default: neutral)
   hands: "key" | "all"; // reconstructed-hand verbosity
 }

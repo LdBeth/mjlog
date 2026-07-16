@@ -11,6 +11,10 @@ export interface RiichiThreat {
   /** Tile *types* that are 100% safe vs this seat (their discards + everything
    *  discarded by anyone after their riichi declaration). */
   safeTypes: Set<number>;
+  /** Honor *types* that are yakuhai for this seat (round wind + this seat's wind
+   *  + the three dragons). Value honors are held for their han, so they carry a
+   *  higher shanpon/tanki deal-in risk than guest honors. */
+  valueHonors: Set<number>;
 }
 
 export interface DangerAssessment {
@@ -39,7 +43,7 @@ export function assessDanger(
   for (const th of threats) {
     if (th.safeTypes.has(tileType)) continue; // genbutsu vs this seat
     seats.push(th.seat);
-    const level = tileLevel(tileType, th.safeTypes, visibleCounts);
+    const level = tileLevel(tileType, th.safeTypes, visibleCounts, th.valueHonors);
     if (RANK[level] > RANK[worst]) worst = level;
   }
 
@@ -47,10 +51,19 @@ export function assessDanger(
   return { level: worst, seats };
 }
 
-function tileLevel(type: number, safe: Set<number>, visible: number[]): DangerLevel {
+function tileLevel(
+  type: number,
+  safe: Set<number>,
+  visible: number[],
+  valueHonors: Set<number>,
+): DangerLevel {
   if (suitOfType(type) === "z") {
     // honor: fewer live copies ⇒ safer (can only be shanpon/tanki)
-    return visible[type] >= 3 ? "危険度低" : "危険度中";
+    if (visible[type] >= 3) return "危険度低"; // 3 already out ⇒ at most a tanki
+    // Yakuhai are kept for their value, so a live one is more likely held as a
+    // pair (shanpon) than a guest honor: raise it when ≤1 copy is public.
+    if (valueHonors.has(type)) return visible[type] <= 1 ? "危険度高" : "危険度中";
+    return "危険度中";
   }
   const r = rankOfType(type); // 1..9
   const needLower = r >= 4; // guarded by the (r-3) suji

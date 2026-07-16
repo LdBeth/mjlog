@@ -25,6 +25,7 @@ import {
 
 const WIND = ["東", "南", "西", "北"];
 const DISCARD_MARK = "★"; // salience flag on a commentary-worthy beat
+const TSUMOGIRI_MARK = "▽"; // marks a tsumogiri (drawn tile discarded unchanged)
 
 function roundName(kyoku: number): string {
   return `${WIND[Math.floor(kyoku / 4) % 4]}${(kyoku % 4) + 1}局`;
@@ -55,11 +56,11 @@ function formatInstruction(): string {
     "・牌表記: 一〜九=萬子 / ①〜⑨=筒子 / １〜９=索子 / 東南西北白發中=字牌 / 赤=赤ドラ",
     "・場風=局名で決まる風（東n局→東、南n局→南）、配牌の(東家/南家/西家/北家)=各家の自風。役牌判断に用いる",
     "・「N巡」=巡目。親（東家）が山からツモるたび1巡進む卓全体共有のカウンタで、各巡の最初の打牌にのみ表示",
+    "・打牌表記: 「A → B」=Aをツモって手出しでB打、牌の後の「▽」=ツモ切り（引いた牌をそのまま捨て）、「（リーチ後）」=リーチ後の強制ツモ切り",
     "・〔向聴N 受入X種Y枚 ドラZ〕=打牌後の手牌評価、〔聴牌 待ち…〕=聴牌と待ち牌",
-    "・「ツモ切り」=引いた牌をそのまま捨て、「（リーチ後）」=リーチ後の強制ツモ切り",
     "・「嶺上ツモ」=カン後の嶺上牌ツモ、「＋新ドラ」=カンによる新ドラ表示（表示位置は実際のめくり順）",
     "・★=注目の局面 / ┗…手:=その時点の手牌",
-    "・危険度低/中/高=リーチに対する放銃危険度の簡易目安、「← 押し」=脅威に対する押し",
+    "・危険度低/中/高=リーチに対する放銃危険度の簡易目安（役牌＝場風/自風/三元は高めに評価）、「← 押し」=脅威に対する押し",
     "",
   ].join("\n");
 }
@@ -99,6 +100,12 @@ function renderRound(g: Game, round: Round, opts: RenderOptions, out: string[]):
   // Each player's seat wind (自風) is their offset from the dealer (東家=親, then
   // 南西北 counterclockwise); it drives yakuhai value, so surface it at 配牌.
   const seatWind = (seat: number) => WIND[(seat - round.dealer + 4) % 4];
+  // Same winds as tile *types* (東=27..北=30) plus the three dragons (31..33):
+  // the yakuhai for a given seat, used to raise discard danger against its riichi.
+  const roundWindType = 27 + (Math.floor(round.kyoku / 4) % 4);
+  const seatWindType = (seat: number) => 27 + ((seat - round.dealer + 4) % 4);
+  const valueHonors = (seat: number) =>
+    new Set<number>([roundWindType, seatWindType(seat), 31, 32, 33]);
 
   // --- per-round mutable state ---
   const hands: Tile[][] = round.startHands.map((h) => [...h]);
@@ -320,14 +327,16 @@ function renderRound(g: Game, round: Round, opts: RenderOptions, out: string[]):
     advanced: boolean,
     before: number,
     after: number,
-    lead?: string, // when set (kan turn), replaces the "P# ツモ X →" prefix
+    lead?: string, // when set (kan turn), replaces the "P# X →" prefix
   ): void {
     // Print the 巡 marker only when it just advanced (first discard of the go-around).
     const jmMark = junme !== shownJunme ? `${junme}巡 ` : "";
     shownJunme = junme;
     const threats: RiichiThreat[] = [];
     for (let s = 0; s < 4; s++) {
-      if (s !== who && riichiActive[s]) threats.push({ seat: s, safeTypes: safe[s] });
+      if (s !== who && riichiActive[s]) {
+        threats.push({ seat: s, safeTypes: safe[s], valueHonors: valueHonors(s) });
+      }
     }
     const danger = riichiActive[who] ? null : assessDanger(tileType(tile), threats, publicVisible);
 
@@ -349,9 +358,9 @@ function renderRound(g: Game, round: Round, opts: RenderOptions, out: string[]):
     const showAll = opts.hands === "all";
 
     // Tsumogiri (and not a riichi declaration): the hand is unchanged, so collapse
-    // the redundant "ツモ X → 打 X" into "ツモ切り X" and drop the metric tag. No
+    // the redundant "ツモ X → 打 X" into just "X ▽" and drop the metric tag. No
     // advance is realized (the drawn tile is thrown), so only high danger stars it.
-    // (Skipped inside an integrated kan turn, which keeps the explicit "→ 打 X".)
+    // (Skipped inside an integrated kan turn, which keeps the explicit "→ X ▽".)
     if (tsumogiri && !riichi && lead === undefined) {
       // After riichi the discard is forced (hand locked), not a choice — mark it,
       // and flag when the player is forced to pass a dora / red five.
@@ -364,7 +373,7 @@ function renderRound(g: Game, round: Round, opts: RenderOptions, out: string[]):
       const note = !forced && danger && (danger.level === "危険度高" || danger.level === "危険度中")
         ? `  ${danger.level}(${danger.seats.map(P).join(",")}リーチ)`
         : "";
-      out.push(`${P(who)} ${jmMark}ツモ切り ${tileGlyph(tile, aka)}${rin}${state}${note}${highDanger ? " " + DISCARD_MARK : ""}`);
+      out.push(`${P(who)} ${jmMark}${tileGlyph(tile, aka)}${rin} ${TSUMOGIRI_MARK}${state}${note}${highDanger ? " " + DISCARD_MARK : ""}`);
       if (showAll) for (let s = 0; s < 4; s++) out.push(handLine(s));
       return;
     }
@@ -379,16 +388,13 @@ function renderRound(g: Game, round: Round, opts: RenderOptions, out: string[]):
 
     // build the fact line (a chosen discard from hand)
     const star = advanced || riichi || highDanger || isPush ? " " + DISCARD_MARK : "";
-    const flagTxt = riichi
-      ? `(${junme}巡目リーチ宣言・横向き)`
-      : tsumogiri
-      ? "(ツモ切り)"
-      : "";
+    const flagTxt = riichi ? `(${junme}巡目リーチ宣言・横向き)` : "";
+    const tgMark = tsumogiri && !riichi ? ` ${TSUMOGIRI_MARK}` : "";
     const prefix = lead !== undefined
       ? `${lead}  → `
-      : `${P(who)} ${jmMark}${drawn >= 0 ? `ツモ ${tileGlyph(drawn, aka)}${rin} → ` : ""}`;
+      : `${P(who)} ${jmMark}${drawn >= 0 ? `${tileGlyph(drawn, aka)}${rin} → ` : ""}`;
     const inlineDanger = isDanger && !isPush ? `  ${danger!.level}(${dangerSeats}リーチ)` : "";
-    out.push(`${prefix}打 ${tileGlyph(tile, aka)}${flagTxt}  ${metricTag(who)}${inlineDanger}${star}`);
+    out.push(`${prefix}${tileGlyph(tile, aka)}${flagTxt}${tgMark}  ${metricTag(who)}${inlineDanger}${star}`);
 
     // reconstructed-hand displays at key beats
     if (riichi) {
