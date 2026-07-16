@@ -33,6 +33,7 @@ deno run --allow-read src/cli.ts kyoku S3 ../1.mjlog        # one round, self-co
 deno run --allow-read src/cli.ts anchors ../1.mjlog         # list commentary anchors
 deno run --allow-read src/cli.ts snapshot --anchor 12 ../1.mjlog
 deno run --allow-read src/cli.ts snapshot --kyoku E1.2 --junme 8 ../1.mjlog
+deno run --allow-read src/cli.ts facts start S3 ../1.mjlog    # also: result <sel> / riichi [sel] / standings
 ```
 
 Options:
@@ -67,10 +68,26 @@ Tools (thin wrappers over `src/core.ts`):
 | `render_kyoku` | `path`, `kyoku`, … | one round, self-contained |
 | `list_anchors` | `path` | `#id kind kyoku junme seat topic` per line |
 | `get_snapshot` | `path`, `anchor` \| (`kyoku`, `junme`) | board snapshot block |
+| `get_kyoku_start` | `path`, `kyoku` | JSON: dealer/honba/kyotaku/dora, scores + placements |
+| `get_kyoku_result` | `path`, `kyoku` | JSON: winner/tile/points/yaku, or draw + tenpai seats |
+| `get_riichi_declarations` | `path`, `kyoku?` | JSON: seat/junme/waits/live count/anchor id |
+| `get_final_standings` | `path` | JSON: place/seat/name/score/±pt |
 
 Intended flow: the agent renders the transcript once, then while writing
 commentary at each `〔解説ポイント#N〕` recalls that anchor's exact board state
 with `get_snapshot` instead of re-deriving it from the fact lines.
+
+## Eval harness (ground truth only)
+
+```sh
+deno task eval ../1.mjlog > qa.jsonl
+```
+
+Emits JSONL `{question, answer, kyoku, category}` — per-round scores/dora,
+winners and winning tiles, ryuukyoku tenpai lists, riichi waits + live counts,
+final placements — all computed by the replay engine. mjrender never calls an
+LLM: feed the transcript + questions to a target model yourself and score its
+answers against these to settle formatting questions empirically.
 
 ## The commentary-anchor convention
 
@@ -111,7 +128,9 @@ src/
   meld.ts     decode the packed <N m="…"> meld bitfield
   yaku.ts     yaku / yakuman id → name tables
   shanten.ts  shanten (standard/chiitoi/kokushi) + ukeire engine
-  danger.ts   riichi discard danger heuristic (genbutsu / suji)
+  danger.ts   discard danger: summary level + per-threat evidence (suji/kabe/counts)
+  scoring.ts  placements (起家 tie-break) + オーラス overtake-needs search
+  eval.ts     ground-truth Q/A generator (JSONL) for transcript evals
   render.ts   replay via BoardState, emit the anchored transcript + beat list
 ```
 

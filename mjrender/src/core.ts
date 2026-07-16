@@ -4,9 +4,12 @@
 import { loadXml } from "./load.ts";
 import { parseGame } from "./parse.ts";
 import { renderGameAnnotated } from "./render.ts";
+import { placements } from "./scoring.ts";
 import { renderSnapshot } from "./snapshot.ts";
 import { replayTo } from "./state.ts";
-import type { Beat, Game, RenderOptions } from "./model.ts";
+import { tileGlyph, typeGlyph } from "./tiles.ts";
+import type { AgariResult, Beat, Game, RenderOptions } from "./model.ts";
+import { limitName, yakuName } from "./yaku.ts";
 
 const WIND = ["東", "南", "西", "北"];
 
@@ -101,6 +104,141 @@ export function anchorTable(game: Game): string {
   ).join("\n");
 }
 
+// ---- structured fact queries (each backs an MCP tool) ----
+
+/** One round's start conditions. Scores are in points (×100 applied). */
+export interface KyokuStart {
+  label: string;
+  roundIndex: number;
+  dealer: number;
+  honba: number;
+  kyotaku: number;
+  doraIndicator: string;
+  seats: Array<{ seat: number; name: string; score: number; place: number }>;
+}
+
+export function kyokuStart(game: Game, selector: string): KyokuStart {
+  const i = uniqueRound(game, selector);
+  const round = game.rounds[i];
+  const place = placements(round.startScores, game.rounds[0].dealer);
+  return {
+    label: roundLabel(game, i),
+    roundIndex: i,
+    dealer: round.dealer,
+    honba: round.honba,
+    kyotaku: round.kyotaku,
+    doraIndicator: tileGlyph(round.firstDora, game.rules.aka),
+    seats: [0, 1, 2, 3].map((s) => ({
+      seat: s,
+      name: game.players[s].name,
+      score: round.startScores[s] * 100,
+      place: place[s],
+    })),
+  };
+}
+
+/** One round's outcome(s) — multiple entries = double/triple ron. */
+export type KyokuResult =
+  | {
+    type: "agari";
+    who: number;
+    fromWho: number;
+    tsumo: boolean;
+    winningTile: string;
+    points: number; // 素点 (before honba adjustments)
+    fu: number;
+    limit: string | null; // 満貫/跳満/… or null below limit
+    yaku: string[];
+  }
+  | { type: "ryuukyoku"; reason: string; tenpaiSeats: number[] };
+
+export function kyokuResults(game: Game, selector: string): KyokuResult[] {
+  const round = game.rounds[uniqueRound(game, selector)];
+  return round.results.map((res) => {
+    if (res.kind === "agari") {
+      const a = res as AgariResult;
+      return {
+        type: "agari" as const,
+        who: a.who,
+        fromWho: a.fromWho,
+        tsumo: a.who === a.fromWho,
+        winningTile: tileGlyph(a.machi, game.rules.aka),
+        points: a.points,
+        fu: a.fu,
+        limit: limitName(a.limit) || null,
+        yaku: [
+          ...a.yaku.map((y) => `${yakuName(y.id)}(${y.han})`),
+          ...a.yakuman.map((id) => `${yakuName(id)}(役満)`),
+        ],
+      };
+    }
+    return {
+      type: "ryuukyoku" as const,
+      reason: res.type ?? "荒牌平局",
+      tenpaiSeats: res.tenpaiHands.map((t) => t.who),
+    };
+  });
+}
+
+/** Every riichi declaration of the game (optionally one kyoku), with waits. */
+export interface RiichiDeclaration {
+  kyoku: string;
+  roundIndex: number;
+  seat: number;
+  junme: number;
+  anchor: number; // the リーチ判断 anchor id at this declaration
+  waits: string; // wait tile glyphs, e.g. "４７"
+  waitCount: number; // live (unseen) copies of the waits at declaration time
+}
+
+export function riichiDeclarations(game: Game, selector?: string): RiichiDeclaration[] {
+  const only = selector === undefined ? null : new Set(resolveKyoku(game, selector));
+  const out: RiichiDeclaration[] = [];
+  for (const b of listAnchors(game)) {
+    if (b.kind !== "リーチ判断" || b.seat === undefined) continue;
+    if (only && !only.has(b.round)) continue;
+    const st = replayTo(game, game.rounds[b.round], { eventIndex: b.eventIndex });
+    const info = st.restInfo(b.seat);
+    out.push({
+      kyoku: roundLabel(game, b.round),
+      roundIndex: b.round,
+      seat: b.seat,
+      junme: b.junme,
+      anchor: b.id,
+      waits: info.types.map((t) => typeGlyph(t)).join(""),
+      waitCount: info.count,
+    });
+  }
+  return out;
+}
+
+/** Final standings, or null when the log has no 終局 record. */
+export function finalStandings(
+  game: Game,
+): Array<{ place: number; seat: number; name: string; score: number; points: number }> | null {
+  if (!game.owari) return null;
+  const rows = [0, 1, 2, 3]
+    .filter((s) => s * 2 + 1 < game.owari!.length)
+    .map((s) => ({ seat: s, score: game.owari![s * 2] * 100, points: game.owari![s * 2 + 1] }))
+    .sort((a, b) => b.score - a.score);
+  return rows.map((r, i) => ({
+    place: i + 1,
+    seat: r.seat,
+    name: game.players[r.seat].name,
+    score: r.score,
+    points: r.points,
+  }));
+}
+
+function uniqueRound(game: Game, selector: string): number {
+  const indices = resolveKyoku(game, selector);
+  if (indices.length > 1) {
+    const opts = indices.map((i) => `${selector}.${game.rounds[i].honba}`).join(" / ");
+    throw new Error(`"${selector}" matches ${indices.length} rounds — disambiguate: ${opts}`);
+  }
+  return indices[0];
+}
+
 export type SnapshotQuery =
   | { anchor: number }
   | { kyoku: string; junme: number };
@@ -118,12 +256,7 @@ export function getSnapshot(game: Game, q: SnapshotQuery): string {
     const st = replayTo(game, round, { eventIndex: beat.eventIndex });
     return renderSnapshot(game, round, st, `#${beat.id} ${beat.kind}｜${beat.topic}`);
   }
-  const indices = resolveKyoku(game, q.kyoku);
-  if (indices.length > 1) {
-    const opts = indices.map((i) => `${q.kyoku}.${game.rounds[i].honba}`).join(" / ");
-    throw new Error(`"${q.kyoku}" matches ${indices.length} rounds — disambiguate: ${opts}`);
-  }
-  const round = game.rounds[indices[0]];
+  const round = game.rounds[uniqueRound(game, q.kyoku)];
   const st = replayTo(game, round, { junme: q.junme });
   return renderSnapshot(game, round, st, `${q.junme}巡目終了時点`);
 }

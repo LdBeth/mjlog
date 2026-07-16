@@ -5,6 +5,7 @@
   "tasks": {
     "render": "deno run --allow-read src/cli.ts",
     "mcp": "deno run --allow-read src/mcp.ts",
+    "eval": "deno run --allow-read src/eval.ts",
     "check": "deno check src/*.ts",
     "test": "deno test --allow-read --allow-run=deno"
   },

@@ -10,10 +10,14 @@
 
 import {
   anchorTable,
+  finalStandings,
   getSnapshot,
+  kyokuResults,
+  kyokuStart,
   loadGame,
   renderGame,
   renderKyoku,
+  riichiDeclarations,
   type SnapshotQuery,
 } from "./core.ts";
 import type { RenderOptions } from "./model.ts";
@@ -26,15 +30,19 @@ function usage(): never {
       "  kyoku <sel>       one round, self-contained (sel: S3 / 東1 / E1.2 / round index)",
       "  anchors           list commentary anchors (#id kind kyoku junme seat topic)",
       "  snapshot          --anchor N | --kyoku <sel> --junme N",
+      "  facts <kind>      structured JSON: start <sel> | result <sel> | riichi [sel] | standings",
     ].join("\n"),
   );
   Deno.exit(2);
 }
 
+const COMMANDS = ["render", "kyoku", "anchors", "snapshot", "facts"] as const;
+
 interface Args {
-  cmd: "render" | "kyoku" | "anchors" | "snapshot";
+  cmd: (typeof COMMANDS)[number];
   file: string;
   sel?: string; // kyoku positional
+  factKind?: string; // facts positional
   anchor?: number;
   kyoku?: string;
   junme?: number;
@@ -44,8 +52,8 @@ interface Args {
 function parseArgs(argv: string[]): Args {
   const args: Args = { cmd: "render", file: "", opts: {} };
   let i = 0;
-  if (argv[0] === "render" || argv[0] === "kyoku" || argv[0] === "anchors" || argv[0] === "snapshot") {
-    args.cmd = argv[0];
+  if ((COMMANDS as readonly string[]).includes(argv[0])) {
+    args.cmd = argv[0] as Args["cmd"];
     i = 1;
   }
   const positional: string[] = [];
@@ -82,6 +90,11 @@ function parseArgs(argv: string[]): Args {
   if (args.cmd === "kyoku") {
     if (positional.length !== 2) usage();
     [args.sel, args.file] = positional;
+  } else if (args.cmd === "facts") {
+    // facts <kind> [sel] <file>
+    if (positional.length === 3) [args.factKind, args.sel, args.file] = positional;
+    else if (positional.length === 2) [args.factKind, args.file] = positional;
+    else usage();
   } else {
     if (positional.length !== 1) usage();
     args.file = positional[0];
@@ -125,6 +138,22 @@ if (import.meta.main) {
       case "snapshot":
         console.log(getSnapshot(game, snapshotQuery(a)));
         break;
+      case "facts": {
+        const json = (v: unknown) => console.log(JSON.stringify(v, null, 1));
+        const need = (): string => {
+          if (a.sel === undefined) {
+            console.error(`facts ${a.factKind} needs a kyoku selector`);
+            usage();
+          }
+          return a.sel;
+        };
+        if (a.factKind === "start") json(kyokuStart(game, need()));
+        else if (a.factKind === "result") json(kyokuResults(game, need()));
+        else if (a.factKind === "riichi") json(riichiDeclarations(game, a.sel));
+        else if (a.factKind === "standings") json(finalStandings(game));
+        else usage();
+        break;
+      }
     }
   } catch (err) {
     console.error("error:", err instanceof Error ? err.message : String(err));

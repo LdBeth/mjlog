@@ -10,7 +10,17 @@
 import { McpServer } from "npm:@modelcontextprotocol/sdk@^1.12.0/server/mcp.js";
 import { StdioServerTransport } from "npm:@modelcontextprotocol/sdk@^1.12.0/server/stdio.js";
 import { z } from "npm:zod@^3.24.0";
-import { anchorTable, getSnapshot, loadGame, renderGame, renderKyoku } from "./core.ts";
+import {
+  anchorTable,
+  finalStandings,
+  getSnapshot,
+  kyokuResults,
+  kyokuStart,
+  loadGame,
+  renderGame,
+  renderKyoku,
+  riichiDeclarations,
+} from "./core.ts";
 import type { Game } from "./model.ts";
 
 // Parsed-game cache keyed by path, invalidated when the file's mtime changes.
@@ -135,6 +145,60 @@ server.registerTool(
       if (anchor !== undefined) return getSnapshot(g, { anchor });
       if (kyoku !== undefined && junme !== undefined) return getSnapshot(g, { kyoku, junme });
       throw new Error("provide either `anchor`, or both `kyoku` and `junme`");
+    }),
+);
+
+// ---- structured fact tools (JSON responses; same source as the transcript) ----
+
+const json = (v: unknown) => JSON.stringify(v, null, 1);
+
+server.registerTool(
+  "get_kyoku_start",
+  {
+    description:
+      "Start conditions of one round: dealer, honba, kyotaku, dora indicator, and per-seat " +
+      "start scores with placements. JSON.",
+    inputSchema: { path: PATH, kyoku: KYOKU },
+  },
+  ({ path, kyoku }: { path: string; kyoku: string }) =>
+    run(async () => json(kyokuStart(await game(path), kyoku))),
+);
+
+server.registerTool(
+  "get_kyoku_result",
+  {
+    description:
+      "Outcome(s) of one round: winner, tsumo/ron + discarder, winning tile, points/fu/limit " +
+      "and yaku — or draw reason + tenpai seats. Multiple entries = double/triple ron. JSON.",
+    inputSchema: { path: PATH, kyoku: KYOKU },
+  },
+  ({ path, kyoku }: { path: string; kyoku: string }) =>
+    run(async () => json(kyokuResults(await game(path), kyoku))),
+);
+
+server.registerTool(
+  "get_riichi_declarations",
+  {
+    description:
+      "Every riichi declaration (whole game, or one kyoku): seat, junme, wait tiles, live " +
+      "(unseen) wait count at declaration time, and the リーチ判断 anchor id. JSON.",
+    inputSchema: { path: PATH, kyoku: KYOKU.optional() },
+  },
+  ({ path, kyoku }: { path: string; kyoku?: string }) =>
+    run(async () => json(riichiDeclarations(await game(path), kyoku))),
+);
+
+server.registerTool(
+  "get_final_standings",
+  {
+    description: "Final standings: place, seat, name, score, placement points. JSON.",
+    inputSchema: { path: PATH },
+  },
+  ({ path }: { path: string }) =>
+    run(async () => {
+      const s = finalStandings(await game(path));
+      if (!s) throw new Error("log has no 終局 record (game did not finish?)");
+      return json(s);
     }),
 );
 

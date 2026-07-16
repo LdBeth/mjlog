@@ -84,7 +84,16 @@ Deno.test("mcp: initialize, list tools, call get_snapshot end-to-end", async () 
 
     const tools = await c.request(2, "tools/list", {});
     const names = tools.tools.map((t: Json) => t.name).sort();
-    const want = ["get_snapshot", "list_anchors", "render_game", "render_kyoku"];
+    const want = [
+      "get_final_standings",
+      "get_kyoku_result",
+      "get_kyoku_start",
+      "get_riichi_declarations",
+      "get_snapshot",
+      "list_anchors",
+      "render_game",
+      "render_kyoku",
+    ];
     if (JSON.stringify(names) !== JSON.stringify(want)) {
       throw new Error(`tool set mismatch: ${names}`);
     }
@@ -111,6 +120,19 @@ Deno.test("mcp: initialize, list tools, call get_snapshot end-to-end", async () 
       arguments: { path: SAMPLE, anchor: 99999 },
     });
     if (!bad.isError) throw new Error("expected isError for unknown anchor");
+
+    // a structured fact tool round-trips as parseable JSON
+    const facts = await c.request(6, "tools/call", {
+      name: "get_riichi_declarations",
+      arguments: { path: SAMPLE },
+    });
+    const decls = JSON.parse(facts.content[0].text);
+    if (!Array.isArray(decls) || decls.length === 0 || typeof decls[0].waits !== "string") {
+      throw new Error(`unexpected riichi facts: ${facts.content[0].text}`);
+    }
+    if (decls[0].anchor !== riichiId) {
+      throw new Error(`first riichi anchor ${decls[0].anchor} != list_anchors' ${riichiId}`);
+    }
   } finally {
     await c.close();
   }
