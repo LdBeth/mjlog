@@ -19,7 +19,7 @@ import { assessDanger, type DangerAssessment } from "./danger.ts";
 import { overtakeNeeds, placements } from "./scoring.ts";
 import { renderSnapshot } from "./snapshot.ts";
 import { BoardState, type RestInfo } from "./state.ts";
-import { countsFromTiles, shanten } from "./shanten.ts";
+import { countsFromTiles, shanten, ukeireTypes } from "./shanten.ts";
 import { limitName, yakuName } from "./yaku.ts";
 import {
   doraFromIndicatorType,
@@ -91,6 +91,7 @@ function formatInstruction(): string {
     "・〔向聴N 受入X種Y枚 ドラZ〕=打牌後の手牌評価、〔聴牌 待ち…〕=聴牌と待ち牌",
     "・「嶺上ツモ」=カン後の嶺上牌ツモ、「＋新ドラ」=カンによる新ドラ表示（表示位置は実際のめくり順）",
     "・★=注目の局面（任意で一言解説を添えてよい／不要ならそのまま） / ┗…手:=その時点の手牌",
+    "・「┗ 比較:」=★の打牌の代替候補との比較（◎=実際の打牌。牌種単位、赤は区別しない）",
     "・危険度低/中/高=リーチへの放銃危険度の目安。続く〔…〕が根拠: スジ/半スジ/無スジ、",
     "  ノーチャンス/ワンチャンス=壁（両面待ちに必要な牌が残0/1枚）、生牌/場にn枚=見えている枚数、",
     "  役牌（場風/自風/三元）/客風=字牌の種別。「← 押し」=脅威に対する押し",
@@ -206,6 +207,46 @@ function renderRound(
 
   const handLine = (seat: number, note = ""): string =>
     `  ┗ ${P(seat)}手: ${renderHand(st.hands[seat], st.melds[seat], aka)}${note ? "  " + note : ""}`;
+
+  // What-if table for a flagged discard: every alternative from the same
+  // 14-tile hand, evaluated on the PRE-discard view (the table as the player
+  // saw it while choosing). Top candidates by (shanten, live acceptance),
+  // with the actual choice (◎) always included.
+  const comparisonLine = (who: number, discarded: Tile): string => {
+    const counts = countsFromTiles(st.hands[who]);
+    counts[tileType(discarded)]++; // restore the pre-discard hand
+    const visible = [...st.publicVisible];
+    visible[tileType(discarded)]--; // un-see the discard itself
+    const open = st.melds[who].length;
+    const closed = open === 0;
+    const cands: Array<{ t: number; sh: number; kinds: number; live: number; waits: number[] }> =
+      [];
+    for (let t = 0; t < 34; t++) {
+      if (counts[t] === 0) continue;
+      counts[t]--;
+      const sh = shanten(counts, open, closed);
+      const waits = ukeireTypes(counts, open, closed);
+      let live = 0;
+      for (const u of waits) live += Math.max(0, 4 - visible[u] - counts[u]);
+      cands.push({ t, sh, kinds: waits.length, live, waits });
+      counts[t]++;
+    }
+    cands.sort((a, b) => a.sh - b.sh || b.live - a.live);
+    const dt = tileType(discarded);
+    const top = cands.slice(0, 3);
+    if (!top.some((c) => c.t === dt)) {
+      const chosen = cands.find((c) => c.t === dt);
+      if (chosen) top[top.length - 1] = chosen;
+    }
+    const fmt = (c: typeof cands[number]): string => {
+      const mark = c.t === dt ? "◎" : "";
+      if (c.sh <= 0) {
+        return `打${typeGlyph(c.t)}${mark}=聴牌・待ち${c.waits.map(typeGlyph).join("")}(${c.live}枚)`;
+      }
+      return `打${typeGlyph(c.t)}${mark}=向聴${c.sh}・受入${c.kinds}種${c.live}枚`;
+    };
+    return `  ┗ 比較: ${top.map(fmt).join(" ／ ")}`;
+  };
 
   // Record a beat and emit its anchor line. The beat's board position is
   // (roundIndex, eventIndex): replayTo that position reproduces the state the
@@ -559,6 +600,7 @@ function renderRound(
         metricTag(info, who)
       }${inlineDanger}${inlineDora}${star}`,
     );
+    if (star !== "") out.push(comparisonLine(who, tile));
 
     // reconstructed-hand displays at key beats
     if (riichi) {
