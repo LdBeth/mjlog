@@ -26,6 +26,23 @@ async function game(path: string): Promise<Game> {
 
 type ToolResult = { content: Array<{ type: "text"; text: string }>; isError?: boolean };
 
+// Handler arg shapes, stated explicitly: the SDK's zod-based inference degrades
+// to `any` when `zod` resolves to a different npm instance than the SDK's own.
+interface RenderArgs {
+  path: string;
+  hands?: "key" | "all";
+  snapshots?: "none" | "inline";
+}
+interface KyokuArgs extends RenderArgs {
+  kyoku: string;
+}
+interface SnapshotArgs {
+  path: string;
+  anchor?: number;
+  kyoku?: string;
+  junme?: number;
+}
+
 function ok(text: string): ToolResult {
   return { content: [{ type: "text", text }] };
 }
@@ -63,7 +80,8 @@ server.registerTool(
         .describe("inline = embed a full board snapshot above every anchor (token-heavy)"),
     },
   },
-  ({ path, hands, snapshots }) => run(async () => renderGame(await game(path), { hands, snapshots })),
+  ({ path, hands, snapshots }: RenderArgs) =>
+    run(async () => renderGame(await game(path), { hands, snapshots })),
 );
 
 server.registerTool(
@@ -79,7 +97,7 @@ server.registerTool(
       snapshots: z.enum(["none", "inline"]).optional(),
     },
   },
-  ({ path, kyoku, hands, snapshots }) =>
+  ({ path, kyoku, hands, snapshots }: KyokuArgs) =>
     run(async () => renderKyoku(await game(path), kyoku, { hands, snapshots })),
 );
 
@@ -91,7 +109,7 @@ server.registerTool(
       "#id, kind (配牌評価/リーチ判断/押し引き/局総括/流局評価/終局総括), kyoku, junme, seat, topic.",
     inputSchema: { path: PATH },
   },
-  ({ path }) => run(async () => anchorTable(await game(path))),
+  ({ path }: { path: string }) => run(async () => anchorTable(await game(path))),
 );
 
 server.registerTool(
@@ -111,7 +129,7 @@ server.registerTool(
         .describe("Go-around number (requires kyoku)"),
     },
   },
-  ({ path, anchor, kyoku, junme }) =>
+  ({ path, anchor, kyoku, junme }: SnapshotArgs) =>
     run(async () => {
       const g = await game(path);
       if (anchor !== undefined) return getSnapshot(g, { anchor });

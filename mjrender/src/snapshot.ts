@@ -7,6 +7,7 @@
 // inlined above transcript anchors (--snapshots=inline).
 
 import type { Game, Round } from "./model.ts";
+import { placements } from "./scoring.ts";
 import type { BoardState, RestInfo } from "./state.ts";
 import {
   doraFromIndicatorType,
@@ -21,14 +22,6 @@ const WIND = ["東", "南", "西", "北"];
 
 function roundName(kyoku: number): string {
   return `${WIND[Math.floor(kyoku / 4) % 4]}${(kyoku % 4) + 1}局`;
-}
-
-/** Placement (1位..4位) per seat from live scores; ties go to the earlier seat. */
-function placements(scores: number[]): number[] {
-  const order = [0, 1, 2, 3].sort((a, b) => scores[b] - scores[a] || a - b);
-  const rank = new Array<number>(4).fill(0);
-  order.forEach((seat, i) => rank[seat] = i + 1);
-  return rank;
 }
 
 function riverLine(st: BoardState, seat: number, aka: boolean): string {
@@ -74,7 +67,7 @@ export function renderSnapshot(
       `  ${doraTxt}  供託${kyotaku}` + (note ? `  〔${note}〕` : ""),
   );
 
-  const rank = placements(st.scores);
+  const rank = placements(st.scores, game.rounds[0].dealer);
   for (let seat = 0; seat < 4; seat++) {
     const wind = WIND[(seat - round.dealer + 4) % 4];
     const name = game.players[seat].name;

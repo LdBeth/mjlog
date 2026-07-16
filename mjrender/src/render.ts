@@ -16,6 +16,7 @@ import type {
   Tile,
 } from "./model.ts";
 import { assessDanger } from "./danger.ts";
+import { overtakeNeeds, placements } from "./scoring.ts";
 import { renderSnapshot } from "./snapshot.ts";
 import { BoardState, type RestInfo } from "./state.ts";
 import { countsFromTiles, shanten } from "./shanten.ts";
@@ -91,6 +92,8 @@ function formatInstruction(): string {
     "・「嶺上ツモ」=カン後の嶺上牌ツモ、「＋新ドラ」=カンによる新ドラ表示（表示位置は実際のめくり順）",
     "・★=注目の局面（任意で一言解説を添えてよい／不要ならそのまま） / ┗…手:=その時点の手牌",
     "・危険度低/中/高=リーチに対する放銃危険度の簡易目安（役牌＝場風/自風/三元は高めに評価）、「← 押し」=脅威に対する押し",
+    "・点況=局開始時の順位と1つ上の順位との点差（▲）、「残り最短N局」=連荘なしと仮定した残り局数",
+    "・「逆転条件」=オーラス・延長戦でトップに立つ最低の和了（本場・供託込み。ロン=他家から/直撃=トップから/ツモ）",
     "",
   ].join("\n");
 }
@@ -225,14 +228,49 @@ function renderRound(
   // --- header ---
   const indGlyph = tileGlyph(round.firstDora, aka);
   const doraGlyph = typeGlyph(doraFromIndicatorType(tileType(round.firstDora)));
+  // Minimum hands left assumes no renchan; past the scheduled last hand it's 延長戦.
+  const lastIdx = g.rules.hanchan ? 7 : 3;
+  const remainTxt = round.kyoku > lastIdx ? "延長戦" : `残り最短${lastIdx - round.kyoku + 1}局`;
   out.push(
     `【${roundName(round.kyoku)} ${round.honba}本場】親: ${P(round.dealer)}(${
       g.players[round.dealer].name
     })` +
-      `  供託${round.kyotaku}  ドラ表示:${indGlyph}(→ドラ${doraGlyph})  点棒:${
-        round.startScores.map((s) => s * 100).join("/")
-      }`,
+      `  供託${round.kyotaku}  ドラ表示:${indGlyph}(→ドラ${doraGlyph})  ${remainTxt}`,
   );
+
+  // Placement-sorted scores with the gap (▲) to the seat one place above —
+  // the frame every push/fold and オーラス judgement needs.
+  const initialEast = g.rounds[0].dealer;
+  const rank = placements(round.startScores, initialEast);
+  const byRank = [0, 1, 2, 3].sort((a, b) => rank[a] - rank[b]);
+  out.push(
+    `  点況: ` + byRank.map((s, i) => {
+      const gap = i === 0
+        ? ""
+        : `(▲${(round.startScores[byRank[i - 1]] - round.startScores[s]) * 100})`;
+      return `${rank[s]}位${P(s)} ${round.startScores[s] * 100}${gap}`;
+    }).join(" / "),
+  );
+  if (round.kyoku >= lastIdx) {
+    for (const s of byRank.slice(1)) {
+      const needs = overtakeNeeds({
+        scores: round.startScores,
+        seat: s,
+        dealer: round.dealer,
+        honba: round.honba,
+        kyotaku: round.kyotaku,
+        initialEast,
+      });
+      if (!needs) continue;
+      out.push(
+        needs.impossible
+          ? `  ${P(s)}(${rank[s]}位) 逆転条件: なし（役満直撃でも届かず）`
+          : `  ${P(s)}(${rank[s]}位) 逆転条件: ${
+            [needs.ron, needs.direct, needs.tsumo].filter(Boolean).join(" / ")
+          }`,
+      );
+    }
+  }
 
   // --- 配牌 (all four starting hands) ---
   out.push("◆配牌");
