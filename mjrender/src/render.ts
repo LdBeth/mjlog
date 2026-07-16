@@ -88,7 +88,9 @@ function formatInstruction(): string {
     "・場風=局名で決まる風（東n局→東、南n局→南）、配牌の(東家/南家/西家/北家)=各家の自風。役牌判断に用いる",
     "・「N巡」=巡目。親（東家）が山からツモるたび1巡進む卓全体共有のカウンタで、各巡の最初の打牌にのみ表示",
     "・打牌表記: 「A → B」=Aをツモって手出しでB打、牌の後の「▽」=ツモ切り（引いた牌をそのまま捨て）、「（リーチ後）」=リーチ後の強制ツモ切り",
-    "・〔向聴N 受入X種Y枚 ドラZ〕=打牌後の手牌評価、〔聴牌 待ち…〕=聴牌と待ち牌",
+    "・〔向聴N 受入X種Y枚 ドラZ〕=打牌後の手牌評価、〔聴牌 待ち… 残N枚〕=聴牌と待ち牌（未見の残り枚数）",
+    "・「◇結果時点の各家手牌」=和了/流局時の全員の手牌と聴牌/向聴の事実。（振聴）=待ち牌を自分で捨てているフリテン",
+    "・「◇見逃し」=聴牌者がロン可能な牌を見送った事実（フリテン選択・黙聴の見送りを含む。直後の状況判断は解説対象）",
     "・「嶺上ツモ」=カン後の嶺上牌ツモ、「＋新ドラ」=カンによる新ドラ表示（表示位置は実際のめくり順）",
     "・★=注目の局面（任意で一言解説を添えてよい／不要ならそのまま） / ┗…手:=その時点の手牌",
     "・「┗ 比較:」=★の打牌の代替候補との比較（◎=実際の打牌。牌種単位、赤は区別しない）",
@@ -200,9 +202,26 @@ function renderRound(
     const d = st.countDora(seat);
     if (info.shanten <= 0) {
       const waits = info.types.map((t) => typeGlyph(t)).join("");
-      return `〔聴牌 待ち${waits || "?"} ドラ${d}〕`;
+      return `〔聴牌 待ち${waits || "?"} 残${info.count}枚 ドラ${d}〕`;
     }
     return `〔向聴${info.shanten} 受入${info.kinds}種${info.count}枚 ドラ${d}〕`;
+  };
+
+  // --- 見逃し tracking: a tenpai seat passing on a winnable discard ---
+  // Wait types per seat, cached until that seat's hand changes (wait TYPES
+  // depend only on the hand, not on visibility).
+  const waitsCache: Array<number[] | null> = [null, null, null, null];
+  const misses: Array<
+    { seat: number; junme: number; tile: Tile; from: number; eventIndex: number; waits: number[] }
+  > = [];
+  const recordPasses = (who: number, tile: Tile, eventIndex: number): void => {
+    for (let o = 0; o < 4; o++) {
+      if (o === who || st.hands[o].length % 3 !== 1 || st.restShanten[o] > 0) continue;
+      const w = waitsCache[o] ??= st.restInfo(o).types;
+      if (w.includes(tileType(tile))) {
+        misses.push({ seat: o, junme: st.junme, tile, from: who, eventIndex, waits: w });
+      }
+    }
   };
 
   const handLine = (seat: number, note = ""): string =>
@@ -336,6 +355,7 @@ function renderRound(
     if (e.t === "draw") {
       const before = st.restShanten[e.who];
       st.draw(e.who, e.tile, e.rinshan);
+      waitsCache[e.who] = null;
       const open = st.melds[e.who].length;
       const after = shanten(countsFromTiles(st.hands[e.who]), open, open === 0);
       const advanced = after < before;
@@ -384,6 +404,7 @@ function renderRound(
       const m = e.meld;
       const beforeCall = st.restShanten[m.who];
       st.applyMeld(m); // updates restShanten[m.who] to the post-call value
+      waitsCache[m.who] = null;
       const afterCall = st.restShanten[m.who];
       const fromTxt = m.kind === "ankan" || m.kind === "nuki" ? "" : ` (${P(m.fromWho)}から)`;
       const label = meldVerb(m);
@@ -412,6 +433,7 @@ function renderRound(
             drawn = n.tile;
             rinshan = n.rinshan;
             st.draw(m.who, n.tile, n.rinshan);
+            waitsCache[m.who] = null;
             after = st.restInfo(m.who).shanten;
             lead.push(`嶺上ツモ ${tileGlyph(n.tile, aka)}`);
             j++;
@@ -475,6 +497,43 @@ function renderRound(
   }
 
   // --- results ---
+  // Ground truth at the hand's end: every seat's concealed hand with tenpai
+  // status / waits / furiten — what DIDN'T happen is what counterfactual
+  // commentary is made of.
+  const winners = new Set(
+    round.results.filter((r) => r.kind === "agari").map((r) => (r as AgariResult).who),
+  );
+  const groundTruth = (): void => {
+    out.push("  ◇結果時点の各家手牌:");
+    for (let s = 0; s < 4; s++) {
+      const hand = renderHand(st.hands[s], st.melds[s], aka);
+      const won = winners.has(s) ? "(和了)" : "";
+      if (st.hands[s].length % 3 !== 1) {
+        out.push(`    ${P(s)}${won}: ${hand}`);
+        continue;
+      }
+      const info = st.restInfo(s);
+      const furiten = info.shanten <= 0 &&
+        info.types.some((t) => st.discardTypes[s].has(t));
+      out.push(`    ${P(s)}${won}: ${hand}  ${metricTag(info, s)}${furiten ? "（振聴）" : ""}`);
+    }
+  };
+
+  // A pass on the very tile a seat then won (the log ends events at the winning
+  // discard) is a win, not a miss.
+  const lastDiscardIdx = ev.findLastIndex((e) => e.t === "discard");
+  const realMisses = misses.filter(
+    (m) => !(m.eventIndex === lastDiscardIdx && winners.has(m.seat)),
+  );
+  for (const m of realMisses) {
+    out.push(
+      `◇見逃し: ${P(m.seat)}が${m.junme}巡目 ${P(m.from)}の${
+        tileGlyph(m.tile, aka)
+      }をロンせず（待ち${m.waits.map((t) => typeGlyph(t)).join("")}）`,
+    );
+  }
+
+  let truthShown = false;
   for (const res of round.results) {
     if (res.kind === "agari") {
       // consistency guard: reconstructed concealed hand (+ ron tile) vs log `hai`
@@ -486,9 +545,30 @@ function renderRound(
         warnInconsistent(`round ${round.kyoku} agari hand mismatch: rec=[${a}] log=[${b}]`);
       }
       renderAgari(g, round, res, out);
+      if (!truthShown) {
+        groundTruth();
+        truthShown = true;
+      }
       pushAnchor("局総括", "決着の評価と局全体の総括（勝負の分かれ目）", ev.length - 1, res.who);
     } else {
-      renderRyuukyoku(g, res, st.hands, st.melds, out);
+      out.push(`◆流局（${ryuukyokuLabel(res)}）`);
+      // exhaustive draws: our reconstruction must agree with the log's tenpai list
+      if (res.type === undefined) {
+        const logTenpai = res.tenpaiHands.map((t) => t.who).sort().join(",");
+        const recTenpai = [0, 1, 2, 3].filter((s) =>
+          st.hands[s].length % 3 === 1 && st.restInfo(s).shanten <= 0
+        ).join(",");
+        if (logTenpai !== recTenpai) {
+          warnInconsistent(
+            `round ${round.kyoku} tenpai mismatch: rec=[${recTenpai}] log=[${logTenpai}]`,
+          );
+        }
+      }
+      if (!truthShown) {
+        groundTruth();
+        truthShown = true;
+      }
+      if (res.sc.length) out.push(`  点棒: ${scoreDeltaLine(res.sc)}`);
       pushAnchor("流局評価", "流局時の聴牌・ノーテンと点棒状況の評価", ev.length - 1);
     }
   }
@@ -534,6 +614,8 @@ function renderRound(
     if (!st.discard(who, tile, tsumogiri, riichi)) {
       warnInconsistent(`${P(who)} discarded ${tile} not in hand (round ${round.kyoku})`);
     }
+    waitsCache[who] = null;
+    recordPasses(who, tile, eventIndex);
 
     // hands/melds/publicVisible are now stable through the rest of this function,
     // so resolve the resting-hand analysis ONCE and reuse it below (restShanten,
@@ -704,28 +786,17 @@ function renderAgari(g: Game, round: Round, res: AgariResult, out: string[]): vo
   out.push(`  点棒: ${scoreDeltaLine(res.sc)}`);
 }
 
-function renderRyuukyoku(
-  g: Game,
-  res: RyuukyokuResult,
-  hands: Tile[][],
-  melds: Meld[][],
-  out: string[],
-): void {
-  const aka = g.rules.aka;
-  const typeLabel: Record<string, string> = {
-    yao9: "九種九牌",
-    kaze4: "四風連打",
-    reach4: "四家立直",
-    ron3: "三家和",
-    kan4: "四槓散了",
-    nm: "流し満貫",
-  };
-  const label = res.type ? (typeLabel[res.type] ?? res.type) : "荒牌平局";
-  out.push(`◆流局（${label}）`);
-  for (const th of res.tenpaiHands) {
-    out.push(`  ${P(th.who)} 聴牌: ${renderHand(th.hand, melds[th.who], aka)}`);
-  }
-  if (res.sc.length) out.push(`  点棒: ${scoreDeltaLine(res.sc)}`);
+const RYUUKYOKU_LABEL: Record<string, string> = {
+  yao9: "九種九牌",
+  kaze4: "四風連打",
+  reach4: "四家立直",
+  ron3: "三家和",
+  kan4: "四槓散了",
+  nm: "流し満貫",
+};
+
+function ryuukyokuLabel(res: RyuukyokuResult): string {
+  return res.type ? (RYUUKYOKU_LABEL[res.type] ?? res.type) : "荒牌平局";
 }
 
 function scoreDeltaLine(sc: number[]): string {
