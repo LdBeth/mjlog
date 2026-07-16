@@ -15,25 +15,32 @@ export function countsFromTiles(tiles: Tile[]): number[] {
 
 const YAOCHU = [0, 8, 9, 17, 18, 26, 27, 28, 29, 30, 31, 32, 33]; // terminals + honors
 
-/** Best decomposition value V = 2*sets + min(partials, cap-sets), maximized. */
-function decompValue(counts: number[], cap: number): number {
+/**
+ * Standard-form shanten = 2*cap - V, where cap = 4 - openMelds set slots and
+ * V = 2*sets + min(partials, free slots) + (1 if a pair head was found) is the
+ * best decomposition value. One DFS peels blocks off the leftmost non-empty
+ * tile; it also picks the pair head (once) inline, so there is no separate
+ * head loop. It prunes once the slots are full and a head is secured.
+ */
+function standardShanten(counts: number[], openMelds: number): number {
+  const cap = 4 - openMelds;
+  if (cap < 0) return 8;
   let best = 0;
 
-  const dfs = (start: number, sets: number, partials: number): void => {
-    let i = start;
+  const dfs = (i: number, sets: number, partials: number, head: number): void => {
     while (i < 34 && counts[i] === 0) i++;
 
-    const usedSets = Math.min(sets, cap);
-    const v = 2 * usedSets + Math.min(partials, Math.max(0, cap - usedSets));
+    const used = Math.min(sets, cap);
+    const v = 2 * used + Math.min(partials, cap - used) + head;
     if (v > best) best = v;
-    if (i >= 34 || usedSets + partials >= cap) return; // no room for more useful blocks
+    if (i >= 34 || (used + partials >= cap && head)) return;
 
     const rank = i < 27 ? i % 9 : -1; // 0-based rank within suit, -1 for honors
 
     // complete triplet
     if (counts[i] >= 3) {
       counts[i] -= 3;
-      dfs(i, sets + 1, partials);
+      dfs(i, sets + 1, partials, head);
       counts[i] += 3;
     }
     // complete sequence
@@ -41,22 +48,28 @@ function decompValue(counts: number[], cap: number): number {
       counts[i]--;
       counts[i + 1]--;
       counts[i + 2]--;
-      dfs(i, sets + 1, partials);
+      dfs(i, sets + 1, partials, head);
       counts[i]++;
       counts[i + 1]++;
       counts[i + 2]++;
     }
-    // partial: pair
+    // pair reserved as the head (at most once)
+    if (!head && counts[i] >= 2) {
+      counts[i] -= 2;
+      dfs(i, sets, partials, 1);
+      counts[i] += 2;
+    }
+    // partial: pair toward a triplet
     if (counts[i] >= 2) {
       counts[i] -= 2;
-      dfs(i, sets, partials + 1);
+      dfs(i, sets, partials + 1, head);
       counts[i] += 2;
     }
     // partial: ryanmen/penchan (i, i+1)
     if (rank >= 0 && rank <= 7 && counts[i + 1] > 0) {
       counts[i]--;
       counts[i + 1]--;
-      dfs(i, sets, partials + 1);
+      dfs(i, sets, partials + 1, head);
       counts[i]++;
       counts[i + 1]++;
     }
@@ -64,33 +77,18 @@ function decompValue(counts: number[], cap: number): number {
     if (rank >= 0 && rank <= 6 && counts[i + 2] > 0) {
       counts[i]--;
       counts[i + 2]--;
-      dfs(i, sets, partials + 1);
+      dfs(i, sets, partials + 1, head);
       counts[i]++;
       counts[i + 2]++;
     }
     // drop a floater and move on
     counts[i]--;
-    dfs(i, sets, partials);
+    dfs(i, sets, partials, head);
     counts[i]++;
   };
 
-  dfs(0, 0, 0);
-  return best;
-}
-
-function standardShanten(counts: number[], openMelds: number): number {
-  const cap = 4 - openMelds;
-  if (cap < 0) return 8;
-  let best = cap * 2 - decompValue(counts, cap); // no head
-  for (let t = 0; t < 34; t++) {
-    if (counts[t] >= 2) {
-      counts[t] -= 2;
-      const v = cap * 2 - decompValue(counts, cap) - 1; // this pair is the head
-      counts[t] += 2;
-      if (v < best) best = v;
-    }
-  }
-  return best;
+  dfs(0, 0, 0, 0);
+  return 2 * cap - best;
 }
 
 function chiitoitsuShanten(counts: number[]): number {
