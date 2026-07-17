@@ -33,11 +33,11 @@ function gameWith(events: GameEvent[], results: RoundResult[]): Game {
   };
 }
 
-function renderQuiet(g: Game): string {
+function renderQuiet(g: Game, snapshots: "none" | "inline" = "none"): string {
   const orig = console.error;
   console.error = () => {};
   try {
-    return renderGame(g, { hands: "key" });
+    return renderGame(g, { hands: "key", snapshots });
   } finally {
     console.error = orig;
   }
@@ -65,6 +65,29 @@ Deno.test("ground truth: passed win tile is a 見逃し; own-wait discard flags 
   // (id 16 in the crafted hand is the red 5m, hence ドラ1)
   if (!/P1: .*〔聴牌 待ち② 残2枚 ドラ1〕（振聴）/.test(text)) {
     throw new Error("missing 振聴 flag on P1's result-time hand");
+  }
+});
+
+Deno.test("inline render folds 結果時点 into the final snapshot, 振聴 mark included", () => {
+  const text = renderQuiet(
+    gameWith(
+      [
+        { t: "draw", who: 0, tile: 40, rinshan: false },
+        { t: "discard", who: 0, tile: 40, tsumogiri: true, riichi: false },
+        { t: "draw", who: 1, tile: 41, rinshan: false },
+        { t: "discard", who: 1, tile: 41, tsumogiri: true, riichi: false },
+      ],
+      [{ kind: "ryuukyoku", type: "yao9", sc: [], tenpaiHands: [] }],
+    ),
+    "inline",
+  );
+  // the legend still *describes* the block (「◇結果時点の各家手牌」=…); only the
+  // block line itself (with the colon) must be gone
+  if (text.includes("◇結果時点の各家手牌:")) {
+    throw new Error("inline render must omit the 結果時点 block (the snapshot carries it)");
+  }
+  if (!/│手牌 P1: .*（振聴）/.test(text)) {
+    throw new Error("snapshot 手牌 line missing the 振聴 mark");
   }
 });
 

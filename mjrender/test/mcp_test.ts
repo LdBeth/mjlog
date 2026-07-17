@@ -196,11 +196,7 @@ Deno.test("mcp: paced kyoku-gated commentary flow end-to-end", async () => {
     assert(gResult.isError && txt(gResult).includes("locked"), `result future should lock: ${txt(gResult)}`);
     const gComment = await c.call("mj_add_comment", { comments: [{ anchor: southAnchor.id, text: "早すぎ。" }] });
     assert(gComment.isError && txt(gComment).includes("locked"), `comment future should lock: ${txt(gComment)}`);
-    const futureStar = stars.find((s) => winds[s.round] !== winds[0])!;
-    const gNote = await c.call("mj_add_note", {
-      notes: [{ kyoku: String(futureStar.round), junme: futureStar.junme, seat: futureStar.seat, text: "早すぎ。" }],
-    });
-    assert(gNote.isError && txt(gNote).includes("locked"), `note future should lock: ${txt(gNote)}`);
+    // (mj_add_note takes no kyoku argument — future rounds are unaddressable by design)
     // riichi without kyoku: only rounds <= focus (0) + the 未開放 note
     const riichi0 = await c.call("mj_get_riichi_declarations", {});
     assert(!riichi0.isError && txt(riichi0).includes("未開放局は含まず"), `riichi note missing: ${txt(riichi0)}`);
@@ -211,6 +207,8 @@ Deno.test("mcp: paced kyoku-gated commentary flow end-to-end", async () => {
     const k0 = await c.call("mj_render_kyoku", { kyoku: "0" });
     assert(!k0.isError, `render 0 errored: ${txt(k0)}`);
     assert(txt(k0).includes("┌盤面"), "render must contain an inline board block");
+    // the end-of-hand ground-truth block folds into the final snapshot in inline mode
+    assert(!txt(k0).includes("◇結果時点の各家手牌:"), "inline render must omit the 結果時点 block");
     // 配牌評価 (and 中間総括/終局総括) carry no inline snapshot — the deal block is the board
     const boards0 = txt(k0).split("┌盤面").length - 1;
     const wantBoards0 = anchorsOf(0)
@@ -243,7 +241,7 @@ Deno.test("mcp: paced kyoku-gated commentary flow end-to-end", async () => {
     }
     assert(capRejected, "an 11-entry batch must be rejected");
 
-    const badStar = await c.call("mj_add_note", { notes: [{ kyoku: "0", junme: 99, seat: 0, text: "場所なし。" }] });
+    const badStar = await c.call("mj_add_note", { notes: [{ junme: 99, seat: 0, text: "場所なし。" }] });
     assert(badStar.isError, "a non-★ position must error");
 
     // ---- 6. mj_next_kyoku with round 0 unfilled: error listing the #ids ----
@@ -267,23 +265,40 @@ Deno.test("mcp: paced kyoku-gated commentary flow end-to-end", async () => {
     for (let r = 0; r < nRounds; r++) {
       // --- pre-fill checks (focus = r, round r not yet filled) ---
       if (r === 1) {
-        // notes for a PAST round (0) stay correctable after advancing: add, then delete
+        // after mj_next_kyoku the note window STILL addresses the finished round 0
+        // (it moves only when the new focus is rendered) — the advance HINT is actionable
         const s0 = stars.find((s) => s.round === 0)!;
-        const pastNote = await c.call("mj_add_note", {
-          notes: [{ kyoku: "0", junme: s0.junme, seat: s0.seat, text: "後から見ると遅い。" }],
+        const graceNote = await c.call("mj_add_note", {
+          notes: [{ junme: s0.junme, seat: s0.seat, text: "後から見ると遅い。" }],
         });
-        assert(!pastNote.isError && txt(pastNote).includes("saved 1"), `past-round note must stay editable: ${txt(pastNote)}`);
-        const pastDel = await c.call("mj_add_note", {
-          notes: [{ kyoku: "0", junme: s0.junme, seat: s0.seat, text: "" }],
+        assert(!graceNote.isError && txt(graceNote).includes("saved 1"), `grace-window note failed: ${txt(graceNote)}`);
+        const graceDel = await c.call("mj_add_note", {
+          notes: [{ junme: s0.junme, seat: s0.seat, text: "" }],
         });
-        assert(!pastDel.isError && txt(pastDel).includes("deleted 1"), `past-round note delete failed: ${txt(pastDel)}`);
+        assert(!graceDel.isError && txt(graceDel).includes("deleted 1"), `grace-window delete failed: ${txt(graceDel)}`);
+        // rendering the new focus moves the window to round 1 and locks round 0
+        const k1 = await c.call("mj_render_kyoku", { kyoku: "1" });
+        assert(!k1.isError, `render 1 errored: ${txt(k1)}`);
+        const sites1 = stars.filter((s) => s.round === 1);
+        const s0only = stars.find((s) =>
+          s.round === 0 && !sites1.some((x) => x.junme === s.junme && x.seat === s.seat)
+        );
+        if (s0only) {
+          const lockedNote = await c.call("mj_add_note", {
+            notes: [{ junme: s0only.junme, seat: s0only.seat, text: "手遅れ。" }],
+          });
+          assert(
+            lockedNote.isError && txt(lockedNote).includes("notes address"),
+            `round-0 note must lock after rendering round 1: ${txt(lockedNote)}`,
+          );
+        }
         // a REVISION of an already-filled past anchor succeeds (replace-only)
         const past = anchorsOf(0)[0].id;
         const rev = await c.call("mj_add_comment", { comments: [{ anchor: past, text: "改訂版。" }] });
         assert(!rev.isError && txt(rev).includes("replaced"), `past revision should replace: ${txt(rev)}`);
-        // a ★ note in the FOCUS round: save → empty-text delete round-trips
-        const s1 = stars.find((s) => s.round === 1)!;
-        const site = { kyoku: "1", junme: s1.junme, seat: s1.seat };
+        // a ★ note in the FOCUS round (window = round 1): save → empty-text delete round-trips
+        const s1 = sites1[0]!;
+        const site = { junme: s1.junme, seat: s1.seat };
         const saved = await c.call("mj_add_note", { notes: [{ ...site, text: "リーチ一言。" }] });
         assert(!saved.isError && txt(saved).includes("saved 1"), `note save failed: ${txt(saved)}`);
         const deleted = await c.call("mj_add_note", { notes: [{ ...site, text: "  " }] });

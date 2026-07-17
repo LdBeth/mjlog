@@ -81,9 +81,12 @@ export function renderSnapshot(
     const hand = renderHand(st.hands[seat], [], aka);
     // Metrics describe a resting (3n+1) hand; a snapshot taken mid-turn (after a
     // draw, before the discard) shows the 14-tile hand as a pending choice.
-    const metric = st.hands[seat].length % 3 === 1
-      ? `  ${metricText(st.restInfo(seat), st.countDora(seat))}`
-      : "  （ツモ後・打牌選択前）";
+    let metric = "  （ツモ後・打牌選択前）";
+    if (st.hands[seat].length % 3 === 1) {
+      const info = st.restInfo(seat);
+      metric = `  ${metricText(info, st.countDora(seat))}` +
+        (st.isFuriten(seat, info) ? "（振聴）" : "");
+    }
     out.push(`│手牌 P${seat}: ${hand}${metric}`);
   }
 

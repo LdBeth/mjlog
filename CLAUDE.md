@@ -74,8 +74,10 @@ the stdio MCP server runs from the bundle
 (reply carries the focus line + notation legend, once per process); the rest
 operate on the opened log and error until one is opened. A **focus cursor**
 hard-gates per-turn detail to the current kyoku (renders/snapshots/facts/draft
-writes; past rounds stay readable, comments there replace-only, notes stay
-correctable — empty note text deletes); the gate is a pacing device, not a spoiler
+writes; past rounds stay readable, comments there replace-only; ★ notes take
+no kyoku arg — they address the focus kyoku, which stays notable after
+mj_next_kyoku until the new focus is rendered; empty note text deletes); the
+gate is a pacing device, not a spoiler
 shield: mj_render_game's outline (headers, condensed results, anchor index —
 no per-turn lines) stays ungated for orientation. `mj_next_kyoku` advances the
 focus only when every focus-kyoku anchor is commented (wind boundaries demand

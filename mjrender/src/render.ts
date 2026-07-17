@@ -595,6 +595,10 @@ function renderRound(
     round.results.filter((r) => r.kind === "agari").map((r) => (r as AgariResult).who),
   );
   const groundTruth = (): void => {
+    // The LLM-facing inline render skips this block: the 局総括/流局評価
+    // snapshot at the same position already shows every hand (振聴 included)
+    // plus rivers/scores. The woven/reader render (snapshots:none) keeps it.
+    if (opts.snapshots === "inline") return;
     out.push("  ◇結果時点の各家手牌:");
     for (let s = 0; s < 4; s++) {
       const hand = renderHand(st.hands[s], st.melds[s], aka);
@@ -604,8 +608,7 @@ function renderRound(
         continue;
       }
       const info = st.restInfo(s);
-      const furiten = info.shanten <= 0 &&
-        info.types.some((t) => st.discardTypes[s].has(t));
+      const furiten = st.isFuriten(s, info);
       out.push(`    ${P(s)}${won}: ${hand}  ${metricTag(info, s)}${furiten ? "（振聴）" : ""}`);
     }
   };

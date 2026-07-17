@@ -207,6 +207,11 @@ export class BoardState {
 
   // ---- queries ----
 
+  /** A tenpai hand waiting on a type the seat has already discarded (振聴). */
+  isFuriten(seat: number, info: RestInfo): boolean {
+    return info.shanten <= 0 && info.types.some((t) => this.discardTypes[seat].has(t));
+  }
+
   /** Resting (3n+1) hand analysis for a seat, against live public information. */
   restInfo(seat: number): RestInfo {
     const counts = countsFromTiles(this.hands[seat]);
