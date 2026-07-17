@@ -5,3 +5,4 @@ out
 mjrender/bundle/server/
 *.mcpb
 .claude/
+*.mjs

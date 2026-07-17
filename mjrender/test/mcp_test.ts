@@ -1,8 +1,29 @@
-// End-to-end MCP test: spawn src/mcp.ts over stdio and drive a real JSON-RPC
-// exchange (initialize → tools/list → tools/call get_snapshot).
+// End-to-end MCP test for the PACED, kyoku-gated flow (v0.5.0): bundle
+// src/mcp.ts (the same artifact `deno task bundle` ships), spawn the bundle
+// over stdio, and drive a real JSON-RPC exchange that walks the whole gated
+// loop — open → orient → per-kyoku render/comment/advance → weave.
+//
+// Expected per-round anchor ids and ★ sites are DERIVED at runtime from
+// core.ts against the sample (robust to the sample's exact shape); only the
+// wind layout (East rounds then South) is assumed from the derived winds.
+
+import { listAnchors, listStarSites, loadGame } from "../src/core.ts";
+import type { Beat } from "../src/model.ts";
 
 const ROOT = new URL("../", import.meta.url).pathname;
 const SAMPLE = new URL("../../1.xml", import.meta.url).pathname;
+
+async function bundleServer(outFile: string): Promise<void> {
+  const { success, stderr } = await new Deno.Command("deno", {
+    args: ["bundle", "-o", outFile, "src/mcp.ts"],
+    cwd: ROOT,
+    stdout: "null",
+    stderr: "piped",
+  }).output();
+  if (!success) {
+    throw new Error(`deno bundle failed:\n${new TextDecoder().decode(stderr)}`);
+  }
+}
 
 // deno-lint-ignore no-explicit-any
 type Json = any;
@@ -11,10 +32,11 @@ class McpClient {
   #proc: Deno.ChildProcess;
   #writer: WritableStreamDefaultWriter<Uint8Array>;
   #lines: AsyncIterator<string>;
+  #seq = 0;
 
-  constructor() {
+  constructor(server: string) {
     this.#proc = new Deno.Command("deno", {
-      args: ["run", "--allow-read", "--allow-write", "--allow-env=HOME", "src/mcp.ts"],
+      args: ["run", "--allow-read", "--allow-write", "--allow-env=HOME", server],
       cwd: ROOT,
       stdin: "piped",
       stdout: "piped",
@@ -26,7 +48,8 @@ class McpClient {
       .pipeThrough(new TextLineStream())[Symbol.asyncIterator]();
   }
 
-  async request(id: number, method: string, params: Json): Promise<Json> {
+  async rpc(method: string, params: Json): Promise<Json> {
+    const id = ++this.#seq;
     await this.send({ jsonrpc: "2.0", id, method, params });
     // read until the matching response id (skip notifications/log lines)
     while (true) {
@@ -39,6 +62,11 @@ class McpClient {
         return msg.result;
       }
     }
+  }
+
+  /** tools/call convenience — returns the raw ToolResult. */
+  call(name: string, args: Json): Promise<Json> {
+    return this.rpc("tools/call", { name, arguments: args });
   }
 
   async send(msg: Json): Promise<void> {
@@ -69,244 +97,267 @@ class TextLineStream extends TransformStream<string, string> {
   }
 }
 
-Deno.test("mcp: stateful open_log → snapshot → add_comment → weave end-to-end", async () => {
-  const c = new McpClient();
+const txt = (r: Json): string => r.content[0].text as string;
+function assert(cond: unknown, msg: string): void {
+  if (!cond) throw new Error(msg);
+}
+function chunk<T>(arr: T[], n: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n));
+  return out;
+}
+
+Deno.test("mcp: paced kyoku-gated commentary flow end-to-end", async () => {
+  // ---- derive expected shape from the same core the server uses ----
+  const game = await loadGame(SAMPLE);
+  const anchors: Beat[] = listAnchors(game);
+  const stars = listStarSites(game);
+  const nRounds = game.rounds.length;
+  const anchorsOf = (r: number) => anchors.filter((b) => b.round === r);
+  const filledBefore = (r: number) => anchors.filter((b) => b.round < r).length;
+  const unlockedAt = (r: number) => anchors.filter((b) => b.round <= r).length;
+  const winds = game.rounds.map((rd) => rd.kyoku >> 2);
+  const chukan = anchors.find((b) => b.kind === "中間総括");
+  const owari = anchors.find((b) => b.kind === "終局総括");
+  assert(chukan, "sample must have a 中間総括 anchor");
+  assert(owari, "sample must have a 終局総括 anchor");
+  // The wind crossing round (last East round): winds[r] !== winds[r+1].
+  const crossRound = winds.findIndex((w, i) => i + 1 < nRounds && winds[i + 1] !== w);
+  assert(crossRound >= 0, "sample must cross a wind boundary");
+  assert(chukan!.round === crossRound, "中間総括 must sit on the wind-crossing round");
+  const commentText = (id: number) => `テスト解説#${id}。`;
+
+  const bundleDir = await Deno.makeTempDir();
+  const server = `${bundleDir}/mcp.mjs`;
+  await bundleServer(server);
+  const c = new McpClient(server);
+  const tmp = await Deno.makeTempDir();
   try {
-    const init = await c.request(1, "initialize", {
+    const init = await c.rpc("initialize", {
       protocolVersion: "2024-11-05",
       capabilities: {},
       clientInfo: { name: "mjrender-test", version: "0.0.0" },
     });
-    if (init.serverInfo?.name !== "mjrender") {
-      throw new Error(`unexpected serverInfo: ${JSON.stringify(init.serverInfo)}`);
-    }
+    assert(init.serverInfo?.name === "mjrender", `unexpected serverInfo: ${JSON.stringify(init.serverInfo)}`);
     await c.send({ jsonrpc: "2.0", method: "notifications/initialized" });
 
-    const tools = await c.request(2, "tools/list", {});
+    // ---- 1. tools/list: + mj_next_kyoku, − mj_get_final_standings ----
+    const tools = await c.rpc("tools/list", {});
     const names = tools.tools.map((t: Json) => t.name).sort();
     const want = [
       "mj_add_comment",
       "mj_add_note",
       "mj_draft_status",
-      "mj_get_final_standings",
       "mj_get_kyoku_result",
       "mj_get_kyoku_start",
       "mj_get_riichi_declarations",
       "mj_get_snapshot",
       "mj_list_anchors",
+      "mj_next_kyoku",
       "mj_open_log",
       "mj_render_game",
       "mj_render_kyoku",
       "mj_weave_commentary",
     ];
-    if (JSON.stringify(names) !== JSON.stringify(want)) {
-      throw new Error(`tool set mismatch: ${names}`);
-    }
+    assert(JSON.stringify(names) === JSON.stringify(want), `tool set mismatch: ${names}`);
 
-    // only mj_open_log takes a path; everything else errors before a log is open
-    const early = await c.request(3, "tools/call", {
-      name: "mj_list_anchors",
-      arguments: {},
+    // everything but mj_open_log errors before a log is open
+    const early = await c.call("mj_list_anchors", {});
+    assert(early.isError && txt(early).includes("mj_open_log"), `expected 'no log loaded': ${txt(early)}`);
+
+    // ---- 2. open: legend once, focus 東1, anchor count; reopen keeps, no legend ----
+    const opened = await c.call("mj_open_log", { path: SAMPLE });
+    assert(!opened.isError, `open failed: ${txt(opened)}`);
+    assert(txt(opened).includes("■この牌譜の読み方"), "first open must carry the legend");
+    assert(txt(opened).includes("focus: 東1局"), `open reply missing focus: ${txt(opened)}`);
+    assert(txt(opened).includes(`anchors: ${anchors.length}`), `open reply missing anchor count: ${txt(opened)}`);
+
+    // a second (immediate) open keeps focus AND does NOT repeat the legend
+    const reopen0 = await c.call("mj_open_log", { path: SAMPLE });
+    assert(!txt(reopen0).includes("■この牌譜の読み方"), "legend must not repeat on reopen");
+    assert(txt(reopen0).includes("focus: 東1局"), `reopen lost focus: ${txt(reopen0)}`);
+
+    // ---- 3. mj_render_game at focus 0 is UNGATED (results visible) ----
+    const outline = await c.call("mj_render_game", {});
+    assert(!outline.isError, `outline errored: ${txt(outline)}`);
+    assert(txt(outline).includes("【南1局") && txt(outline).includes("◆終局"), `outline missing South/終局: ${txt(outline).slice(0, 200)}`);
+
+    // ---- 4. gate errors for future kyoku (renders/snapshots/facts/writes) ----
+    const gRender = await c.call("mj_render_kyoku", { kyoku: "S1" });
+    assert(gRender.isError && txt(gRender).includes("locked"), `render S1 should lock: ${txt(gRender)}`);
+    const gSnapK = await c.call("mj_get_snapshot", { kyoku: "5", junme: 1 });
+    assert(gSnapK.isError && txt(gSnapK).includes("locked"), `snapshot k5 should lock: ${txt(gSnapK)}`);
+    // future anchor id (a South-round anchor) locks the snapshot too
+    const southAnchor = anchors.find((b) => winds[b.round] !== winds[0])!;
+    const gSnapA = await c.call("mj_get_snapshot", { anchor: southAnchor.id });
+    assert(gSnapA.isError && txt(gSnapA).includes("locked"), `snapshot future anchor should lock: ${txt(gSnapA)}`);
+    const futureRoundSel = String(southAnchor.round);
+    const gResult = await c.call("mj_get_kyoku_result", { kyoku: futureRoundSel });
+    assert(gResult.isError && txt(gResult).includes("locked"), `result future should lock: ${txt(gResult)}`);
+    const gComment = await c.call("mj_add_comment", { comments: [{ anchor: southAnchor.id, text: "早すぎ。" }] });
+    assert(gComment.isError && txt(gComment).includes("locked"), `comment future should lock: ${txt(gComment)}`);
+    const futureStar = stars.find((s) => winds[s.round] !== winds[0])!;
+    const gNote = await c.call("mj_add_note", {
+      notes: [{ kyoku: String(futureStar.round), junme: futureStar.junme, seat: futureStar.seat, text: "早すぎ。" }],
     });
-    if (!early.isError || !early.content[0].text.includes("mj_open_log")) {
-      throw new Error(`expected 'no log loaded' error, got: ${early.content[0].text}`);
+    assert(gNote.isError && txt(gNote).includes("locked"), `note future should lock: ${txt(gNote)}`);
+    // riichi without kyoku: only rounds <= focus (0) + the 未開放 note
+    const riichi0 = await c.call("mj_get_riichi_declarations", {});
+    assert(!riichi0.isError && txt(riichi0).includes("未開放局は含まず"), `riichi note missing: ${txt(riichi0)}`);
+    const shown0 = JSON.parse(txt(riichi0).split("\n（未開放")[0]);
+    assert(shown0.every((d: Json) => d.roundIndex <= 0), "riichi list must be filtered to focus");
+
+    // ---- 5. mj_render_kyoku "0": inline board block, no legend, anchor lines ----
+    const k0 = await c.call("mj_render_kyoku", { kyoku: "0" });
+    assert(!k0.isError, `render 0 errored: ${txt(k0)}`);
+    assert(txt(k0).includes("┌盤面"), "render must contain an inline board block");
+    assert(!txt(k0).includes("■この牌譜の読み方"), "kyoku render must not carry the legend");
+    for (const b of anchorsOf(0)) {
+      assert(txt(k0).includes(`〔解説ポイント#${b.id}:`), `render 0 missing anchor #${b.id}`);
     }
 
-    const opened = await c.request(4, "tools/call", {
-      name: "mj_open_log",
-      arguments: { path: SAMPLE },
+    // ---- 9a. edge cases at focus 0: batch atomicity, 11-cap, bad ★ ----
+    const round0Ids = anchorsOf(0).map((b) => b.id);
+    const atomic = await c.call("mj_add_comment", {
+      comments: [{ anchor: round0Ids[0], text: "巻き添え。" }, { anchor: 99999, text: "范囲外。" }],
     });
-    if (opened.isError || !opened.content[0].text.includes("anchors:")) {
-      throw new Error(`unexpected open_log reply: ${opened.content[0].text}`);
-    }
+    assert(atomic.isError, "atomic batch with a bad entry must fail");
+    const st0 = await c.call("mj_draft_status", {});
+    assert(txt(st0).includes(`・ #${round0Ids[0]}`), `atomic reject leaked #${round0Ids[0]}: ${txt(st0)}`);
 
-    const anchors = await c.request(5, "tools/call", {
-      name: "mj_list_anchors",
-      arguments: {},
-    });
-    const table: string = anchors.content[0].text;
-    const riichiId = Number(
-      table.split("\n").find((l) => l.includes("リーチ判断"))?.match(/^#(\d+)/)?.[1],
-    );
-    if (!riichiId) throw new Error("no riichi anchor found via MCP");
-
-    // mj_render_game returns the crude outline, not the full transcript
-    const outline = await c.request(19, "tools/call", {
-      name: "mj_render_game",
-      arguments: {},
-    });
-    const ol: string = outline.content[0].text;
-    if (outline.isError || !ol.includes("【東1局") || !ol.includes("◆終局")) {
-      throw new Error(`unexpected outline: ${ol.slice(0, 200)}`);
-    }
-    if (!ol.includes(`〔解説ポイント#${riichiId}:`)) {
-      throw new Error("outline missing the riichi anchor in its index");
-    }
-    const olBody = ol.slice(ol.indexOf("【")); // skip the legend, which mentions the markers
-    if (olBody.includes("◆配牌") || olBody.includes("┗")) {
-      throw new Error("outline should not contain per-turn detail");
-    }
-
-    const snap = await c.request(6, "tools/call", {
-      name: "mj_get_snapshot",
-      arguments: { anchor: riichiId },
-    });
-    const text: string = snap.content[0].text;
-    for (const needle of ["┌盤面", "リーチ(", "残り山", "手牌 P0:"]) {
-      if (!text.includes(needle)) throw new Error(`snapshot missing ${needle}:\n${text}`);
-    }
-
-    const bad = await c.request(7, "tools/call", {
-      name: "mj_get_snapshot",
-      arguments: { anchor: 99999 },
-    });
-    if (!bad.isError) throw new Error("expected isError for unknown anchor");
-
-    // a structured fact tool round-trips as parseable JSON
-    const facts = await c.request(8, "tools/call", {
-      name: "mj_get_riichi_declarations",
-      arguments: {},
-    });
-    const decls = JSON.parse(facts.content[0].text);
-    if (!Array.isArray(decls) || decls.length === 0 || typeof decls[0].waits !== "string") {
-      throw new Error(`unexpected riichi facts: ${facts.content[0].text}`);
-    }
-    if (decls[0].anchor !== riichiId) {
-      throw new Error(`first riichi anchor ${decls[0].anchor} != list_anchors' ${riichiId}`);
-    }
-
-    // weaving an empty draft is an error, not an empty document
-    const tmp = await Deno.makeTempDir();
+    let capRejected = false;
     try {
-      const out = `${tmp}/woven.txt`;
-      const premature = await c.request(9, "tools/call", {
-        name: "mj_weave_commentary",
-        arguments: { out },
-      });
-      if (!premature.isError || !premature.content[0].text.includes("mj_add_comment")) {
-        throw new Error(`expected empty-draft error: ${premature.content[0].text}`);
-      }
-
-      // comments accumulate server-side; a call may batch several anchors
-      const added = await c.request(10, "tools/call", {
-        name: "mj_add_comment",
-        arguments: { comments: [{ anchor: riichiId, text: "MCPテスト解説。" }] },
-      });
-      const progress: string = added.content[0].text;
-      if (added.isError || !progress.includes(`saved #${riichiId}`) || !progress.includes("1/")) {
-        throw new Error(`unexpected add_comment reply: ${progress}`);
-      }
-      // a batch with any bad entry is rejected atomically — nothing is saved
-      const badAdd = await c.request(11, "tools/call", {
-        name: "mj_add_comment",
-        arguments: {
-          comments: [{ anchor: 1, text: "巻き添え。" }, { anchor: 99999, text: "范囲外。" }],
-        },
-      });
-      if (!badAdd.isError) throw new Error("expected isError for out-of-range anchor");
-      // batches are capped at 10 entries (schema-level rejection, nothing saved)
-      let oversizedRejected = false;
-      try {
-        const big = Array.from({ length: 11 }, (_, k) => ({ anchor: k + 1, text: "多すぎ。" }));
-        const r = await c.request(20, "tools/call", {
-          name: "mj_add_comment",
-          arguments: { comments: big },
-        });
-        oversizedRejected = !!r.isError;
-      } catch {
-        oversizedRejected = true; // schema violations may surface as JSON-RPC errors
-      }
-      if (!oversizedRejected) throw new Error("expected an 11-entry batch to be rejected");
-
-      // ★ notes batch the same way; a riichi declaration is always a ★ site
-      const noted = await c.request(21, "tools/call", {
-        name: "mj_add_note",
-        arguments: {
-          notes: [{
-            kyoku: String(decls[0].roundIndex),
-            junme: decls[0].junme,
-            seat: decls[0].seat,
-            text: "リーチ一言。",
-          }],
-        },
-      });
-      if (noted.isError || !noted.content[0].text.includes("1 note")) {
-        throw new Error(`unexpected add_note reply: ${noted.content[0].text}`);
-      }
-      const badNote = await c.request(22, "tools/call", {
-        name: "mj_add_note",
-        arguments: { notes: [{ kyoku: "0", junme: 99, seat: 0, text: "場所なし。" }] },
-      });
-      if (!badNote.isError) throw new Error("expected isError for a non-★ position");
-
-      const status = await c.request(12, "tools/call", {
-        name: "mj_draft_status",
-        arguments: {},
-      });
-      const checklist: string = status.content[0].text;
-      if (!checklist.includes(`✓ #${riichiId}`) || !checklist.includes("・ #")) {
-        throw new Error(`draft status should mark filled/unfilled anchors:\n${checklist}`);
-      }
-      if (!checklist.includes("1/")) {
-        throw new Error(`rejected batch must not partially save (#1 leaked):\n${checklist}`);
-      }
-
-      // weave writes the accumulated draft to a file; only a summary comes back
-      const wove = await c.request(13, "tools/call", {
-        name: "mj_weave_commentary",
-        arguments: { out },
-      });
-      const summary: string = wove.content[0].text;
-      if (!summary.includes(out) || summary.includes("MCPテスト解説。")) {
-        throw new Error(`weave should return a summary, not the document: ${summary}`);
-      }
-      const doc = await Deno.readTextFile(out);
-      if (!doc.includes("◆解説（リーチ判断）: MCPテスト解説。")) {
-        throw new Error("woven document missing the spliced comment");
-      }
-      if (doc.includes(`〔解説ポイント#${riichiId}:`)) {
-        throw new Error("filled anchor placeholder should be gone");
-      }
-
-      // reopening the SAME log keeps the draft; a relative `out` resolves
-      // beside the log file, not the server's cwd
-      const localLog = `${tmp}/sample.xml`;
-      await Deno.copyFile(SAMPLE, localLog);
-      await c.request(14, "tools/call", {
-        name: "mj_open_log",
-        arguments: { path: localLog },
-      });
-      const fresh = await c.request(15, "tools/call", {
-        name: "mj_draft_status",
-        arguments: {},
-      });
-      if (!fresh.content[0].text.includes("0/")) {
-        throw new Error(`opening another log should start an empty draft: ${fresh.content[0].text}`);
-      }
-      await c.request(16, "tools/call", {
-        name: "mj_add_comment",
-        arguments: { comments: [{ anchor: riichiId, text: "相対パステスト。" }] },
-      });
-      const reopened = await c.request(17, "tools/call", {
-        name: "mj_open_log",
-        arguments: { path: localLog },
-      });
-      if (!reopened.content[0].text.includes("1/")) {
-        throw new Error(`reopening the same log should keep the draft: ${reopened.content[0].text}`);
-      }
-      const rel = await c.request(18, "tools/call", {
-        name: "mj_weave_commentary",
-        arguments: { out: "commentary.txt" },
-      });
-      const relSummary: string = rel.content[0].text;
-      if (rel.isError || !relSummary.includes(`${tmp}/commentary.txt`)) {
-        throw new Error(`relative out should resolve beside the log: ${relSummary}`);
-      }
-      await Deno.readTextFile(`${tmp}/commentary.txt`); // must exist there
-    } finally {
-      await Deno.remove(tmp, { recursive: true });
+      const big = Array.from({ length: 11 }, (_, k) => ({ anchor: k + 1, text: "多すぎ。" }));
+      const r = await c.call("mj_add_comment", { comments: big });
+      capRejected = !!r.isError;
+    } catch {
+      capRejected = true; // schema violations may surface as JSON-RPC errors
     }
+    assert(capRejected, "an 11-entry batch must be rejected");
+
+    const badStar = await c.call("mj_add_note", { notes: [{ kyoku: "0", junme: 99, seat: 0, text: "場所なし。" }] });
+    assert(badStar.isError, "a non-★ position must error");
+
+    // ---- 6. mj_next_kyoku with round 0 unfilled: error listing the #ids ----
+    const stuck = await c.call("mj_next_kyoku", {});
+    assert(stuck.isError, "advance with unfilled anchors must error");
+    for (const b of anchorsOf(0)) {
+      assert(txt(stuck).includes(`#${b.id}(`), `unfilled error missing #${b.id}: ${txt(stuck)}`);
+    }
+
+    // ---- 7. main loop rounds 0..9 ----
+    async function fill(ids: number[]): Promise<Json> {
+      let last: Json;
+      for (const grp of chunk(ids, 10)) {
+        last = await c.call("mj_add_comment", { comments: grp.map((id) => ({ anchor: id, text: commentText(id) })) });
+        assert(!last.isError, `fill ${grp} failed: ${txt(last)}`);
+      }
+      return last!;
+    }
+
+    let partialWeaveSeen = false;
+    for (let r = 0; r < nRounds; r++) {
+      // --- pre-fill checks (focus = r, round r not yet filled) ---
+      if (r === 1) {
+        // notes for a PAST round (0) are closed after advancing
+        const s0 = stars.find((s) => s.round === 0)!;
+        const pastNote = await c.call("mj_add_note", {
+          notes: [{ kyoku: "0", junme: s0.junme, seat: s0.seat, text: "遅すぎ。" }],
+        });
+        assert(pastNote.isError, `past-round note must close: ${txt(pastNote)}`);
+        // a REVISION of an already-filled past anchor succeeds (replace-only)
+        const past = anchorsOf(0)[0].id;
+        const rev = await c.call("mj_add_comment", { comments: [{ anchor: past, text: "改訂版。" }] });
+        assert(!rev.isError && txt(rev).includes("replaced"), `past revision should replace: ${txt(rev)}`);
+        // a ★ note in the FOCUS round: save → empty-text delete round-trips
+        const s1 = stars.find((s) => s.round === 1)!;
+        const site = { kyoku: "1", junme: s1.junme, seat: s1.seat };
+        const saved = await c.call("mj_add_note", { notes: [{ ...site, text: "リーチ一言。" }] });
+        assert(!saved.isError && txt(saved).includes("saved 1"), `note save failed: ${txt(saved)}`);
+        const deleted = await c.call("mj_add_note", { notes: [{ ...site, text: "  " }] });
+        assert(!deleted.isError && txt(deleted).includes("deleted 1"), `note delete failed: ${txt(deleted)}`);
+        const reDelete = await c.call("mj_add_note", { notes: [{ ...site, text: "" }] });
+        assert(reDelete.isError, "deleting a never-saved note must error");
+        // a snapshot at an unlocked riichi anchor still recalls the board
+        const riichiHere = anchors.find((b) => b.kind === "リーチ判断" && b.round <= 1);
+        if (riichiHere) {
+          const snap = await c.call("mj_get_snapshot", { anchor: riichiHere.id });
+          for (const needle of ["┌盤面", "残り山", "手牌 P0:"]) {
+            assert(txt(snap).includes(needle), `snapshot missing ${needle}: ${txt(snap)}`);
+          }
+        }
+      }
+      if (r === 2) {
+        // reopen keeps the accumulated draft AND the advanced focus
+        const reopened = await c.call("mj_open_log", { path: SAMPLE });
+        assert(!txt(reopened).includes("■この牌譜の読み方"), "reopen must not repeat legend");
+        const wantLine = `${filledBefore(2)}/${unlockedAt(2)} comments (kyoku 3/${nRounds} unlocked)`;
+        assert(txt(reopened).includes(wantLine), `reopen lost draft/focus (want "${wantLine}"): ${txt(reopened)}`);
+      }
+      if (r === nRounds - 1) {
+        // at the final focus the render carries ◆終局 and the 終局総括 anchor
+        const kLast = await c.call("mj_render_kyoku", { kyoku: String(r) });
+        assert(!kLast.isError, `render last errored: ${txt(kLast)}`);
+        assert(txt(kLast).includes("◆終局"), "final render missing ◆終局");
+        assert(txt(kLast).includes(`〔解説ポイント#${owari!.id}:`), "final render missing 終局総括 anchor");
+      }
+
+      // --- fill the focus round's anchors, then advance ---
+      const ids = anchorsOf(r).map((b) => b.id);
+      if (r === crossRound) {
+        // fill every regular anchor but withhold 中間総括 → checkpoint gate
+        const regular = ids.filter((id) => id !== chukan!.id);
+        await fill(regular);
+        const gate = await c.call("mj_next_kyoku", {});
+        assert(gate.isError, "advance without 中間総括 must error");
+        assert(txt(gate).includes("中間総括") && txt(gate).includes("点況"), `checkpoint missing 中間総括/点況: ${txt(gate)}`);
+        await fill([chukan!.id]);
+      } else {
+        await fill(ids);
+      }
+
+      // --- post-fill check: a partial weave somewhere mid-loop warns loudly ---
+      if (r === crossRound + 1 && !partialWeaveSeen) {
+        const partialOut = `${tmp}/partial.txt`;
+        const pw = await c.call("mj_weave_commentary", { out: partialOut });
+        assert(!pw.isError && txt(pw).includes("warning: partial weave"), `partial weave should warn: ${txt(pw)}`);
+        partialWeaveSeen = true;
+      }
+
+      const adv = await c.call("mj_next_kyoku", {});
+      if (r === 0) {
+        assert(!adv.isError, `round-0 advance errored: ${txt(adv)}`);
+        assert(txt(adv).includes("advanced:"), `round-0 advance missing 'advanced:': ${txt(adv)}`);
+        assert(txt(adv).includes("STOP"), "round-0 advance missing STOP");
+        assert(txt(adv).includes("HINT"), "round-0 advance missing HINT (no ★ notes saved yet)");
+      }
+      if (r === crossRound) {
+        assert(!adv.isError, `wind-cross advance errored: ${txt(adv)}`);
+        assert(txt(adv).includes("== 南入 =="), `wind crossing missing 南入: ${txt(adv)}`);
+      }
+      if (r === nRounds - 1) {
+        // final kyoku: no advance — points to the weave + STOP
+        assert(!adv.isError, `final next_kyoku errored: ${txt(adv)}`);
+        assert(txt(adv).includes("mj_weave_commentary") && txt(adv).includes("STOP"), `final next_kyoku wording: ${txt(adv)}`);
+      }
+    }
+    assert(partialWeaveSeen, "the mid-loop partial weave never ran");
+
+    // ---- 8. final weave: no partial warning; doc has the interlude + spliced comment ----
+    const finalOut = `${tmp}/woven.txt`;
+    const wove = await c.call("mj_weave_commentary", { out: finalOut });
+    const summary = txt(wove);
+    assert(!wove.isError, `final weave errored: ${summary}`);
+    assert(summary.includes(finalOut), `weave summary missing path: ${summary}`);
+    assert(!summary.includes("warning: partial weave"), `full weave must not warn: ${summary}`);
+    const doc = await Deno.readTextFile(finalOut);
+    assert(doc.includes("== 南入 =="), "woven doc missing the 南入 interlude");
+    assert(doc.includes("◆解説（中間総括）:"), "woven doc missing the 中間総括 commentary line");
+    assert(doc.includes(commentText(chukan!.id)), "woven doc missing the spliced 中間総括 text");
+    assert(!doc.includes(`〔解説ポイント#${chukan!.id}:`), "filled anchor placeholder should be gone");
   } finally {
     await c.close();
+    await Deno.remove(tmp, { recursive: true });
+    await Deno.remove(bundleDir, { recursive: true });
   }
 });

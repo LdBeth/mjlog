@@ -4,7 +4,6 @@
   "exports": "./src/cli.ts",
   "tasks": {
     "render": "deno run --allow-read --allow-write --allow-net=tenhou.net src/cli.ts",
-    "mcp": "deno run --allow-read --allow-write --allow-env=HOME --allow-net=tenhou.net src/mcp.ts",
     "eval": "deno run --allow-read --allow-net=tenhou.net src/eval.ts",
     "check": "deno check src/*.ts",
     "test": "deno test --allow-read --allow-write --allow-run=deno",

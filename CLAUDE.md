@@ -52,7 +52,8 @@ consumes it three ways: (1) an **LLM-ready Japanese commentary transcript**
 metrics — shanten/ukeire/waits/dora/danger evidence — discard comparisons,
 end-of-hand ground truth, and `〔解説ポイント#N: 種別｜…〕` anchors; 副露判断
 anchors fire at an early 2nd meld (≤6巡) or the 3rd meld with a deterministic
-`┗ 役読み:` yaku outlook),
+`┗ 役読み:` yaku outlook; a 中間総括 anchor with a `== 南入 ==` standings block
+fires at each wind boundary),
 (2) **snapshot recall**: `mj_get_snapshot` reproduces the full board (rivers with
 tsumogiri/riichi marks, melds, live scores/placements, hands) at any anchor
 `#N` or kyoku+junme, and (3) **incremental commentary weaving**: the LLM saves
@@ -66,20 +67,39 @@ through its context.
 Run: `cd mjrender && deno task render ../1.mjlog` (file args also accept
 tenhou.net replay/log URLs); CLI subcommands `outline`/`kyoku`/`anchors`/
 `snapshot`/`facts`/`weave` (the CLI weave takes a one-shot comments JSON);
-`deno task mcp` starts the stdio MCP server — **stateful**: `mj_open_log` is
-the only tool taking a path, parsing the log into the session; the rest
-(mj_render_game / mj_render_kyoku / mj_list_anchors / mj_get_snapshot /
-mj_add_comment / mj_add_note / mj_draft_status / mj_weave_commentary + fact
-tools) operate on the opened log and error until one is opened.
-mj_render_game returns a crude outline (per-kyoku headers, condensed results,
-anchor index — no per-turn lines) and directs the LLM to mj_render_kyoku for
-one round at a time and to mj_get_snapshot at riichi/tenpai moments.
+the stdio MCP server runs from the bundle
+(`deno bundle -o mcp.mjs src/mcp.ts && deno run --allow-read --allow-write
+--allow-env=HOME --allow-net=tenhou.net mcp.mjs`) — **stateful and paced**:
+`mj_open_log` is the only tool taking a path, parsing the log into the session
+(reply carries the focus line + notation legend, once per process); the rest
+operate on the opened log and error until one is opened. A **focus cursor**
+hard-gates per-turn detail to the current kyoku (renders/snapshots/facts/draft
+writes; past rounds stay readable, comments there replace-only, notes close on
+advance — empty note text deletes); the gate is a pacing device, not a spoiler
+shield: mj_render_game's outline (headers, condensed results, anchor index —
+no per-turn lines) stays ungated for orientation. `mj_next_kyoku` advances the
+focus only when every focus-kyoku anchor is commented (wind boundaries demand
+the 中間総括 standings review first), replies with a ★-note hint when notes
+are sparse and instructs the LLM to END ITS TURN — one kyoku per chat turn.
+mj_get_final_standings was removed in 0.5.0 (outline's ◆終局 covers it;
+`finalStandings` stays in core for CLI/eval); 中間総括 insertion renumbers
+anchors vs 0.4.x.
 `deno task eval` emits ground-truth Q/A JSONL; `deno task bundle` builds the
 `mjrender.mcpb` Claude Desktop extension (regenerating `mcp.mjs`, the bundled
 compile input, from `src/mcp.ts` first).
 Tests: `deno task test` (golden transcript test — regenerate deliberately with
 `test/golden_update.ts` after output changes). See `mjrender/README.md`. Uses
 Deno, not Node/npm.
+
+**MCP SDK import extensions** (`src/mcp.ts`): the
+`@modelcontextprotocol/sdk/server/*` imports are deliberately extensionless —
+only that form makes `deno check` resolve the SDK's real types (with `.js`
+the SDK silently typechecks as `any`). The trade-off: the extensionless form
+does not resolve at runtime (the SDK's npm export map only has `.js`
+entries), so `deno run src/mcp.ts` fails at import — there is no `mcp` task;
+always run the server via the bundle (`deno bundle -o mcp.mjs src/mcp.ts`,
+which resolves either form; the MCP test also bundles fresh before
+spawning).
 
 ## Maude Specification (`mahjong.maude`)
 

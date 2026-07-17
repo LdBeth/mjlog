@@ -3,13 +3,17 @@
 
 import { loadXml } from "./load.ts";
 import { parseGame } from "./parse.ts";
-import { formatInstruction, renderGameAnnotated } from "./render.ts";
+import { formatInstruction, renderGameAnnotated, standingsLine } from "./render.ts";
 import { owariRows, placements } from "./scoring.ts";
 import { renderSnapshot } from "./snapshot.ts";
 import { replayTo } from "./state.ts";
 import { roundName, tileGlyph, typeGlyph, WIND } from "./tiles.ts";
 import type { AgariResult, Beat, Game, RenderOptions } from "./model.ts";
 import { limitName, yakuName } from "./yaku.ts";
+
+// Re-exported so mcp.ts can keep importing core only (the wind-boundary
+// standings block reuses the exact 点況 formatting from render.ts).
+export { standingsLine };
 
 export async function loadGame(path: string): Promise<Game> {
   const game = parseGame(await loadXml(path));
@@ -32,6 +36,16 @@ export function renderGame(game: Game, opts: Partial<RenderOptions> = {}): strin
   return renderGameAnnotated(game, fullOpts(opts)).text;
 }
 
+/** Options for a single-kyoku render (a superset of RenderOptions). */
+export interface KyokuOptions extends Partial<RenderOptions> {
+  /** "none" omits the format legend + game-header block entirely; default
+   *  "full" keeps the CLI byte-identical. */
+  header?: "full" | "none";
+  /** When true AND the selection includes the last round, append the owari
+   *  section (final scores + 終局総括 anchor) after the round(s). */
+  owari?: boolean;
+}
+
 /**
  * One kyoku, self-contained: format preamble + game header + that round.
  * Anchor IDs inside are game-global (the whole game is rendered and sliced),
@@ -40,33 +54,39 @@ export function renderGame(game: Game, opts: Partial<RenderOptions> = {}): strin
 export function renderKyoku(
   game: Game,
   selector: string,
-  opts: Partial<RenderOptions> = {},
+  opts: KyokuOptions = {},
 ): string {
   const indices = resolveKyoku(game, selector);
   const r = renderGameAnnotated(game, fullOpts(opts));
-  return [r.sections.header, ...indices.map((i) => r.sections.rounds[i])].join("\n");
+  const parts: string[] = [];
+  if ((opts.header ?? "full") === "full") parts.push(r.sections.header);
+  parts.push(...indices.map((i) => r.sections.rounds[i]));
+  if (opts.owari && r.sections.owari && indices.includes(game.rounds.length - 1)) {
+    parts.push(r.sections.owari);
+  }
+  return parts.join("\n");
 }
 
 // Appended to the outline's format legend: what this view omits and how the
 // commentator is expected to drill down (kyoku render, snapshots, draft tools).
 const OUTLINE_NOTE = `■アウトライン表示（この出力について）
 これは対局全体のアウトライン: 局ヘッダ・結果・解説ポイント一覧のみで、打牌の記録は含まない。
-・各局の全打牌・★比較・危険度根拠は局単位で取得する（MCPツール mj_render_kyoku / CLI kyoku コマンド）。
-  牌表記などの凡例（この牌譜の読み方）も局の出力の冒頭に付属する
-・〔解説ポイント#N: …〕（N巡・P#）は各局の解説対象一覧。mj_get_snapshot にアンカーID（または
-  局+巡目）を渡すと、その時点の全員の河・点数・手牌つき盤面を再現できる
-・特にリーチ宣言・聴牌が絡む局面（リーチ判断/押し引きアンカー）は、解説を書く前に必ず
-  mj_get_snapshot で盤面を確認すること（盤面確認なしで評価しない）
-・解説は mj_add_comment で保存し（1呼び出しで複数アンカーまとめて可）、最後に
-  mj_weave_commentary で完成稿を書き出す
-・局の出力中の★行（注目の打牌・鳴き）には、mj_add_note（局+巡目+席で指定、1呼び出しで
-  最大10件）で任意の一言を添えられる
+対局を一度俯瞰するための表示で、結果（◆和了/◆流局・◆終局）も見える（ネタバレ制限ではない）。
+打牌単位の詳細は1局ずつ開放される。1チャットターンの流れ:
+・mj_render_kyoku で担当の1局を取得する（盤面スナップショットは既定でインライン表示。
+  牌表記などの凡例は mj_open_log 時に一度だけ付属する）
+・必要なら mj_get_snapshot にアンカーID（または局+巡目）を渡し、他の局面の盤面を確認する
+  （リーチ宣言・聴牌が絡む局面は盤面を確認してから評価する）
+・その局の各アンカーを mj_add_comment で保存する（1呼び出しで複数アンカーまとめて可。
+  ★行には mj_add_note で一言を添えられる。★注記はその局が進むと締め切られる）
+・mj_next_kyoku で次の局を開放し、このチャットターンを終える
+・全局を書き終えたら mj_weave_commentary で完成稿をファイルに書き出す
 `;
 
 // Outline keeps: kyoku header, 点況/逆転条件, and the condensed result block
 // (◆和了/◆流局 with hand, yaku/points, score movements).
 const OUTLINE_KEEP =
-  /^(【|◆和了|◆流局)|^\s+(点況:|和了手:|役:|ドラ表示:|点棒:|P\d\(\d位\) 逆転条件:)/;
+  /^(【|◆和了|◆流局|== )|^\s+(点況:|和了手:|役:|ドラ表示:|点棒:|P\d\(\d位\) 逆転条件:)/;
 
 /**
  * Crude whole-game outline: per kyoku only the header (with 点況/逆転条件),

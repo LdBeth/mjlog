@@ -185,6 +185,12 @@ export function renderGameAnnotated(game: Game, opts: RenderOptions): RenderResu
   for (let r = 0; r < g.rounds.length; r++) {
     const start = out.length;
     lastJunme = renderRound(g, g.rounds[r], r, opts, out, beats, stars);
+    if (
+      r + 1 < g.rounds.length &&
+      (g.rounds[r + 1].kyoku >> 2) !== (g.rounds[r].kyoku >> 2)
+    ) {
+      renderInterlude(g, r, lastJunme, out, beats);
+    }
     out.push("");
     roundBounds.push([start, out.length]);
   }
@@ -360,14 +366,7 @@ function renderRound(
   const initialEast = g.rounds[0].dealer;
   const rank = placements(round.startScores, initialEast);
   const byRank = [0, 1, 2, 3].sort((a, b) => rank[a] - rank[b]);
-  out.push(
-    `  点況: ` + byRank.map((s, i) => {
-      const gap = i === 0
-        ? ""
-        : `(▲${(round.startScores[byRank[i - 1]] - round.startScores[s]) * 100})`;
-      return `${rank[s]}位${P(s)} ${round.startScores[s] * 100}${gap}`;
-    }).join(" / "),
-  );
+  out.push(standingsLine(round.startScores, initialEast));
   if (round.kyoku >= lastIdx) {
     for (const s of byRank.slice(1)) {
       const needs = overtakeNeeds({
@@ -832,6 +831,54 @@ function renderMeldTiles(m: Meld): string {
 
 function anchorLine(id: number, kind: BeatKind, topic: string): string {
   return `〔解説ポイント#${id}: ${kind}｜${topic}〕`;
+}
+
+/**
+ * The 点況 line: placement-sorted scores with the ▲ gap to the seat one place
+ * above. Shared by every round header and the wind-boundary interlude, so the
+ * text is byte-identical wherever standings are shown.
+ */
+export function standingsLine(scores: number[], initialEast: number): string {
+  const rank = placements(scores, initialEast);
+  const byRank = [0, 1, 2, 3].sort((a, b) => rank[a] - rank[b]);
+  return `  点況: ` + byRank.map((s, i) => {
+    const gap = i === 0
+      ? ""
+      : `(▲${(scores[byRank[i - 1]] - scores[s]) * 100})`;
+    return `${rank[s]}位${P(s)} ${scores[s] * 100}${gap}`;
+  }).join(" / ");
+}
+
+/**
+ * Wind-boundary interlude between the last round of one wind and the first of
+ * the next: a `== 南入 ==` heading, the standings entering the new wind, and a
+ * 中間総括 checkpoint anchor. Modeled on renderOwari — no inline snapshot above
+ * the anchor even when snapshots === "inline".
+ */
+function renderInterlude(
+  g: Game,
+  r: number,
+  lastJunme: number,
+  out: string[],
+  beats: Beat[],
+): void {
+  const prevWind = g.rounds[r].kyoku >> 2;
+  const nextWind = g.rounds[r + 1].kyoku >> 2;
+  out.push(`== ${WIND[nextWind]}入 ==`);
+  out.push(standingsLine(g.rounds[r + 1].startScores, g.rounds[0].dealer));
+  const topic =
+    `${WIND[prevWind]}場を終えての中間総括（順位状況の整理と${WIND[nextWind]}場の展望）`;
+  const beat: Beat = {
+    id: beats.length + 1,
+    kind: "中間総括",
+    topic,
+    round: r,
+    junme: lastJunme,
+    seat: undefined,
+    eventIndex: g.rounds[r].events.length - 1,
+  };
+  beats.push(beat);
+  out.push(anchorLine(beat.id, beat.kind, topic));
 }
 
 /** Dev-time self-check: replay inconsistencies go to stderr, never to the transcript. */
