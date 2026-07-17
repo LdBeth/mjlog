@@ -17,19 +17,58 @@
     }
   },
   "tools": [
-    { "name": "mj_open_log", "description": "Parse a mjlog (path or tenhou.net URL) into the session; sets focus to kyoku 0; all other tools use it" },
-    { "name": "mj_render_game", "description": "Ungated game outline: per-kyoku headers, results, and anchor index — read once at open to orient" },
-    { "name": "mj_render_kyoku", "description": "One round in full per-turn detail (inline snapshots), gated to the focus cursor" },
-    { "name": "mj_list_anchors", "description": "Unlocked commentary anchors up to the focus kyoku (#id, kind, kyoku, junme, seat, topic)" },
-    { "name": "mj_get_snapshot", "description": "Full board state at an anchor or kyoku+junme, gated to the focus cursor" },
-    { "name": "mj_add_comment", "description": "Save commentary for the focus kyoku's anchors (past = replace-only, future = locked)" },
-    { "name": "mj_add_note", "description": "Save/delete ★-line one-liners for the focus kyoku (empty text deletes)" },
-    { "name": "mj_draft_status", "description": "Draft checklist for unlocked anchors and saved ★ notes" },
-    { "name": "mj_next_kyoku", "description": "Advance the focus cursor to the next kyoku (requires the current one fully commented); end the chat turn after" },
-    { "name": "mj_weave_commentary", "description": "Weave the accumulated draft into the transcript, written to a file" },
-    { "name": "mj_get_kyoku_start", "description": "Round start conditions, gated to the focus cursor (JSON)" },
-    { "name": "mj_get_kyoku_result", "description": "Round outcome(s), gated to the focus cursor (JSON)" },
-    { "name": "mj_get_riichi_declarations", "description": "Riichi declarations with waits, up to the focus kyoku (JSON)" }
+    {
+      "name": "mj_open_log",
+      "description": "Parse a mjlog (path or tenhou.net URL) into the session; sets focus to kyoku 0; all other tools use it"
+    },
+    {
+      "name": "mj_render_game",
+      "description": "Ungated game outline: per-kyoku headers, results, and anchor index — read once at open to orient"
+    },
+    {
+      "name": "mj_render_kyoku",
+      "description": "One round in full per-turn detail (inline snapshots), gated to the focus cursor"
+    },
+    {
+      "name": "mj_list_anchors",
+      "description": "Unlocked commentary anchors up to the focus kyoku (#id, kind, kyoku, junme, seat, topic)"
+    },
+    {
+      "name": "mj_get_snapshot",
+      "description": "Full board state at an anchor or kyoku+junme, gated to the focus cursor"
+    },
+    {
+      "name": "mj_add_comment",
+      "description": "Save commentary for the focus kyoku's anchors (past = replace-only, future = locked)"
+    },
+    {
+      "name": "mj_add_note",
+      "description": "Save/delete ★-line one-liners for the focus kyoku (empty text deletes)"
+    },
+    {
+      "name": "mj_draft_status",
+      "description": "Draft checklist for unlocked anchors and saved ★ notes"
+    },
+    {
+      "name": "mj_next_kyoku",
+      "description": "Advance the focus cursor to the next kyoku (requires the current one fully commented); end the chat turn after"
+    },
+    {
+      "name": "mj_weave_commentary",
+      "description": "Weave the accumulated draft into the transcript, written to a file"
+    },
+    {
+      "name": "mj_get_kyoku_start",
+      "description": "Round start conditions, gated to the focus cursor (JSON)"
+    },
+    {
+      "name": "mj_get_kyoku_result",
+      "description": "Round outcome(s), gated to the focus cursor (JSON)"
+    },
+    {
+      "name": "mj_get_riichi_declarations",
+      "description": "Riichi declarations with waits, up to the focus kyoku (JSON)"
+    }
   ],
   "keywords": ["mahjong", "tenhou", "mjlog", "replay"],
   "compatibility": {

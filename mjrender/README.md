@@ -12,11 +12,11 @@ modes:
    push/fold, open-hand judgement (副露判断 at an early 2nd or the 3rd meld, with a deterministic
    `┗ 役読み:` yaku outlook), wind-boundary standings reviews (中間総括 at 南入/西入), and
    end-of-hand/game summaries.
-2. **Snapshot recall** (`snapshot` / `mj_get_snapshot`): the consuming LLM calls _back into_ mjrender —
-   via MCP or the CLI — to see the full board (all four rivers with tedashi/tsumogiri marks, melds,
-   live scores + placements, riichi states, dora, remaining wall, every concealed hand + metrics) at
-   any anchor `#N` or any explicit kyoku + junme. The transcript stays lean; state is read, not
-   reconstructed from 40 lines of deltas.
+2. **Snapshot recall** (`snapshot` / `mj_get_snapshot`): the consuming LLM calls _back into_
+   mjrender — via MCP or the CLI — to see the full board (all four rivers with tedashi/tsumogiri
+   marks, melds, live scores + placements, riichi states, dora, remaining wall, every concealed
+   hand + metrics) at any anchor `#N` or any explicit kyoku + junme. The transcript stays lean;
+   state is read, not reconstructed from 40 lines of deltas.
 
 ## Requirements
 
@@ -48,15 +48,15 @@ optional ★-line notes addressed by game position:
 
 ```json
 {
- "anchors": { "1": "配牌についての解説…", "2": "…" },
- "notes": [{ "kyoku": "E1", "junme": 5, "seat": 3, "text": "このドラ切りは早い。" }]
+  "anchors": { "1": "配牌についての解説…", "2": "…" },
+  "notes": [{ "kyoku": "E1", "junme": 5, "seat": 3, "text": "このドラ切りは早い。" }]
 }
 ```
 
 With `--out <file>` it writes the woven document and prints a one-line summary; without it the
-document goes to stdout. `--missing keep|strip` controls unfilled anchor placeholders (default
-keep, so partial drafts are valid and can be re-woven with a fuller comment set later). The woven
-document swaps the commentator instructions for a reader-facing legend.
+document goes to stdout. `--missing keep|strip` controls unfilled anchor placeholders (default keep,
+so partial drafts are valid and can be re-woven with a fuller comment set later). The woven document
+swaps the commentator instructions for a reader-facing legend.
 
 Every `<file>` argument also accepts a tenhou.net URL — a replay-viewer link (`/0/?log=<id>&tw=N`)
 is rewritten to the raw log endpoint (`/0/log/find.cgi`) automatically (needs
@@ -78,9 +78,9 @@ Other tasks: `deno task check` (typecheck), `deno task test`, `deno task bundle`
 
 ## MCP server
 
-The server runs from the bundle, not `src/mcp.ts` directly — the source keeps
-extensionless `@modelcontextprotocol/sdk` imports so `deno check` resolves the
-SDK's real types, and those only resolve at runtime after bundling:
+The server runs from the bundle, not `src/mcp.ts` directly — the source keeps extensionless
+`@modelcontextprotocol/sdk` imports so `deno check` resolves the SDK's real types, and those only
+resolve at runtime after bundling:
 
 ```sh
 deno bundle -o mcp.mjs src/mcp.ts   # or `deno task bundle` (also builds the .mcpb)
@@ -94,52 +94,51 @@ claude mcp add mjrender -- deno run --allow-read --allow-write --allow-env=HOME 
 ```
 
 (`--allow-write`/`--allow-env=HOME` are only needed for `mj_weave_commentary`, which writes the
-woven document to a file so it never round-trips through the model's context. A relative `out`
-lands next to the log file — or under `$HOME` for URL sources — since the calling agent may not
-share a filesystem with the server at all.)
+woven document to a file so it never round-trips through the model's context. A relative `out` lands
+next to the log file — or under `$HOME` for URL sources — since the calling agent may not share a
+filesystem with the server at all.)
 
 For the Claude Desktop app, build the self-contained extension instead: `deno task bundle`, then
 install `mjrender.mcpb` via Settings → Extensions (no Deno needed on the target machine).
 
-The server is **stateful and paced**: `mj_open_log` is the only tool that takes a path (a local
-file or a tenhou.net URL) — it parses the log once into the session, and every other tool operates
-on the opened log (erroring until one is opened). The session holds a **focus cursor** (the
-current kyoku, starting at the first round): per-turn detail — kyoku renders, snapshots, per-kyoku
-facts, draft writes — is hard-gated to the focus round and earlier, and `mj_next_kyoku` advances
-the cursor only once every anchor of the focus kyoku is commented. The gate is a *pacing device,
-not a spoiler shield*: the `mj_render_game` outline (results included) stays ungated for
-orientation; what the gate bounds is how much detail the consuming LLM can chew per chat turn.
-The commentary draft also lives server-side. Tools (thin wrappers over `src/core.ts`):
+The server is **stateful and paced**: `mj_open_log` is the only tool that takes a path (a local file
+or a tenhou.net URL) — it parses the log once into the session, and every other tool operates on the
+opened log (erroring until one is opened). The session holds a **focus cursor** (the current kyoku,
+starting at the first round): per-turn detail — kyoku renders, snapshots, per-kyoku facts, draft
+writes — is hard-gated to the focus round and earlier, and `mj_next_kyoku` advances the cursor only
+once every anchor of the focus kyoku is commented. The gate is a _pacing device, not a spoiler
+shield_: the `mj_render_game` outline (results included) stays ungated for orientation; what the
+gate bounds is how much detail the consuming LLM can chew per chat turn. The commentary draft also
+lives server-side. Tools (thin wrappers over `src/core.ts`):
 
-| tool                         | arguments                        | returns / gating                                      |
-| ---------------------------- | -------------------------------- | ----------------------------------------------------- |
-| `mj_open_log`                | `path`, `fresh?`                 | parses the log into the session; starts/keeps a draft + focus; appends the notation legend (once per process) |
-| `mj_render_game`             |                                  | **ungated** game outline: headers, results, anchor index — read once to orient |
-| `mj_render_kyoku`            | `kyoku`, `hands?`, `snapshots?`  | one round ≤ focus, full per-turn detail; snapshots **inline by default**, no legend header; appends the owari section on the last round |
-| `mj_list_anchors`            |                                  | `#id kind kyoku junme seat topic` per line, unlocked rounds only |
-| `mj_get_snapshot`            | `anchor` \| (`kyoku`, `junme`)   | board snapshot block (round ≤ focus)                  |
-| `mj_add_comment`             | `comments[{anchor,text}]`        | saves anchor comments (batch ≤10, atomic); focus round = new fills, past rounds = replace-only, future locked |
-| `mj_add_note`                | `notes[{junme,seat,text}]`       | saves ★-line one-liners for the kyoku being commented (no kyoku arg; batch ≤10, atomic); re-save replaces, empty `text` deletes; the finished kyoku stays notable after `mj_next_kyoku` until the new focus is rendered |
-| `mj_next_kyoku`              |                                  | advances the focus once all focus-kyoku anchors are filled (errors listing what's missing; wind boundaries demand the 中間総括 first); replies with a ★-note hint and an instruction to END THE TURN |
-| `mj_draft_status`            |                                  | checklist: ✓/・ per unlocked anchor, plus saved ★ notes |
-| `mj_weave_commentary`        | `out`, `missing?`, `hands?`      | ungated; writes the woven draft to `out`, returns summary only (loud `warning: partial weave` when anchors are unfilled) |
-| `mj_get_kyoku_start`         | `kyoku`                          | JSON: dealer/honba/kyotaku/dora, scores + placements (round ≤ focus) |
-| `mj_get_kyoku_result`        | `kyoku`                          | JSON: winner/tile/points/yaku, or draw + tenpai seats (round ≤ focus) |
-| `mj_get_riichi_declarations` | `kyoku?`                         | JSON: seat/junme/waits/live count/anchor id (filtered to unlocked rounds) |
+| tool                         | arguments                       | returns / gating                                                                                                                                                                                                        |
+| ---------------------------- | ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `mj_open_log`                | `path`, `fresh?`                | parses the log into the session; starts/keeps a draft + focus; appends the notation legend (once per process)                                                                                                           |
+| `mj_render_game`             |                                 | **ungated** game outline: headers, results, anchor index — read once to orient                                                                                                                                          |
+| `mj_render_kyoku`            | `kyoku`, `hands?`, `snapshots?` | one round ≤ focus, full per-turn detail; snapshots **inline by default**, no legend header; appends the owari section on the last round                                                                                 |
+| `mj_list_anchors`            |                                 | `#id kind kyoku junme seat topic` per line, unlocked rounds only                                                                                                                                                        |
+| `mj_get_snapshot`            | `anchor` \| (`kyoku`, `junme`)  | board snapshot block (round ≤ focus)                                                                                                                                                                                    |
+| `mj_add_comment`             | `comments[{anchor,text}]`       | saves anchor comments (batch ≤10, atomic); focus round = new fills, past rounds = replace-only, future locked                                                                                                           |
+| `mj_add_note`                | `notes[{junme,seat,text}]`      | saves ★-line one-liners for the kyoku being commented (no kyoku arg; batch ≤10, atomic); re-save replaces, empty `text` deletes; the finished kyoku stays notable after `mj_next_kyoku` until the new focus is rendered |
+| `mj_next_kyoku`              |                                 | advances the focus once all focus-kyoku anchors are filled (errors listing what's missing; wind boundaries demand the 中間総括 first); replies with a ★-note hint and an instruction to END THE TURN                    |
+| `mj_draft_status`            |                                 | checklist: ✓/・ per unlocked anchor, plus saved ★ notes                                                                                                                                                                 |
+| `mj_weave_commentary`        | `out`, `missing?`, `hands?`     | ungated; writes the woven draft to `out`, returns summary only (loud `warning: partial weave` when anchors are unfilled)                                                                                                |
+| `mj_get_kyoku_start`         | `kyoku`                         | JSON: dealer/honba/kyotaku/dora, scores + placements (round ≤ focus)                                                                                                                                                    |
+| `mj_get_kyoku_result`        | `kyoku`                         | JSON: winner/tile/points/yaku, or draw + tenpai seats (round ≤ focus)                                                                                                                                                   |
+| `mj_get_riichi_declarations` | `kyoku?`                        | JSON: seat/junme/waits/live count/anchor id (filtered to unlocked rounds)                                                                                                                                               |
 
 Intended flow — **one kyoku per chat turn**: the agent opens the log (players, focus line, legend)
 and orients once with the ungated `mj_render_game` outline; then each turn it renders the focus
 kyoku with `mj_render_kyoku` (board snapshots already embedded above each anchor — except the
 配牌評価, whose deal block is the board), pulls extra positions with `mj_get_snapshot` if needed,
 saves that kyoku's anchor comments with `mj_add_comment` plus ★ one-liners with `mj_add_note`
-(`mj_next_kyoku` nudges when they're sparse — the finished kyoku's notes lock once the next
-focus kyoku is rendered), and
-calls `mj_next_kyoku`, whose reply says to end the turn. At each wind boundary (南入/西入) the
-advance is held until the 中間総括 anchor — a standings/score-condition review — is written; the
-gate reply carries the current standings. After the last round (終局総括 included),
-`mj_weave_commentary` splices the accumulated draft into a re-rendered transcript. The agent never
-reproduces fact lines, and the finished document is written to a file rather than passed back
-through the model.
+(`mj_next_kyoku` nudges when they're sparse — the finished kyoku's notes lock once the next focus
+kyoku is rendered), and calls `mj_next_kyoku`, whose reply says to end the turn. At each wind
+boundary (南入/西入) the advance is held until the 中間総括 anchor — a standings/score-condition
+review — is written; the gate reply carries the current standings. After the last round (終局総括
+included), `mj_weave_commentary` splices the accumulated draft into a re-rendered transcript. The
+agent never reproduces fact lines, and the finished document is written to a file rather than passed
+back through the model.
 
 Upgrading from 0.4.x: the wind-boundary 中間総括 anchor is inserted into the id sequence, so saved
 comment JSONs from 0.4.x shift by +1 past each boundary; `mj_get_final_standings` was removed (the
@@ -165,9 +164,9 @@ The transcript is plain Japanese text with three interleaved layers:
 2. **Reconstructed hands** — `┗ P1手: …` lines under a flagged beat, showing the exact concealed
    hand (+ melds) at that decision point. `★` marks the beat.
 3. **Commentary anchors** — `〔解説ポイント#N: 種別｜…〕` lines. **Each is a slot the consuming LLM
-   writes a comment for — by id, not by rewriting the transcript** (`weave` does the merging).
-   `#N` is a stable position id: `mj_get_snapshot` (MCP) / `snapshot --anchor N` (CLI) reproduce
-   the exact board state the slot is about. 種別 says what the slot wants: 配牌評価 / リーチ判断 /
+   writes a comment for — by id, not by rewriting the transcript** (`weave` does the merging). `#N`
+   is a stable position id: `mj_get_snapshot` (MCP) / `snapshot --anchor N` (CLI) reproduce the
+   exact board state the slot is about. 種別 says what the slot wants: 配牌評価 / リーチ判断 /
    押し引き / 副露判断 / 局総括 / 流局評価 / 中間総括 / 終局総括. ★ lines can additionally take an
    optional one-liner note, addressed by kyoku + junme + seat.
 

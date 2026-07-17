@@ -7,7 +7,7 @@
     "eval": "deno run --allow-read --allow-net=tenhou.net src/eval.ts",
     "check": "deno check src/*.ts",
     "test": "deno test --allow-read --allow-write --allow-run=deno",
-    "bundle": "deno bundle -o mcp.mjs src/mcp.ts && deno compile --allow-read --allow-write --allow-env=HOME --allow-net=tenhou.net --output bundle/server/mjrender-mcp mcp.mjs && deno run -A npm:@anthropic-ai/mcpb pack bundle mjrender.mcpb"
+    "bundle": "deno bundle --minify -o mcp.mjs src/mcp.ts && deno compile --allow-read --allow-write --allow-env=HOME --allow-net=tenhou.net --output bundle/server/mjrender-mcp mcp.mjs && deno run -A npm:@anthropic-ai/mcpb pack bundle mjrender.mcpb"
   },
   "imports": {
     "fast-xml-parser": "npm:fast-xml-parser@^4.5.0",

@@ -161,9 +161,11 @@ export function openYakuRead(
         bySuit(suit) - (honors ? handTypes.filter((t) => suitOfType(t) === "z").length : 0);
       if (off <= 3) {
         const kind = honors ? "混一色" : "清一色";
-        reads.push(`${kind}(${SUIT_LABEL[suit as keyof typeof SUIT_LABEL]})可${
-          off ? `（他色手内${off}枚）` : ""
-        }`);
+        reads.push(
+          `${kind}(${SUIT_LABEL[suit as keyof typeof SUIT_LABEL]})可${
+            off ? `（他色手内${off}枚）` : ""
+          }`,
+        );
       }
     }
   }

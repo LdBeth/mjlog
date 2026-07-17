@@ -479,7 +479,12 @@ function renderRound(
       const opened = st.melds[m.who].length;
       const furoRead = m.kind !== "shouminkan" &&
           (opened === 3 || (opened === 2 && st.junme <= EARLY_FURO_JUNME))
-        ? openYakuRead(st.melds[m.who], st.hands[m.who], st.valueHonorsBySeat[m.who], g.rules.kuitan)
+        ? openYakuRead(
+          st.melds[m.who],
+          st.hands[m.who],
+          st.valueHonorsBySeat[m.who],
+          g.rules.kuitan,
+        )
         : null;
       const pushFuroBeat = (): void => {
         if (!furoRead) return;
@@ -849,9 +854,7 @@ export function standingsLine(scores: number[], initialEast: number): string {
   const rank = placements(scores, initialEast);
   const byRank = [0, 1, 2, 3].sort((a, b) => rank[a] - rank[b]);
   return `  点況: ` + byRank.map((s, i) => {
-    const gap = i === 0
-      ? ""
-      : `(▲${(scores[byRank[i - 1]] - scores[s]) * 100})`;
+    const gap = i === 0 ? "" : `(▲${(scores[byRank[i - 1]] - scores[s]) * 100})`;
     return `${rank[s]}位${P(s)} ${scores[s] * 100}${gap}`;
   }).join(" / ");
 }
@@ -873,8 +876,9 @@ function renderInterlude(
   const nextWind = g.rounds[r + 1].kyoku >> 2;
   out.push(`== ${WIND[nextWind]}入 ==`);
   out.push(standingsLine(g.rounds[r + 1].startScores, g.rounds[0].dealer));
-  const topic =
-    `${WIND[prevWind]}場を終えての中間総括（順位状況の整理と${WIND[nextWind]}場の展望）`;
+  const topic = `${WIND[prevWind]}場を終えての中間総括（順位状況の整理と${
+    WIND[nextWind]
+  }場の展望）`;
   const beat: Beat = {
     id: beats.length + 1,
     kind: "中間総括",

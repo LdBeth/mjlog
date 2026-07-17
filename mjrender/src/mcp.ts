@@ -188,7 +188,9 @@ server.registerTool(
           "URL — a replay link like https://tenhou.net/0/?log=<id>&tw=1 or the raw log endpoint",
       ),
       fresh: z.boolean().optional()
-        .describe("Discard the existing draft AND reset the focus cursor when reopening the same log"),
+        .describe(
+          "Discard the existing draft AND reset the focus cursor when reopening the same log",
+        ),
     },
   },
   ({ path, fresh }: { path: string; fresh?: boolean }) =>
@@ -292,7 +294,8 @@ server.registerTool(
 server.registerTool(
   "mj_list_anchors",
   {
-    description: "List the UNLOCKED commentary anchors of the opened game (up to the focus kyoku), " +
+    description:
+      "List the UNLOCKED commentary anchors of the opened game (up to the focus kyoku), " +
       "one per line: #id, kind (配牌評価/リーチ判断/押し引き/副露判断/局総括/流局評価/中間総括/終局総括), " +
       "kyoku, junme, seat, topic. This is the working checklist for the focus kyoku; future rounds " +
       "are hidden until mj_next_kyoku advances (the full index lives in the ungated mj_render_game outline).",
@@ -386,12 +389,16 @@ server.registerTool(
         if (beat.round > s.focus) {
           throw new Error(
             `locked: anchor #${anchor}（${roundLabel(s.game, beat.round)}）is beyond the current ` +
-              `focus ${roundLabel(s.game, s.focus)} — comment it after mj_next_kyoku opens that kyoku`,
+              `focus ${
+                roundLabel(s.game, s.focus)
+              } — comment it after mj_next_kyoku opens that kyoku`,
           );
         }
         if (beat.round < s.focus && !s.comments.has(anchor)) {
           throw new Error(
-            `anchor #${anchor}（${roundLabel(s.game, beat.round)}）is a past kyoku — past anchors ` +
+            `anchor #${anchor}（${
+              roundLabel(s.game, beat.round)
+            }）is a past kyoku — past anchors ` +
               `are replace-only; only its existing comment can be revised, not newly filled`,
           );
         }
@@ -409,7 +416,9 @@ server.registerTool(
         ? (last
           ? " — all anchors filled; mj_weave_commentary writes the document"
           : " — 開放局のアンカーは全て記入済み; mj_next_kyoku で次局へ進みターンを終える")
-        : ` / 未記入: ${open.slice(0, 16).join(" ")}${open.length > 16 ? ` …(+${open.length - 16})` : ""}`;
+        : ` / 未記入: ${open.slice(0, 16).join(" ")}${
+          open.length > 16 ? ` …(+${open.length - 16})` : ""
+        }`;
       return `saved ${ids}${
         replaced.length ? ` (replaced ${replaced.map((i) => `#${i}`).join(" ")})` : ""
       } — ${s.comments.size}/${unlocked.length}${rest}`;
@@ -432,7 +441,9 @@ server.registerTool(
       notes: z.array(z.object({
         junme: z.number().int().nonnegative().describe("Go-around number of the ★ line"),
         seat: z.number().int().min(0).max(3).describe("Acting seat 0-3 (P0-P3)"),
-        text: z.string().describe("Short one-liner for that ★ moment; empty/blank deletes the saved note"),
+        text: z.string().describe(
+          "Short one-liner for that ★ moment; empty/blank deletes the saved note",
+        ),
       })).min(1).max(10).describe(
         "★-line notes to save or delete in the current kyoku, one entry per ★ site (max 10)",
       ),
