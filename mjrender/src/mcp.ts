@@ -18,8 +18,9 @@
 // tools — the gate paces reading, it is NOT a spoiler shield: the ungated
 // mj_render_game outline (results, ◆終局 included) and mj_open_log are read once
 // at open to orient. The format legend is emitted once per process, appended to
-// the first mj_open_log reply. ★ notes close when the kyoku advances (empty text
-// deletes a saved note). mj_weave_commentary splices the accumulated draft into a
+// the first mj_open_log reply. ★ notes accept any round up to the focus — past
+// mistakes stay correctable (re-save replaces; empty text deletes a saved note).
+// mj_weave_commentary splices the accumulated draft into a
 // re-rendered transcript written to a file; the model never copies fact lines and
 // the woven document never enters its context.
 
@@ -103,8 +104,8 @@ function lockedTrailer(s: Session): string[] {
 const fmtBeat = (b: Beat): string =>
   `#${b.id}(${b.kind}・${b.junme}巡${b.seat !== undefined ? `P${b.seat}` : ""})`;
 
-// ★-note nudge for the round about to close. Never blocks; returns null when the
-// round already has enough notes (or has no ★ sites).
+// ★-note nudge for the round about to leave focus. Never blocks; returns null
+// when the round already has enough notes (or has no ★ sites).
 function starHint(s: Session, round: number): string | null {
   const sites = listStarSites(s.game).filter((x) => x.round === round);
   const noted = [...s.notes.values()]
@@ -112,7 +113,7 @@ function starHint(s: Session, round: number): string | null {
   if (noted >= Math.min(2, sites.length)) return null;
   const cands = sites.slice(0, 8).map((x) => `${x.junme}巡P${x.seat}`).join(" ");
   return `HINT: ${roundLabel(s.game, round)} has ${sites.length} ★ sites but only ${noted} ` +
-    `note(s) — LAST CHANCE, notes close on advance; consider mj_add_note: ${cands}`;
+    `note(s) — best written now while the kyoku is fresh; consider mj_add_note: ${cands}`;
 }
 
 type ToolResult = { content: Array<{ type: "text"; text: string }>; isError?: boolean };
@@ -246,7 +247,10 @@ server.registerTool(
       kyoku: KYOKU,
       hands: z.enum(["key", "all"]).optional(),
       snapshots: z.enum(["none", "inline"]).optional()
-        .describe("Inline board snapshots above each anchor (default inline) or omit them (none)"),
+        .describe(
+          "Inline board snapshots above each anchor (default inline; the 配牌評価 anchor carries " +
+            "none — the deal block above it already shows every hand) or omit them (none)",
+        ),
     },
   },
   ({ kyoku, hands, snapshots }: KyokuArgs) =>
@@ -406,11 +410,12 @@ server.registerTool(
     description:
       "Save optional one-liners for ★-marked lines (notable discards/calls) into the session " +
       "draft, addressed by kyoku + junme + seat — one entry per ★ site, batched up to 10 per " +
-      "call. ONLY the focus kyoku accepts notes: past kyoku close when you advance (mj_next_kyoku " +
-      "gives a last-chance hint), future kyoku are locked. Saving the same site again replaces it; " +
-      "EMPTY/blank text DELETES the saved note at that site. The batch is atomic (one bad entry " +
-      "saves nothing). If the seat has several ★ lines in one go-around (call then discard), the " +
-      "note lands after the last one.",
+      "call. Any round up to the focus accepts notes (past kyoku stay correctable: add, replace, " +
+      "or delete — but write them while the kyoku is in focus; mj_next_kyoku nudges when they " +
+      "are sparse); future kyoku are locked. Saving the same site again replaces it; EMPTY/blank " +
+      "text DELETES the saved note at that site. The batch is atomic (one bad entry saves " +
+      "nothing). If the seat has several ★ lines in one go-around (call then discard), the note " +
+      "lands after the last one.",
     inputSchema: {
       notes: z.array(z.object({
         kyoku: KYOKU,
@@ -430,13 +435,7 @@ server.registerTool(
       for (const n of notes) {
         const round = uniqueRound(s.game, n.kyoku);
         const label = `${roundLabel(s.game, round)} ${n.junme}巡 P${n.seat}`;
-        if (round !== s.focus) {
-          if (round < s.focus) {
-            throw new Error(
-              `${label} is a past kyoku — ★ notes close when the kyoku advances; only the focus ` +
-                `kyoku ${roundLabel(s.game, s.focus)} accepts notes`,
-            );
-          }
+        if (round > s.focus) {
           throw new Error(
             `locked: ${label} is beyond the current focus ${roundLabel(s.game, s.focus)} — ` +
               `open it with mj_next_kyoku first`,
@@ -520,7 +519,7 @@ server.registerTool(
       "Advance the focus cursor to the next kyoku — the pacing step. FIRST fill every anchor of " +
       "the current focus kyoku with mj_add_comment; this errors and lists any that are unfilled " +
       "(at a wind boundary it prints the 中間総括 checkpoint with current standings). On success " +
-      "it unlocks the next round, reports progress + a last-chance ★-note hint for the finished " +
+      "it unlocks the next round, reports progress + a ★-note hint for the finished " +
       "kyoku + (at a wind crossing) the standings block, then tells you to END THIS CHAT TURN. At " +
       "the final kyoku it does not advance — it tells you to write the document with " +
       "mj_weave_commentary and STOP.",
@@ -557,7 +556,7 @@ server.registerTool(
         throw new Error(lines.join("\n"));
       }
 
-      // 2. Last-chance ★-note hint for the round we are about to close.
+      // 2. ★-note hint for the round about to leave focus (notes stay editable later).
       const hint = starHint(s, focus);
 
       // 3. Final kyoku: no advance.

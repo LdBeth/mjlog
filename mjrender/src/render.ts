@@ -343,8 +343,12 @@ function renderRound(
     };
     beats.push(beat);
     // st IS the replayTo(round, eventIndex) state at every anchor site, so the
-    // inline block matches what get_snapshot would serve for this beat.
-    if (opts.snapshots === "inline") out.push(renderSnapshot(g, round, st, `#${beat.id}`));
+    // inline block matches what get_snapshot would serve for this beat. The
+    // 配牌評価 anchor skips it: the deal block just above already carries every
+    // hand, the dora, and the starting scores, and the rivers are still empty.
+    if (opts.snapshots === "inline" && kind !== "配牌評価") {
+      out.push(renderSnapshot(g, round, st, `#${beat.id}`));
+    }
     out.push(anchorLine(beat.id, kind, topic));
   };
 

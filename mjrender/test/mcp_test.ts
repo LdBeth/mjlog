@@ -211,6 +211,14 @@ Deno.test("mcp: paced kyoku-gated commentary flow end-to-end", async () => {
     const k0 = await c.call("mj_render_kyoku", { kyoku: "0" });
     assert(!k0.isError, `render 0 errored: ${txt(k0)}`);
     assert(txt(k0).includes("┌盤面"), "render must contain an inline board block");
+    // 配牌評価 (and 中間総括/終局総括) carry no inline snapshot — the deal block is the board
+    const boards0 = txt(k0).split("┌盤面").length - 1;
+    const wantBoards0 = anchorsOf(0)
+      .filter((b) => !["配牌評価", "中間総括", "終局総括"].includes(b.kind)).length;
+    assert(
+      boards0 === wantBoards0,
+      `render 0 has ${boards0} inline boards, want ${wantBoards0} (no snapshot at 配牌評価)`,
+    );
     assert(!txt(k0).includes("■この牌譜の読み方"), "kyoku render must not carry the legend");
     for (const b of anchorsOf(0)) {
       assert(txt(k0).includes(`〔解説ポイント#${b.id}:`), `render 0 missing anchor #${b.id}`);
@@ -259,12 +267,16 @@ Deno.test("mcp: paced kyoku-gated commentary flow end-to-end", async () => {
     for (let r = 0; r < nRounds; r++) {
       // --- pre-fill checks (focus = r, round r not yet filled) ---
       if (r === 1) {
-        // notes for a PAST round (0) are closed after advancing
+        // notes for a PAST round (0) stay correctable after advancing: add, then delete
         const s0 = stars.find((s) => s.round === 0)!;
         const pastNote = await c.call("mj_add_note", {
-          notes: [{ kyoku: "0", junme: s0.junme, seat: s0.seat, text: "遅すぎ。" }],
+          notes: [{ kyoku: "0", junme: s0.junme, seat: s0.seat, text: "後から見ると遅い。" }],
         });
-        assert(pastNote.isError, `past-round note must close: ${txt(pastNote)}`);
+        assert(!pastNote.isError && txt(pastNote).includes("saved 1"), `past-round note must stay editable: ${txt(pastNote)}`);
+        const pastDel = await c.call("mj_add_note", {
+          notes: [{ kyoku: "0", junme: s0.junme, seat: s0.seat, text: "" }],
+        });
+        assert(!pastDel.isError && txt(pastDel).includes("deleted 1"), `past-round note delete failed: ${txt(pastDel)}`);
         // a REVISION of an already-filled past anchor succeeds (replace-only)
         const past = anchorsOf(0)[0].id;
         const rev = await c.call("mj_add_comment", { comments: [{ anchor: past, text: "改訂版。" }] });

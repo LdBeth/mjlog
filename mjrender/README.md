@@ -119,7 +119,7 @@ The commentary draft also lives server-side. Tools (thin wrappers over `src/core
 | `mj_list_anchors`            |                                  | `#id kind kyoku junme seat topic` per line, unlocked rounds only |
 | `mj_get_snapshot`            | `anchor` \| (`kyoku`, `junme`)   | board snapshot block (round ≤ focus)                  |
 | `mj_add_comment`             | `comments[{anchor,text}]`        | saves anchor comments (batch ≤10, atomic); focus round = new fills, past rounds = replace-only, future locked |
-| `mj_add_note`                | `notes[{kyoku,junme,seat,text}]` | saves ★-line one-liners (batch ≤10, atomic); **focus round only** — notes close on advance; empty `text` deletes a saved note |
+| `mj_add_note`                | `notes[{kyoku,junme,seat,text}]` | saves ★-line one-liners (batch ≤10, atomic); any round ≤ focus — past notes stay correctable (re-save replaces, empty `text` deletes); future locked |
 | `mj_next_kyoku`              |                                  | advances the focus once all focus-kyoku anchors are filled (errors listing what's missing; wind boundaries demand the 中間総括 first); replies with a ★-note hint and an instruction to END THE TURN |
 | `mj_draft_status`            |                                  | checklist: ✓/・ per unlocked anchor, plus saved ★ notes |
 | `mj_weave_commentary`        | `out`, `missing?`, `hands?`      | ungated; writes the woven draft to `out`, returns summary only (loud `warning: partial weave` when anchors are unfilled) |
@@ -129,9 +129,10 @@ The commentary draft also lives server-side. Tools (thin wrappers over `src/core
 
 Intended flow — **one kyoku per chat turn**: the agent opens the log (players, focus line, legend)
 and orients once with the ungated `mj_render_game` outline; then each turn it renders the focus
-kyoku with `mj_render_kyoku` (board snapshots already embedded above each anchor), pulls extra
-positions with `mj_get_snapshot` if needed, saves that kyoku's anchor comments with
-`mj_add_comment` plus ★ one-liners with `mj_add_note` (last chance — notes close on advance), and
+kyoku with `mj_render_kyoku` (board snapshots already embedded above each anchor — except the
+配牌評価, whose deal block is the board), pulls extra positions with `mj_get_snapshot` if needed,
+saves that kyoku's anchor comments with `mj_add_comment` plus ★ one-liners with `mj_add_note`
+(best written now — `mj_next_kyoku` nudges when they're sparse; past notes stay editable), and
 calls `mj_next_kyoku`, whose reply says to end the turn. At each wind boundary (南入/西入) the
 advance is held until the 中間総括 anchor — a standings/score-condition review — is written; the
 gate reply carries the current standings. After the last round (終局総括 included),
