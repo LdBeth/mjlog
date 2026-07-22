@@ -83,9 +83,13 @@ no per-turn lines) stays ungated for orientation. `mj_next_kyoku` advances the
 focus only when every focus-kyoku anchor is commented (wind boundaries demand
 the 中間総括 standings review first), replies with a ★-note hint when notes
 are sparse and instructs the LLM to END ITS TURN — one kyoku per chat turn.
-mj_get_final_standings was removed in 0.5.0 (outline's ◆終局 covers it;
-`finalStandings` stays in core for CLI/eval); 中間総括 insertion renumbers
-anchors vs 0.4.x.
+Server state is in-memory only (no autosave/disk); after an MCP restart the LLM
+reopens the log with mj_open_log and bulk-restores its whole draft (comments +
+★ notes + focus, kyoku-addressed) from its own context via `mj_restore_state`
+(wholesale replace, atomic, idempotent — comments beyond focus rejected, past
+gaps warned). mj_get_final_standings was removed in 0.5.0 (outline's ◆終局
+covers it; `finalStandings` stays in core for CLI/eval); 中間総括 insertion
+renumbers anchors vs 0.4.x; `mj_restore_state` added in 0.6.0.
 `deno task eval` emits ground-truth Q/A JSONL; `deno task bundle` builds the
 `mjrender.mcpb` Claude Desktop extension (regenerating `mcp.mjs`, the bundled
 compile input, from `src/mcp.ts` first).

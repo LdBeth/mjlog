@@ -1,4 +1,4 @@
-// End-to-end MCP test for the PACED, kyoku-gated flow (v0.5.0): bundle
+// End-to-end MCP test for the PACED, kyoku-gated flow (v0.6.0): bundle
 // src/mcp.ts (the same artifact `deno task bundle` ships), spawn the bundle
 // over stdio, and drive a real JSON-RPC exchange that walks the whole gated
 // loop — open → orient → per-kyoku render/comment/advance → weave.
@@ -98,7 +98,7 @@ class TextLineStream extends TransformStream<string, string> {
 }
 
 const txt = (r: Json): string => r.content[0].text as string;
-function assert(cond: unknown, msg: string): void {
+function assert(cond: unknown, msg: string): asserts cond {
   if (!cond) throw new Error(msg);
 }
 function chunk<T>(arr: T[], n: number): T[][] {
@@ -107,13 +107,39 @@ function chunk<T>(arr: T[], n: number): T[][] {
   return out;
 }
 
+/** initialize + serverInfo check + initialized notification, once per server. */
+async function handshake(c: McpClient): Promise<void> {
+  const init = await c.rpc("initialize", {
+    protocolVersion: "2024-11-05",
+    capabilities: {},
+    clientInfo: { name: "mjrender-test", version: "0.0.0" },
+  });
+  assert(
+    init.serverInfo?.name === "mjrender",
+    `unexpected serverInfo: ${JSON.stringify(init.serverInfo)}`,
+  );
+  await c.send({ jsonrpc: "2.0", method: "notifications/initialized" });
+}
+
+// ---- shared across tests: expected shape from the same core the server
+// uses, and ONE server bundle (the slowest setup step) ----
+const game = await loadGame(SAMPLE);
+const anchors: Beat[] = listAnchors(game);
+const stars = listStarSites(game);
+const nRounds = game.rounds.length;
+const anchorsOf = (r: number) => anchors.filter((b) => b.round === r);
+const commentText = (id: number) => `テスト解説#${id}。`;
+
+const bundleDir = await Deno.makeTempDir();
+const server = `${bundleDir}/mcp.mjs`;
+await bundleServer(server);
+globalThis.addEventListener("unload", () => {
+  try {
+    Deno.removeSync(bundleDir, { recursive: true });
+  } catch { /* best effort */ }
+});
+
 Deno.test("mcp: paced kyoku-gated commentary flow end-to-end", async () => {
-  // ---- derive expected shape from the same core the server uses ----
-  const game = await loadGame(SAMPLE);
-  const anchors: Beat[] = listAnchors(game);
-  const stars = listStarSites(game);
-  const nRounds = game.rounds.length;
-  const anchorsOf = (r: number) => anchors.filter((b) => b.round === r);
   const filledBefore = (r: number) => anchors.filter((b) => b.round < r).length;
   const unlockedAt = (r: number) => anchors.filter((b) => b.round <= r).length;
   const winds = game.rounds.map((rd) => rd.kyoku >> 2);
@@ -124,25 +150,12 @@ Deno.test("mcp: paced kyoku-gated commentary flow end-to-end", async () => {
   // The wind crossing round (last East round): winds[r] !== winds[r+1].
   const crossRound = winds.findIndex((w, i) => i + 1 < nRounds && winds[i + 1] !== w);
   assert(crossRound >= 0, "sample must cross a wind boundary");
-  assert(chukan!.round === crossRound, "中間総括 must sit on the wind-crossing round");
-  const commentText = (id: number) => `テスト解説#${id}。`;
+  assert(chukan.round === crossRound, "中間総括 must sit on the wind-crossing round");
 
-  const bundleDir = await Deno.makeTempDir();
-  const server = `${bundleDir}/mcp.mjs`;
-  await bundleServer(server);
   const c = new McpClient(server);
   const tmp = await Deno.makeTempDir();
   try {
-    const init = await c.rpc("initialize", {
-      protocolVersion: "2024-11-05",
-      capabilities: {},
-      clientInfo: { name: "mjrender-test", version: "0.0.0" },
-    });
-    assert(
-      init.serverInfo?.name === "mjrender",
-      `unexpected serverInfo: ${JSON.stringify(init.serverInfo)}`,
-    );
-    await c.send({ jsonrpc: "2.0", method: "notifications/initialized" });
+    await handshake(c);
 
     // ---- 1. tools/list: + mj_next_kyoku, − mj_get_final_standings ----
     const tools = await c.rpc("tools/list", {});
@@ -160,6 +173,7 @@ Deno.test("mcp: paced kyoku-gated commentary flow end-to-end", async () => {
       "mj_open_log",
       "mj_render_game",
       "mj_render_kyoku",
+      "mj_restore_state",
       "mj_weave_commentary",
     ];
     assert(JSON.stringify(names) === JSON.stringify(want), `tool set mismatch: ${names}`);
@@ -385,7 +399,7 @@ Deno.test("mcp: paced kyoku-gated commentary flow end-to-end", async () => {
         assert(!kLast.isError, `render last errored: ${txt(kLast)}`);
         assert(txt(kLast).includes("◆終局"), "final render missing ◆終局");
         assert(
-          txt(kLast).includes(`〔解説ポイント#${owari!.id}:`),
+          txt(kLast).includes(`〔解説ポイント#${owari.id}:`),
           "final render missing 終局総括 anchor",
         );
       }
@@ -394,7 +408,7 @@ Deno.test("mcp: paced kyoku-gated commentary flow end-to-end", async () => {
       const ids = anchorsOf(r).map((b) => b.id);
       if (r === crossRound) {
         // fill every regular anchor but withhold 中間総括 → checkpoint gate
-        const regular = ids.filter((id) => id !== chukan!.id);
+        const regular = ids.filter((id) => id !== chukan.id);
         await fill(regular);
         const gate = await c.call("mj_next_kyoku", {});
         assert(gate.isError, "advance without 中間総括 must error");
@@ -402,7 +416,7 @@ Deno.test("mcp: paced kyoku-gated commentary flow end-to-end", async () => {
           txt(gate).includes("中間総括") && txt(gate).includes("点況"),
           `checkpoint missing 中間総括/点況: ${txt(gate)}`,
         );
-        await fill([chukan!.id]);
+        await fill([chukan.id]);
       } else {
         await fill(ids);
       }
@@ -450,14 +464,231 @@ Deno.test("mcp: paced kyoku-gated commentary flow end-to-end", async () => {
     const doc = await Deno.readTextFile(finalOut);
     assert(doc.includes("== 南入 =="), "woven doc missing the 南入 interlude");
     assert(doc.includes("◆解説（中間総括）:"), "woven doc missing the 中間総括 commentary line");
-    assert(doc.includes(commentText(chukan!.id)), "woven doc missing the spliced 中間総括 text");
+    assert(doc.includes(commentText(chukan.id)), "woven doc missing the spliced 中間総括 text");
     assert(
-      !doc.includes(`〔解説ポイント#${chukan!.id}:`),
+      !doc.includes(`〔解説ポイント#${chukan.id}:`),
       "filled anchor placeholder should be gone",
     );
   } finally {
     await c.close();
     await Deno.remove(tmp, { recursive: true });
-    await Deno.remove(bundleDir, { recursive: true });
+  }
+});
+
+// mj_restore_state: after a SERVER RESTART the client re-sends its whole
+// accumulated draft + focus in ONE bulk call. Server A plays rounds 0–1,
+// advances to focus 2, and weaves; it then "crashes" (client closes). A fresh
+// Server B reopens the log, bulk-restores from Server A's payload, and must
+// weave a byte-identical document — plus honor the gate, replace-only, note
+// window, atomicity, and past-gap warnings the same as a never-restarted run.
+Deno.test("mcp: restart restore round-trips the draft", async () => {
+  const noteText = "リーチ★メモ。";
+
+  // the draft Server A accumulates: every anchor in rounds 0..1, plus one ★
+  // note at a round-0 site. Server B must reproduce it exactly.
+  const r01 = anchors.filter((b) => b.round <= 1);
+  const unlocked2 = anchors.filter((b) => b.round <= 2).length;
+  const s0 = stars.find((s) => s.round === 0);
+  assert(s0, "sample must have a round-0 ★ site");
+  // a round-0 site that is NOT also a ★ site in the focus round (round 2), so a
+  // note addressed to it genuinely tests the moved note window rather than
+  // coincidentally landing on a same-(junme,seat) focus-round site.
+  const s0Only = stars.find((s) =>
+    s.round === 0 && !stars.some((x) => x.round === 2 && x.junme === s.junme && x.seat === s.seat)
+  );
+  assert(anchorsOf(3).length > 0, "sample must have a round-3 anchor (locked beyond focus 2)");
+  const round0Anchor = anchorsOf(0)[0].id;
+  const round3Anchor = anchorsOf(3)[0].id;
+
+  const tmp = await Deno.makeTempDir();
+  const fileA = `${tmp}/woven_A.txt`;
+  const fileB = `${tmp}/woven_B.txt`;
+
+  const restoreComments = (ids: number[]) =>
+    ids.map((id) => ({ anchor: id, text: commentText(id) }));
+
+  const A = new McpClient(server);
+  let B: McpClient | undefined;
+  try {
+    // ================= Server A: the pre-crash session =================
+    await handshake(A);
+
+    const openedA = await A.call("mj_open_log", { path: SAMPLE });
+    assert(!openedA.isError, `A open failed: ${txt(openedA)}`);
+
+    // round 0: render → fill anchors → one ★ note at a round-0 site
+    const rkA0 = await A.call("mj_render_kyoku", { kyoku: "0" });
+    assert(!rkA0.isError, `A render 0: ${txt(rkA0)}`);
+    const cA0 = await A.call("mj_add_comment", {
+      comments: restoreComments(anchorsOf(0).map((b) => b.id)),
+    });
+    assert(!cA0.isError, `A fill 0: ${txt(cA0)}`);
+    const nA = await A.call("mj_add_note", {
+      notes: [{ junme: s0.junme, seat: s0.seat, text: noteText }],
+    });
+    assert(!nA.isError && txt(nA).includes("saved 1"), `A note: ${txt(nA)}`);
+
+    const advA0 = await A.call("mj_next_kyoku", {});
+    assert(!advA0.isError, `A advance 0: ${txt(advA0)}`);
+
+    // round 1: render → fill anchors
+    const rkA1 = await A.call("mj_render_kyoku", { kyoku: "1" });
+    assert(!rkA1.isError, `A render 1: ${txt(rkA1)}`);
+    const cA1 = await A.call("mj_add_comment", {
+      comments: restoreComments(anchorsOf(1).map((b) => b.id)),
+    });
+    assert(!cA1.isError, `A fill 1: ${txt(cA1)}`);
+
+    const advA1 = await A.call("mj_next_kyoku", {});
+    assert(!advA1.isError, `A advance 1: ${txt(advA1)}`); // focus now round 2
+
+    // partial weave (rounds 2..9 unfilled) → warns
+    const woveA = await A.call("mj_weave_commentary", { out: fileA });
+    assert(!woveA.isError, `A weave: ${txt(woveA)}`);
+    assert(
+      txt(woveA).includes("warning: partial weave"),
+      `A weave should warn partial (round 2 unfilled): ${txt(woveA)}`,
+    );
+
+    await A.close(); // ---- simulated crash ----
+
+    // ================= Server B: fresh process =================
+    B = new McpClient(server);
+    await handshake(B);
+
+    // (a) restore before any open → error mentioning mj_open_log
+    const preOpen = await B.call("mj_restore_state", {
+      focus: "2",
+      comments: restoreComments(r01.map((b) => b.id)),
+    });
+    assert(
+      preOpen.isError && txt(preOpen).includes("mj_open_log"),
+      `restore before open should demand mj_open_log: ${txt(preOpen)}`,
+    );
+
+    // (b) open → focus round 0, empty draft
+    const openedB = await B.call("mj_open_log", { path: SAMPLE });
+    assert(!openedB.isError, `B open failed: ${txt(openedB)}`);
+    assert(txt(openedB).includes("focus: 東1局"), `B open lost focus: ${txt(openedB)}`);
+
+    // (c) rejection + atomicity: focus "2" but a round-3 comment is beyond focus →
+    //     error, and (atomic) the accompanying round-0 comment must NOT leak.
+    const bad = await B.call("mj_restore_state", {
+      focus: "2",
+      comments: [
+        { anchor: round0Anchor, text: commentText(round0Anchor) },
+        { anchor: round3Anchor, text: "越境。" },
+      ],
+    });
+    assert(
+      bad.isError && txt(bad).includes("beyond the restored focus"),
+      `restore with a beyond-focus anchor must error: ${txt(bad)}`,
+    );
+    const st = await B.call("mj_draft_status", {});
+    assert(
+      txt(st).includes("draft: 0/") && txt(st).includes("0 notes"),
+      `draft must stay empty after an atomic reject: ${txt(st)}`,
+    );
+
+    // (d) real restore: focus "2", ALL round-0+1 comments in ONE call + the ★
+    //     note with a wind-form selector ("E1") to exercise uniqueRound norm.
+    const restored = await B.call("mj_restore_state", {
+      focus: "2",
+      comments: restoreComments(r01.map((b) => b.id)),
+      notes: [{ kyoku: "E1", junme: s0.junme, seat: s0.seat, text: noteText }],
+    });
+    assert(!restored.isError, `restore failed: ${txt(restored)}`);
+    assert(txt(restored).includes("restored:"), `restore reply missing 'restored:': ${txt(restored)}`);
+    const wantDraft =
+      `draft: ${r01.length}/${unlocked2} comments (kyoku 3/${nRounds} unlocked), 1 notes`;
+    assert(
+      txt(restored).includes(wantDraft),
+      `restore draft line (want "${wantDraft}"): ${txt(restored)}`,
+    );
+    assert(
+      !txt(restored).includes("warning:"),
+      `restore with no past gaps must not warn: ${txt(restored)}`,
+    );
+
+    // (e) gating intact: render round 3 → locked; mj_next_kyoku → lists round-2 ids
+    const gRender = await B.call("mj_render_kyoku", { kyoku: "3" });
+    assert(
+      gRender.isError && txt(gRender).includes("locked"),
+      `render round 3 should lock beyond focus 2: ${txt(gRender)}`,
+    );
+    const gAdv = await B.call("mj_next_kyoku", {});
+    assert(gAdv.isError, "advance with round-2 anchors unfilled must error");
+    for (const b of anchorsOf(2)) {
+      assert(txt(gAdv).includes(`#${b.id}(`), `advance error missing #${b.id}: ${txt(gAdv)}`);
+    }
+
+    // (h) weave equality — the restored draft still matches Server A byte-for-byte.
+    //     Done BEFORE the mutating steps (f/g) so the equality holds.
+    const woveB = await B.call("mj_weave_commentary", { out: fileB });
+    assert(!woveB.isError, `B weave: ${txt(woveB)}`);
+    const docA = await Deno.readTextFile(fileA);
+    const docB = await Deno.readTextFile(fileB);
+    assert(docA === docB, "a restored session must weave byte-identically to the never-restarted one");
+
+    // (f) noteRound = focus: a round-0-only ★ note now locks; a round-2 ★ note saves.
+    if (s0Only) {
+      const noteRound0 = await B.call("mj_add_note", {
+        notes: [{ junme: s0Only.junme, seat: s0Only.seat, text: "手遅れ。" }],
+      });
+      assert(
+        noteRound0.isError && txt(noteRound0).includes("notes address"),
+        `a round-0 ★ note must lock after restore to focus 2: ${txt(noteRound0)}`,
+      );
+    }
+    const s2 = stars.find((s) => s.round === 2);
+    if (s2) {
+      const noteRound2 = await B.call("mj_add_note", {
+        notes: [{ junme: s2.junme, seat: s2.seat, text: "焦点局メモ。" }],
+      });
+      assert(
+        !noteRound2.isError && txt(noteRound2).includes("saved 1"),
+        `a focus-round (round 2) ★ note should save: ${txt(noteRound2)}`,
+      );
+    }
+
+    // (g) replace-only preserved: revising a restored round-0 anchor succeeds.
+    const rev = await B.call("mj_add_comment", {
+      comments: [{ anchor: round0Anchor, text: "改訂版。" }],
+    });
+    assert(
+      !rev.isError && txt(rev).includes("replaced"),
+      `revising a restored past anchor should replace: ${txt(rev)}`,
+    );
+
+    // (i) gap warning + idempotency: restore omitting a round-0 anchor warns; a
+    //     fresh mj_add_comment fill of that gap is replace-only-rejected; a full
+    //     restore then comes back clean.
+    const gapRestore = await B.call("mj_restore_state", {
+      focus: "2",
+      comments: restoreComments(r01.filter((b) => b.id !== round0Anchor).map((b) => b.id)),
+    });
+    assert(
+      !gapRestore.isError && txt(gapRestore).includes("warning:"),
+      `restore omitting a past anchor should warn: ${txt(gapRestore)}`,
+    );
+    const newFill = await B.call("mj_add_comment", {
+      comments: [{ anchor: round0Anchor, text: commentText(round0Anchor) }],
+    });
+    assert(
+      newFill.isError && txt(newFill).includes("replace-only"),
+      `newly filling a past gap must be replace-only-rejected: ${txt(newFill)}`,
+    );
+    const clean = await B.call("mj_restore_state", {
+      focus: "2",
+      comments: restoreComments(r01.map((b) => b.id)),
+    });
+    assert(
+      !clean.isError && txt(clean).includes("restored:") && !txt(clean).includes("warning:"),
+      `a full restore should come back clean: ${txt(clean)}`,
+    );
+  } finally {
+    await A.close().catch(() => {}); // double-close after the simulated crash is fine
+    if (B) await B.close().catch(() => {});
+    await Deno.remove(tmp, { recursive: true }).catch(() => {});
   }
 });

@@ -121,6 +121,7 @@ lives server-side. Tools (thin wrappers over `src/core.ts`):
 | `mj_add_comment`             | `comments[{anchor,text}]`       | saves anchor comments (batch ≤10, atomic); focus round = new fills, past rounds = replace-only, future locked                                                                                                           |
 | `mj_add_note`                | `notes[{junme,seat,text}]`      | saves ★-line one-liners for the kyoku being commented (no kyoku arg; batch ≤10, atomic); re-save replaces, empty `text` deletes; the finished kyoku stays notable after `mj_next_kyoku` until the new focus is rendered |
 | `mj_next_kyoku`              |                                 | advances the focus once all focus-kyoku anchors are filled (errors listing what's missing; wind boundaries demand the 中間総括 first); replies with a ★-note hint and an instruction to END THE TURN                    |
+| `mj_restore_state`           | `focus`, `comments[{anchor,text}]`, `notes?[{kyoku,junme,seat,text}]` | after a server restart: atomic wholesale REPLACE of the whole draft + focus, re-sent from the client's own context (log must be reopened first); no batch cap; comments beyond focus rejected; unfilled past anchors warned |
 | `mj_draft_status`            |                                 | checklist: ✓/・ per unlocked anchor, plus saved ★ notes                                                                                                                                                                 |
 | `mj_weave_commentary`        | `out`, `missing?`, `hands?`     | ungated; writes the woven draft to `out`, returns summary only (loud `warning: partial weave` when anchors are unfilled)                                                                                                |
 | `mj_get_kyoku_start`         | `kyoku`                         | JSON: dealer/honba/kyotaku/dora, scores + placements (round ≤ focus)                                                                                                                                                    |
@@ -140,7 +141,14 @@ included), `mj_weave_commentary` splices the accumulated draft into a re-rendere
 agent never reproduces fact lines, and the finished document is written to a file rather than passed
 back through the model.
 
-Upgrading from 0.4.x: the wind-boundary 中間総括 anchor is inserted into the id sequence, so saved
+The session is **in-memory by design** — no autosave, no disk state — so a server restart (Claude
+Desktop reconnect, crash, upgrade) drops the opened log and the whole draft. Recovery leans on the
+client's own conversation context: reopen the log with `mj_open_log`, then bulk-restore the entire
+accumulated draft (all anchor comments + ★ notes + focus) in one `mj_restore_state` call before
+resuming the paced loop.
+
+Upgrading to 0.6.0: adds `mj_restore_state` for post-restart draft recovery (see above); no anchor
+renumbering. Upgrading from 0.4.x: the wind-boundary 中間総括 anchor is inserted into the id sequence, so saved
 comment JSONs from 0.4.x shift by +1 past each boundary; `mj_get_final_standings` was removed (the
 ungated outline's ◆終局 block carries the same data — `finalStandings` remains in core/CLI/eval).
 

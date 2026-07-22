@@ -2,7 +2,7 @@
   "manifest_version": "0.2",
   "name": "mjrender",
   "display_name": "mjrender",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Deterministic game-state oracle over Tenhou mjlog files: paced commentary transcript, board snapshots, structured fact queries, and incremental commentary weaving.",
   "long_description": "Stateful, PACED session over a Tenhou mahjong log: mj_open_log parses the log once (absolute path to a .mjlog/.xml file, or a tenhou.net replay/log URL) and every other tool operates on it. A focus cursor gates per-turn reading to one kyoku at a time — the intended loop is mj_render_kyoku on the focus round, mj_get_snapshot at riichi/tenpai moments, mj_add_comment / mj_add_note to fill that round's anchors, then mj_next_kyoku to unlock the next round and end the chat turn. Future rounds are locked for renders/snapshots/per-kyoku facts (a pacing device, not a spoiler shield: the ungated mj_render_game outline shows every result). Renders an LLM-ready Japanese commentary transcript with computed metrics (shanten/ukeire/waits/dora/danger evidence) and 〔解説ポイント#N〕 anchors, including a 中間総括 checkpoint at each wind boundary. Commentary is saved server-side (mj_add_comment; mj_add_note for ★ lines, empty text deletes; mj_draft_status for progress); mj_weave_commentary splices the accumulated draft into a re-rendered transcript and writes the finished document to a file, so the model never copies fact lines.",
   "author": {
@@ -52,6 +52,10 @@
     {
       "name": "mj_next_kyoku",
       "description": "Advance the focus cursor to the next kyoku (requires the current one fully commented); end the chat turn after"
+    },
+    {
+      "name": "mj_restore_state",
+      "description": "After a server restart, bulk-restore the whole draft (comments, ★ notes, focus) from context in one call"
     },
     {
       "name": "mj_weave_commentary",

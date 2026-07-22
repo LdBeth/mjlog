@@ -114,7 +114,7 @@ export function formatInstruction(mode: "fill" | "final" = "fill"): string {
     "・「◇見逃し」=聴牌者がロン可能な牌を見送った事実（フリテン選択・黙聴の見送りを含む。直後の状況判断は解説対象）",
     "・「嶺上ツモ」=カン後の嶺上牌ツモ、「＋新ドラ」=カンによる新ドラ表示（表示位置は実際のめくり順）",
     "・★=注目の局面 / ┗…手:=その時点の手牌",
-    "・「┗ 比較:」=★の打牌の代替候補との比較（◎=実際の打牌。牌種単位、赤は区別しない）",
+    "・「┗ 比較:」=★の打牌の代替候補との比較（◎=実際の打牌。牌種単位、赤は区別しない。向聴3以上の手では省略）",
     "・「┗ 役読み:」=早い2副露（6巡以内）/3副露時点の役の見通し（確定=副露で確定済 / 可=阻害なし /",
     "  後付け可=手内の役牌対子 / 見込み=必要ブロックの過半が実現済。役なし懸念=現状確定役なし）",
     "・危険度低/中/高=リーチへの放銃危険度の目安。続く〔…〕が根拠: スジ/半スジ/無スジ、",
@@ -310,6 +310,9 @@ function renderRound(
       counts[t]++;
     }
     cands.sort((a, b) => a.sh - b.sh || b.live - a.live);
+    // 向聴3以上 (even at the best discard): the hand is too far from tenpai
+    // for a what-if table to mean anything — muffle the line.
+    if (cands[0].sh >= 3) return "";
     const dt = tileType(discarded);
     const top = cands.slice(0, 3);
     if (!top.some((c) => c.t === dt)) {
@@ -785,7 +788,10 @@ function renderRound(
         metricTag(info, who)
       }${inlineDanger}${inlineDora}${star}`,
     );
-    if (star !== "") out.push(comparisonLine(who, tile));
+    if (star !== "") {
+      const cmp = comparisonLine(who, tile);
+      if (cmp) out.push(cmp);
+    }
 
     // reconstructed-hand displays at key beats
     if (riichi) {

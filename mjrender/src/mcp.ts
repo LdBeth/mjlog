@@ -109,6 +109,52 @@ function lockedTrailer(s: Session): string[] {
 const fmtBeat = (b: Beat): string =>
   `#${b.id}(${b.kind}・${b.junme}巡${b.seat !== undefined ? `P${b.seat}` : ""})`;
 
+const elide = (items: string[], n = 16): string =>
+  items.slice(0, n).join(" ") + (items.length > n ? ` …(+${items.length - n})` : "");
+
+// Mechanical checks shared by mj_add_comment and mj_restore_state — unknown
+// id, duplicate in batch, empty text. Round policy (focus gate, replace-only)
+// stays with each caller.
+function stageComments(
+  beats: Beat[],
+  comments: Array<{ anchor: number; text: string }>,
+): Array<{ anchor: number; text: string; beat: Beat }> {
+  const staged: Array<{ anchor: number; text: string; beat: Beat }> = [];
+  const seen = new Set<number>();
+  for (const { anchor, text } of comments) {
+    const beat = beats.find((b) => b.id === anchor);
+    if (!beat) {
+      throw new Error(
+        `unknown anchor #${anchor} — this game has #1..#${beats.length} (mj_list_anchors)`,
+      );
+    }
+    if (seen.has(anchor)) throw new Error(`anchor #${anchor} appears twice in this batch`);
+    seen.add(anchor);
+    if (!text.trim()) throw new Error(`empty comment for anchor #${anchor}`);
+    staged.push({ anchor, text: text.trim(), beat });
+  }
+  return staged;
+}
+
+const noteKey = (round: number, junme: number, seat: number): string => `${round}:${junme}:${seat}`;
+
+// ★-site existence check shared by mj_add_note and mj_restore_state; `where`
+// names the addressed round (the two tools phrase it differently).
+function assertStarSite(
+  here: ReturnType<typeof listStarSites>,
+  junme: number,
+  seat: number,
+  where: string,
+): void {
+  if (!here.some((x) => x.junme === junme && x.seat === seat)) {
+    const list = here.map((x) => `${x.junme}巡P${x.seat}`).join(" ");
+    throw new Error(
+      `no ★ line for P${seat} at ${junme}巡 — ${where}` +
+        (list ? `（★: ${list}）` : "（この局に★行なし）"),
+    );
+  }
+}
+
 // ★-note nudge for the round about to leave focus. Never blocks; returns null
 // when the round already has enough notes (or has no ★ sites).
 function starHint(s: Session, round: number): string | null {
@@ -142,6 +188,11 @@ interface CommentArgs {
 interface NoteArgs {
   notes: Array<{ junme: number; seat: number; text: string }>;
 }
+interface RestoreArgs {
+  focus: string;
+  comments: Array<{ anchor: number; text: string }>;
+  notes?: Array<{ kyoku: string; junme: number; seat: number; text: string }>;
+}
 interface WeaveArgs {
   out: string;
   missing?: "keep" | "strip";
@@ -167,7 +218,7 @@ const KYOKU = z.string().describe(
   'Round selector: wind+number like "S3" / "東1" (optionally ".honba", e.g. "E1.2" when a kyoku repeats), or a 0-based round index like "6"',
 );
 
-const server = new McpServer({ name: "mjrender", version: "0.5.0" });
+const server = new McpServer({ name: "mjrender", version: "0.6.0" });
 
 server.registerTool(
   "mj_open_log",
@@ -375,17 +426,8 @@ server.registerTool(
       const s = current();
       const beats = listAnchors(s.game);
       // validate the whole batch before touching the draft
-      const seen = new Set<number>();
-      for (const { anchor, text } of comments) {
-        if (anchor > beats.length) {
-          throw new Error(
-            `unknown anchor #${anchor} — this game has #1..#${beats.length} (mj_list_anchors)`,
-          );
-        }
-        if (seen.has(anchor)) throw new Error(`anchor #${anchor} appears twice in this batch`);
-        seen.add(anchor);
-        if (!text.trim()) throw new Error(`empty comment for anchor #${anchor}`);
-        const beat = beats.find((b) => b.id === anchor)!;
+      const staged = stageComments(beats, comments);
+      for (const { anchor, beat } of staged) {
         if (beat.round > s.focus) {
           throw new Error(
             `locked: anchor #${anchor}（${roundLabel(s.game, beat.round)}）is beyond the current ` +
@@ -404,9 +446,9 @@ server.registerTool(
         }
       }
       const replaced: number[] = [];
-      for (const { anchor, text } of comments) {
+      for (const { anchor, text } of staged) {
         if (s.comments.has(anchor)) replaced.push(anchor);
-        s.comments.set(anchor, text.trim());
+        s.comments.set(anchor, text);
       }
       const ids = comments.map((c) => `#${c.anchor}`).join(" ");
       const unlocked = beats.filter((b) => b.round <= s.focus);
@@ -416,9 +458,7 @@ server.registerTool(
         ? (last
           ? " — all anchors filled; mj_weave_commentary writes the document"
           : " — 開放局のアンカーは全て記入済み; mj_next_kyoku で次局へ進みターンを終える")
-        : ` / 未記入: ${open.slice(0, 16).join(" ")}${
-          open.length > 16 ? ` …(+${open.length - 16})` : ""
-        }`;
+        : ` / 未記入: ${elide(open)}`;
       return `saved ${ids}${
         replaced.length ? ` (replaced ${replaced.map((i) => `#${i}`).join(" ")})` : ""
       } — ${s.comments.size}/${unlocked.length}${rest}`;
@@ -459,15 +499,8 @@ server.registerTool(
       const seen = new Set<string>();
       for (const n of notes) {
         const label = `${roundLabel(s.game, round)} ${n.junme}巡 P${n.seat}`;
-        if (!here.some((x) => x.junme === n.junme && x.seat === n.seat)) {
-          const list = here.map((x) => `${x.junme}巡P${x.seat}`).join(" ");
-          throw new Error(
-            `no ★ line for P${n.seat} at ${n.junme}巡 — notes address ${
-              roundLabel(s.game, round)
-            }` + (list ? `（★: ${list}）` : "（この局に★行なし）"),
-          );
-        }
-        const key = `${round}:${n.junme}:${n.seat}`;
+        assertStarSite(here, n.junme, n.seat, `notes address ${roundLabel(s.game, round)}`);
+        const key = noteKey(round, n.junme, n.seat);
         if (seen.has(key)) throw new Error(`duplicate ★ note in this batch: ${label}`);
         seen.add(key);
         const t = n.text.trim();
@@ -527,6 +560,99 @@ server.registerTool(
         `★ ${roundLabel(s.game, uniqueRound(s.game, n.kyoku))} ${n.junme}巡 P${n.seat}: ${n.text}`
       );
       return [`${s.path} — ${draftLine(s)}`, ...list, ...notes, ...lockedTrailer(s)].join("\n");
+    }),
+);
+
+server.registerTool(
+  "mj_restore_state",
+  {
+    description:
+      "Restore the whole session draft after a SERVER RESTART / reconnect (Claude Desktop " +
+      "reconnect, crash, upgrade) — the session lives only in memory, so re-send ALL anchor " +
+      "comments, ALL ★ notes (kyoku-addressed here, unlike mj_add_note), and the focus cursor from " +
+      "your own conversation context in ONE bulk call. The log must be reopened with mj_open_log " +
+      "first (this tool does not take a path). Wholesale REPLACE of the draft (not a merge), atomic " +
+      "(one bad entry restores nothing) and idempotent (safe to re-call if a reply is lost). " +
+      "Comments on kyoku beyond the restored focus are an ERROR (a wrong focus would lock them); " +
+      "unfilled anchors on PAST kyoku only WARN — to re-fill a gap, restore again with focus at the " +
+      "earliest gap round and replay forward. NOT for normal editing — during the paced loop use " +
+      "mj_add_comment / mj_add_note.",
+    inputSchema: {
+      focus: KYOKU,
+      comments: z.array(z.object({
+        anchor: z.number().int().positive().describe("Anchor id #N"),
+        text: z.string().min(1).describe("Commentary for this anchor (plain text, may be multiline)"),
+      })).describe("Every anchor comment to restore, one entry per anchor (no cap; may be empty)"),
+      notes: z.array(z.object({
+        kyoku: KYOKU,
+        junme: z.number().int().nonnegative().describe("Go-around number of the ★ line"),
+        seat: z.number().int().min(0).max(3).describe("Acting seat 0-3 (P0-P3)"),
+        text: z.string().min(1).describe("Short one-liner for that ★ moment"),
+      })).optional().describe("Every ★-line note to restore, kyoku-addressed (no cap)"),
+    },
+  },
+  ({ focus, comments, notes }: RestoreArgs) =>
+    run(() => {
+      const s = current();
+      const g = s.game;
+      const f = uniqueRound(g, focus);
+      const beats = listAnchors(g);
+      const hadDraft = s.comments.size > 0 || s.notes.size > 0;
+
+      // validate the whole batch before touching the draft — comments first
+      const newComments = new Map<number, string>();
+      for (const { anchor, text, beat } of stageComments(beats, comments)) {
+        if (beat.round > f) {
+          throw new Error(
+            `anchor #${anchor}（${roundLabel(g, beat.round)}）is beyond the restored focus ` +
+              `${roundLabel(g, f)} — it would be permanently locked; check the focus selector`,
+          );
+        }
+        newComments.set(anchor, text);
+      }
+
+      // then notes → fresh Map (kyoku-addressed; ★ site must exist)
+      const newNotes = new Map<string, StarNote>();
+      const sites = listStarSites(g);
+      for (const n of notes ?? []) {
+        const r = uniqueRound(g, n.kyoku);
+        if (r > f) {
+          throw new Error(
+            `★ note ${roundLabel(g, r)} ${n.junme}巡 P${n.seat} is beyond the restored focus ` +
+              `${roundLabel(g, f)} — check the focus selector`,
+          );
+        }
+        assertStarSite(sites.filter((x) => x.round === r), n.junme, n.seat, roundLabel(g, r));
+        const key = noteKey(r, n.junme, n.seat);
+        if (newNotes.has(key)) {
+          throw new Error(`duplicate ★ note in this batch: ${roundLabel(g, r)} ${n.junme}巡 P${n.seat}`);
+        }
+        newNotes.set(key, { kyoku: String(r), junme: n.junme, seat: n.seat, text: n.text.trim() });
+      }
+
+      // apply atomically only after everything validates
+      s.comments = newComments;
+      s.notes = newNotes;
+      s.focus = f;
+      s.noteRound = f;
+
+      // counts come from draftLine on the next line — everything restored is
+      // ≤ focus, so its filled/total IS the restored draft
+      const out: string[] = [
+        `restored: focus ${roundLabel(g, f)} (round ${f})` +
+        `${hadDraft ? " (replaced existing draft)" : ""}`,
+        draftLine(s),
+      ];
+      const gaps = beats.filter((b) => b.round < f && !s.comments.has(b.id));
+      if (gaps.length > 0) {
+        out.push(
+          `warning: ${gaps.length} unfilled PAST anchors: ${elide(gaps.map(fmtBeat))}`,
+          "  past anchors are replace-only — they stay placeholders in the weave; to re-fill, " +
+            "restore again with focus at the earliest gap round and replay forward",
+        );
+      }
+      out.push("next: mj_render_kyoku で focus 局を精読 → mj_add_comment → mj_next_kyoku");
+      return out.join("\n");
     }),
 );
 
