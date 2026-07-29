@@ -38,7 +38,14 @@ Deno.test("outline: verbatim slices, full anchor coverage, no per-turn lines", a
 
   // the outline must instruct the drill-down workflow
   for (
-    const tool of ["mj_render_kyoku", "mj_get_snapshot", "mj_add_comment", "mj_next_kyoku"]
+    const tool of [
+      "mj_render_kyoku",
+      "mj_get_snapshot",
+      "mj_add_comment",
+      "mj_add_note",
+      "mj_draft_status",
+      "mj_weave_commentary",
+    ]
   ) {
     if (!outline.includes(tool)) throw new Error(`outline note missing ${tool}`);
   }

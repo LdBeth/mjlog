@@ -16,11 +16,24 @@ import { limitName, yakuName } from "./yaku.ts";
 export { standingsLine };
 
 export async function loadGame(path: string): Promise<Game> {
-  const game = parseGame(await loadXml(path));
+  return (await loadGameKeyed(path)).game;
+}
+
+/**
+ * Load a game together with its content key: the sha256 hex of the decoded
+ * XML text. The key identifies the GAME, not the file — the same log reaches
+ * the same key whether it arrives gzipped, plain, renamed, or via URL. The
+ * MCP server keys on-disk commentary drafts by it.
+ */
+export async function loadGameKeyed(path: string): Promise<{ game: Game; key: string }> {
+  const xml = await loadXml(path);
+  const game = parseGame(xml);
   if (game.rules.sanma) {
     throw new Error("三人打ち（サンマ）はこのバージョンでは未対応です。");
   }
-  return game;
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(xml));
+  const key = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  return { game, key };
 }
 
 function fullOpts(opts: Partial<RenderOptions>): RenderOptions {
@@ -72,14 +85,13 @@ export function renderKyoku(
 const OUTLINE_NOTE = `■アウトライン表示（この出力について）
 これは対局全体のアウトライン: 局ヘッダ・結果・解説ポイント一覧のみで、打牌の記録は含まない。
 対局を一度俯瞰するための表示で、結果（◆和了/◆流局・◆終局）も見える（ネタバレ制限ではない）。
-打牌単位の詳細は1局ずつ開放される。1チャットターンの流れ:
-・mj_render_kyoku で担当の1局を取得する（盤面スナップショットは既定でインライン表示。
-  牌表記などの凡例は mj_open_log 時に一度だけ付属する）
+推奨ペース: 1返信につき1局を精読・解説する（まとめ読みは解説の質を下げる）。
+・mj_render_kyoku で担当の1局を取得する（盤面スナップショットは既定でインライン表示）
 ・必要なら mj_get_snapshot にアンカーID（または局+巡目）を渡し、他の局面の盤面を確認する
   （リーチ宣言・聴牌が絡む局面は盤面を確認してから評価する）
 ・その局の各アンカーを mj_add_comment で保存する（1呼び出しで複数アンカーまとめて可。
-  ★行には mj_add_note で一言を添えられる。★注記はその局が進むと締め切られる）
-・mj_next_kyoku で次の局を開放し、このチャットターンを終える
+  ★行には mj_add_note で一言を添えられる。下書きはディスクに保存され、いつでも修正可）
+・mj_draft_status で記入漏れを確認しつつ次の局へ進む
 ・全局を書き終えたら mj_weave_commentary で完成稿をファイルに書き出す
 `;
 

@@ -58,7 +58,7 @@ fires at each wind boundary),
 tsumogiri/riichi marks, melds, live scores/placements, hands) at any anchor
 `#N` or kyoku+junme, and (3) **incremental commentary weaving**: the LLM saves
 anchor comments in batches of one or more per call (plus optional ★-line
-notes addressed by kyoku+junme+seat) into a server-side draft, and
+notes addressed by kyoku+junme+seat) into an on-disk draft, and
 `weave`/`mj_weave_commentary`
 splices the accumulated draft into a re-rendered transcript written to a
 file — the model never copies fact lines and the woven document never passes
@@ -67,29 +67,36 @@ through its context.
 Run: `cd mjrender && deno task render ../1.mjlog` (file args also accept
 tenhou.net replay/log URLs); CLI subcommands `outline`/`kyoku`/`anchors`/
 `snapshot`/`facts`/`weave` (the CLI weave takes a one-shot comments JSON);
-the stdio MCP server runs from the bundle
-(`deno bundle -o mcp.mjs src/mcp.ts && deno run --allow-read --allow-write
---allow-env=HOME --allow-net=tenhou.net mcp.mjs`) — **stateful and paced**:
-`mj_open_log` is the only tool taking a path, parsing the log into the session
-(reply carries the focus line + notation legend, once per process); the rest
-operate on the opened log and error until one is opened. A **focus cursor**
-hard-gates per-turn detail to the current kyoku (renders/snapshots/facts/draft
-writes; past rounds stay readable, comments there replace-only; ★ notes take
-no kyoku arg — they address the focus kyoku, which stays notable after
-mj_next_kyoku until the new focus is rendered; empty note text deletes); the
-gate is a pacing device, not a spoiler
-shield: mj_render_game's outline (headers, condensed results, anchor index —
-no per-turn lines) stays ungated for orientation. `mj_next_kyoku` advances the
-focus only when every focus-kyoku anchor is commented (wind boundaries demand
-the 中間総括 standings review first), replies with a ★-note hint when notes
-are sparse and instructs the LLM to END ITS TURN — one kyoku per chat turn.
-Server state is in-memory only (no autosave/disk); after an MCP restart the LLM
-reopens the log with mj_open_log and bulk-restores its whole draft (comments +
-★ notes + focus, kyoku-addressed) from its own context via `mj_restore_state`
-(wholesale replace, atomic, idempotent — comments beyond focus rejected, past
-gaps warned). mj_get_final_standings was removed in 0.5.0 (outline's ◆終局
-covers it; `finalStandings` stays in core for CLI/eval); 中間総括 insertion
-renumbers anchors vs 0.4.x; `mj_restore_state` added in 0.6.0.
+the stdio MCP server (v0.7.0) runs from source (`deno task mcp`) or from the
+bundle (`deno bundle -o mcp.mjs src/mcp.ts && deno run --allow-read
+--allow-write --allow-env=HOME --allow-net=tenhou.net mcp.mjs`, the
+distribution path) — **stateless** (2026-07-28 MCP spec: no server-held
+session): all 12 tools take `log` (local .mjlog/.xml path or tenhou.net URL)
+as their first param — that value IS the handle; there is no open/close, no
+cursor, nothing to restore. A parsed-game cache keyed by path+mtime is a
+transparent optimization, not protocol state. Nothing is gated: any round is
+renderable/commentable/replaceable at any time; ★ notes take a kyoku selector
+per note (empty text deletes). Pacing (one kyoku per reply: mj_outline once to
+orient → per reply mj_render_kyoku → mj_get_snapshot at riichi/tenpai →
+mj_add_comment/mj_add_note → mj_draft_status) is ADVISORY, carried by tool
+descriptions, the outline's ■アウトライン表示 note, and mj_draft_status hints
+(incl. a ★-coverage HINT). Drafts persist on DISK at
+`$HOME/.mjrender/drafts/<key>.json`, key = sha256 of the log's decoded XML
+(so gzipped .mjlog / plain .xml / renamed copy / tenhou.net URL of one game
+share a draft); every mj_add_comment/mj_add_note writes immediately via
+tmp+rename, so restarts need no recovery step. Draft-touching handlers are
+FIFO-serialized in-process; two server processes on one log are last-write-wins
+at whole-file granularity (accepted for a single-user desktop tool). The draft
+file's shape (`{version, log, savedAt, anchors:[{anchor,text}],
+notes:[{kyoku,junme,seat,text}]}`) is valid CLI weave input verbatim
+(`deno task render weave ~/.mjrender/drafts/<key>.json --out x.txt ../1.xml`).
+Version notes: 0.7.0 is the stateless redesign — mj_open_log/mj_next_kyoku/
+mj_restore_state removed, mj_render_game → mj_outline (now also reports draft
+coverage and always emits the notation legend), mj_add_note gained a per-note
+kyoku, mj_clear_draft added, drafts moved to disk; NO anchor renumbering vs
+0.6.0. mj_get_final_standings was removed in 0.5.0 (outline's ◆終局 covers it;
+`finalStandings` stays in core for CLI/eval); 中間総括 insertion renumbers
+anchors vs 0.4.x.
 `deno task eval` emits ground-truth Q/A JSONL; `deno task bundle` builds the
 `mjrender.mcpb` Claude Desktop extension (regenerating `mcp.mjs`, the bundled
 compile input, from `src/mcp.ts` first).
@@ -97,15 +104,13 @@ Tests: `deno task test` (golden transcript test — regenerate deliberately with
 `test/golden_update.ts` after output changes). See `mjrender/README.md`. Uses
 Deno, not Node/npm.
 
-**MCP SDK import extensions** (`src/mcp.ts`): the
-`@modelcontextprotocol/sdk/server/*` imports are deliberately extensionless —
-only that form makes `deno check` resolve the SDK's real types (with `.js`
-the SDK silently typechecks as `any`). The trade-off: the extensionless form
-does not resolve at runtime (the SDK's npm export map only has `.js`
-entries), so `deno run src/mcp.ts` fails at import — there is no `mcp` task;
-always run the server via the bundle (`deno bundle -o mcp.mjs src/mcp.ts`,
-which resolves either form; the MCP test also bundles fresh before
-spawning).
+**MCP SDK v2** (`src/mcp.ts`): `@modelcontextprotocol/server` 2.0.0 + zod 4;
+entry is `serveStdio(buildServer)`, which serves the new protocol era and
+still answers legacy 2025-era `initialize` clients (Claude Desktop) from the
+same factory. Its export map carries both types and runtime entries, so plain
+imports typecheck under `deno check` AND run — `deno run src/mcp.ts` /
+`deno task mcp` work directly. The bundle (`deno bundle -o mcp.mjs
+src/mcp.ts`) remains the `deno compile` input for the `.mcpb`.
 
 ## Maude Specification (`mahjong.maude`)
 

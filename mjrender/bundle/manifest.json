@@ -2,9 +2,9 @@
   "manifest_version": "0.2",
   "name": "mjrender",
   "display_name": "mjrender",
-  "version": "0.6.0",
-  "description": "Deterministic game-state oracle over Tenhou mjlog files: paced commentary transcript, board snapshots, structured fact queries, and incremental commentary weaving.",
-  "long_description": "Stateful, PACED session over a Tenhou mahjong log: mj_open_log parses the log once (absolute path to a .mjlog/.xml file, or a tenhou.net replay/log URL) and every other tool operates on it. A focus cursor gates per-turn reading to one kyoku at a time — the intended loop is mj_render_kyoku on the focus round, mj_get_snapshot at riichi/tenpai moments, mj_add_comment / mj_add_note to fill that round's anchors, then mj_next_kyoku to unlock the next round and end the chat turn. Future rounds are locked for renders/snapshots/per-kyoku facts (a pacing device, not a spoiler shield: the ungated mj_render_game outline shows every result). Renders an LLM-ready Japanese commentary transcript with computed metrics (shanten/ukeire/waits/dora/danger evidence) and 〔解説ポイント#N〕 anchors, including a 中間総括 checkpoint at each wind boundary. Commentary is saved server-side (mj_add_comment; mj_add_note for ★ lines, empty text deletes; mj_draft_status for progress); mj_weave_commentary splices the accumulated draft into a re-rendered transcript and writes the finished document to a file, so the model never copies fact lines.",
+  "version": "0.7.0",
+  "description": "Deterministic game-state oracle over Tenhou mjlog files: stateless commentary transcript, board snapshots, structured fact queries, and disk-backed commentary weaving.",
+  "long_description": "STATELESS interface over a Tenhou mahjong log (2026-07-28 MCP spec style): every tool takes `log` (absolute path to a .mjlog/.xml file, or a tenhou.net replay/log URL) — the same value each call; it is the handle that keys the on-disk commentary draft (~/.mjrender/drafts/<sha256-of-xml>.json, shared across gzipped/plain/URL forms of the same game and across server restarts, no restore step). Renders an LLM-ready Japanese commentary transcript with computed metrics (shanten/ukeire/waits/dora/danger evidence) and 〔解説ポイント#N〕 anchors, including a 中間総括 checkpoint at each wind boundary. Pacing is advisory, not enforced: the recommended loop is mj_outline once to orient, then one kyoku per reply — mj_render_kyoku, mj_get_snapshot at riichi/tenpai moments, mj_add_comment / mj_add_note (empty text deletes) to fill that round's anchors, mj_draft_status for coverage. mj_weave_commentary splices the disk draft into a re-rendered transcript and writes the finished document to a file, so the model never copies fact lines; mj_clear_draft starts over.",
   "author": {
     "name": "LdBeth"
   },
@@ -18,64 +18,63 @@
   },
   "tools": [
     {
-      "name": "mj_open_log",
-      "description": "Parse a mjlog (path or tenhou.net URL) into the session; sets focus to kyoku 0; all other tools use it"
-    },
-    {
-      "name": "mj_render_game",
-      "description": "Ungated game outline: per-kyoku headers, results, and anchor index — read once at open to orient"
+      "name": "mj_outline",
+      "description": "Whole-game outline: notation legend, per-kyoku headers, results, anchor index, and draft coverage — read once to orient"
     },
     {
       "name": "mj_render_kyoku",
-      "description": "One round in full per-turn detail (inline snapshots), gated to the focus cursor"
+      "description": "One round in full per-turn detail (inline snapshots) — recommended one kyoku per reply"
     },
     {
       "name": "mj_list_anchors",
-      "description": "Unlocked commentary anchors up to the focus kyoku (#id, kind, kyoku, junme, seat, topic)"
+      "description": "Full commentary checklist: every anchor with ✓/・ filled marks from the on-disk draft"
     },
     {
       "name": "mj_get_snapshot",
-      "description": "Full board state at an anchor or kyoku+junme, gated to the focus cursor"
+      "description": "Full board state at an anchor or kyoku+junme"
     },
     {
       "name": "mj_add_comment",
-      "description": "Save commentary for the focus kyoku's anchors (past = replace-only, future = locked)"
+      "description": "Save anchor commentary (any round, replace allowed) into the on-disk draft"
     },
     {
       "name": "mj_add_note",
-      "description": "Save/delete ★-line one-liners for the focus kyoku (empty text deletes)"
+      "description": "Save/delete ★-line one-liners, addressed by kyoku+junme+seat (empty text deletes)"
     },
     {
       "name": "mj_draft_status",
-      "description": "Draft checklist for unlocked anchors and saved ★ notes"
+      "description": "Draft coverage checklist, saved ★ notes, and the draft file's path"
     },
     {
-      "name": "mj_next_kyoku",
-      "description": "Advance the focus cursor to the next kyoku (requires the current one fully commented); end the chat turn after"
-    },
-    {
-      "name": "mj_restore_state",
-      "description": "After a server restart, bulk-restore the whole draft (comments, ★ notes, focus) from context in one call"
+      "name": "mj_clear_draft",
+      "description": "Delete the on-disk draft for a log"
     },
     {
       "name": "mj_weave_commentary",
-      "description": "Weave the accumulated draft into the transcript, written to a file"
+      "description": "Weave the on-disk draft into the transcript, written to a file"
     },
     {
       "name": "mj_get_kyoku_start",
-      "description": "Round start conditions, gated to the focus cursor (JSON)"
+      "description": "Round start conditions (JSON)"
     },
     {
       "name": "mj_get_kyoku_result",
-      "description": "Round outcome(s), gated to the focus cursor (JSON)"
+      "description": "Round outcome(s) (JSON)"
     },
     {
       "name": "mj_get_riichi_declarations",
-      "description": "Riichi declarations with waits, up to the focus kyoku (JSON)"
+      "description": "Riichi declarations with waits, one round or the whole game (JSON)"
     }
   ],
-  "keywords": ["mahjong", "tenhou", "mjlog", "replay"],
+  "keywords": [
+    "mahjong",
+    "tenhou",
+    "mjlog",
+    "replay"
+  ],
   "compatibility": {
-    "platforms": ["darwin"]
+    "platforms": [
+      "darwin"
+    ]
   }
 }
