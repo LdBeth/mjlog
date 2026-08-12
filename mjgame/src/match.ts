@@ -160,7 +160,13 @@ export function runMatchSync(policies: SyncPolicy[], opts: MatchOptions): MatchR
         break;
       }
       const req = step.value;
-      const obs = observe(table!, req.seat, req.legal, req.k === "turn" ? req.drawn : null);
+      const obs = observe(
+        table!,
+        req.seat,
+        req.legal,
+        req.k === "turn" ? req.drawn : null,
+        opts.scorer,
+      );
       reply = policies[req.seat].decide(obs);
     }
   }
@@ -187,7 +193,13 @@ export async function runMatch(policies: Policy[], opts: MatchOptions): Promise<
         break;
       }
       const req = step.value;
-      const obs = observe(table!, req.seat, req.legal, req.k === "turn" ? req.drawn : null);
+      const obs = observe(
+        table!,
+        req.seat,
+        req.legal,
+        req.k === "turn" ? req.drawn : null,
+        opts.scorer,
+      );
       reply = await policies[req.seat].decide(obs);
     }
   }

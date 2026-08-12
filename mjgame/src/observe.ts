@@ -12,12 +12,26 @@ import { countsFromTiles, shanten, ukeireTypes } from "mjrender/shanten.ts";
 import { tileType } from "mjrender/tiles.ts";
 import type { Furiten } from "./table.ts";
 import { Table } from "./table.ts";
+import type { WinOracle } from "./legal.ts";
+import { ANY_WIN } from "./legal.ts";
+import { analyze } from "./hand.ts";
 import type { Action, Seat } from "./types.ts";
 import { relSeat, SEATS } from "./types.ts";
 
 export interface Ukeire {
   type: number;
   live: number; // copies not visible to this seat
+}
+
+/**
+ * What letting a particular tile go would leave behind. Precomputed here rather
+ * than in each policy because the katagari half needs the win oracle, which is
+ * the referee's to hand out — and because every policy wants the shanten anyway.
+ */
+export interface DiscardInfo {
+  shanten: number;
+  /** 片和了り: the resulting tenpai has waits that score and waits that do not. */
+  katagari: boolean;
 }
 
 export interface Observation {
@@ -44,9 +58,15 @@ export interface Observation {
 
   shanten: number;
   waits: number[];
+  /** Waits that would actually score on a ron (出和了可能形). */
+  ronnable: number[];
+  /** 片和了り right now: some waits carry a yaku and some do not. */
+  katagari: boolean;
   ukeire: Ukeire[];
   doraCount: number;
   furiten: Furiten;
+  /** Keyed by the tile of each legal discard. Empty when it is not our turn. */
+  discardInfo: Map<Tile, DiscardInfo>;
 
   /** Per candidate discard *type*, computed lazily-ish on construction. */
   danger: Map<number, DangerAssessment>;
@@ -55,7 +75,49 @@ export interface Observation {
   legal: Action[];
 }
 
-export function observe(t: Table, seat: Seat, legal: Action[], drawn: Tile | null): Observation {
+/**
+ * Per legal discard: the shanten it leaves, and whether that shape is 片和了り.
+ *
+ * The oracle can only judge the hand the table is actually holding, so each
+ * candidate is evaluated by lifting the tile out and putting it straight back.
+ * `analyze` is only worth running on shapes that reach tenpai, which is what
+ * keeps this affordable — most turns it runs zero times.
+ */
+function discardInfoFor(
+  t: Table,
+  seat: Seat,
+  legal: Action[],
+  oracle: WinOracle,
+): Map<Tile, DiscardInfo> {
+  const out = new Map<Tile, DiscardInfo>();
+  const hand = t.hands[seat];
+  const open = t.melds[seat].length;
+  const closed = t.isMenzen(seat);
+
+  for (const a of legal) {
+    if (a.t !== "discard" || out.has(a.tile)) continue;
+    const i = hand.lastIndexOf(a.tile);
+    if (i < 0) continue;
+
+    const [lifted] = hand.splice(i, 1);
+    try {
+      const sh = shanten(countsFromTiles(hand), open, closed);
+      const katagari = sh <= 0 ? analyze(t, seat, null, oracle).katagari : false;
+      out.set(a.tile, { shanten: sh, katagari });
+    } finally {
+      hand.splice(i, 0, lifted);
+    }
+  }
+  return out;
+}
+
+export function observe(
+  t: Table,
+  seat: Seat,
+  legal: Action[],
+  drawn: Tile | null,
+  oracle: WinOracle = ANY_WIN,
+): Observation {
   const rel = <T>(pick: (s: Seat) => T): T[] => SEATS.map((s) => pick(((seat + s) % 4) as Seat));
 
   const hand = [...t.hands[seat]];
@@ -85,6 +147,7 @@ export function observe(t: Table, seat: Seat, legal: Action[], drawn: Tile | nul
     }
   }
 
+  const here = analyze(t, seat, drawn, oracle);
   const vio = SEATS.map((s) => t.ledger.filter((v) => v.seat === ((seat + s) % 4)).length);
 
   return {
@@ -107,9 +170,12 @@ export function observe(t: Table, seat: Seat, legal: Action[], drawn: Tile | nul
     akaIds: t.cfg.akaIds,
     shanten: sh,
     waits: waitTypes,
+    ronnable: here.ronnable,
+    katagari: here.katagari,
     ukeire,
     doraCount: t.countDora(seat),
     furiten: { ...t.furiten[seat] },
+    discardInfo: discardInfoFor(t, seat, legal, oracle),
     danger,
     violations: vio,
     legal,
