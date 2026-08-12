@@ -208,7 +208,7 @@ const KYOKU = z.string().describe(
 const readOnly = { readOnlyHint: true, idempotentHint: true };
 
 function buildServer(): McpServer {
-  const server = new McpServer({ name: "mjrender", version: "0.7.0" });
+  const server = new McpServer({ name: "mjrender", version: "0.8.0" });
 
   server.registerTool(
     "mj_outline",

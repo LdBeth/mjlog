@@ -90,7 +90,14 @@ at whole-file granularity (accepted for a single-user desktop tool). The draft
 file's shape (`{version, log, savedAt, anchors:[{anchor,text}],
 notes:[{kyoku,junme,seat,text}]}`) is valid CLI weave input verbatim
 (`deno task render weave ~/.mjrender/drafts/<key>.json --out x.txt ../1.xml`).
-Version notes: 0.7.0 is the stateless redesign — mj_open_log/mj_next_kyoku/
+Version notes: 0.8.0 extends the danger assessor with furo (open-hand) threat
+reading — `P#副露N` evidence with 染め手模様/トイトイ模様/役牌副露/ドラ(副露内)
+reads, activated at 2 open melds or 1 yakuhai triplet, damped one level while
+tenpai is only suspected — and wait-shape enumeration: a `当たり形:` note lists
+which of リャンメン/カンチャン/ペンチャン/シャンポン/タンキ can still hit the
+tile after suji/kabe/visible-count kills (なし ⇒ provably safe, level 安全);
+new 押し引き anchors fire vs open hands, so anchor ids SHIFT vs 0.7.0 drafts
+(no tool-signature changes). 0.7.0 is the stateless redesign — mj_open_log/mj_next_kyoku/
 mj_restore_state removed, mj_render_game → mj_outline (now also reports draft
 coverage and always emits the notation legend), mj_add_note gained a per-note
 kyoku, mj_clear_draft added, drafts moved to disk; NO anchor renumbering vs

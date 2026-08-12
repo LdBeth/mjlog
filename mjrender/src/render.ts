@@ -117,9 +117,11 @@ export function formatInstruction(mode: "fill" | "final" = "fill"): string {
     "・「┗ 比較:」=★の打牌の代替候補との比較（◎=実際の打牌。牌種単位、赤は区別しない。向聴3以上の手では省略）",
     "・「┗ 役読み:」=早い2副露（6巡以内）/3副露時点の役の見通し（確定=副露で確定済 / 可=阻害なし /",
     "  後付け可=手内の役牌対子 / 見込み=必要ブロックの過半が実現済。役なし懸念=現状確定役なし）",
-    "・危険度低/中/高=リーチへの放銃危険度の目安。続く〔…〕が根拠: スジ/半スジ/無スジ、",
-    "  ノーチャンス/ワンチャンス=壁（両面待ちに必要な牌が残0/1枚）、生牌/場にn枚=見えている枚数、",
+    "・危険度低/中/高=リーチおよび警戒すべき副露（副露N=その相手の鳴き数）への放銃危険度の目安。",
+    "  続く〔…〕が根拠: スジ/半スジ/無スジ、ノーチャンス/ワンチャンス=壁（両面待ちに必要な牌が残0/1枚）、",
+    "  当たり形:…=壁・スジ・見え枚数から残る待ち形の列挙（なし=放銃不可能）、生牌/場にn枚=見えている枚数、",
     "  役牌（場風/自風/三元）/客風=字牌の種別。「← 押し」=脅威に対する押し",
+    "・副露の手役読み: 染め手模様(色)/トイトイ模様/役牌副露(牌)/ドラN(副露内)=鳴かれた牌から確定する材料",
     "・点況=局開始時の順位と1つ上の順位との点差（▲）、「残り最短N局」=連荘なしと仮定した残り局数",
     "・「逆転条件」=オーラス・延長戦でトップに立つ最低の和了（本場・供託込み。ロン=他家から/直撃=トップから/ツモ）",
     "",
@@ -701,13 +703,17 @@ function renderRound(
     const danger = st.riichiActive[who] ? null : assessDanger(
       tileType(tile),
       st.threats(who),
+      st.furoThreats(who),
       st.publicVisible,
       countsFromTiles(st.hands[who]),
     );
     const evidence = (d: DangerAssessment): string =>
       `〔${
-        d.details.map((t) => `P${t.seat}リーチ${st.riichiJunme[t.seat]}巡・${t.notes.join("・")}`)
-          .join("／")
+        d.details.map((t) =>
+          t.kind === "furo"
+            ? `P${t.seat}副露${t.openMeldCount}・${t.notes.join("・")}`
+            : `P${t.seat}リーチ${st.riichiJunme[t.seat]}巡・${t.notes.join("・")}`
+        ).join("／")
       }〕`;
 
     // apply discard to state
@@ -812,9 +818,14 @@ function renderRound(
       const stTxt = st.restShanten[who] <= 0 ? "聴牌" : `向聴${st.restShanten[who]}`;
       const adv = advanced ? `・${tileGlyph(drawn, aka)}ツモで${before}→${after}前進` : "";
       out.push(handLine(who, `${danger!.level}${evidence(danger!)} 自分${stTxt}${adv} ← 押し`));
+      // name the threat the level actually came from: a riichi if any riichi
+      // detail is 中/高, otherwise the open hand(s) that raised the flag.
+      const vsRiichi = danger!.details.some(
+        (d) => d.kind === "riichi" && (d.level === "危険度中" || d.level === "危険度高"),
+      );
       pushAnchor(
         "押し引き",
-        `${P(who)}の押し引き（自分の手牌価値 vs リーチの脅威）`,
+        `${P(who)}の押し引き（自分の手牌価値 vs ${vsRiichi ? "リーチ" : "副露"}の脅威）`,
         eventIndex,
         who,
       );

@@ -2,7 +2,7 @@
 // tile notation, and a full end-to-end render of the bundled sample.
 
 import { countsFromTiles, shanten, ukeireTypes } from "../src/shanten.ts";
-import { assessDanger } from "../src/danger.ts";
+import { assessDanger, type FuroThreat } from "../src/danger.ts";
 import { decodeMeld } from "../src/meld.ts";
 import { doraFromIndicatorType, isAka, tileType, typeGlyph } from "../src/tiles.ts";
 import { render } from "../src/core.ts";
@@ -152,7 +152,7 @@ Deno.test("danger: yakuhai honors read hotter than guest honors", () => {
     return v;
   };
   const level = (type: number, visible: number[], safe: number[] = []) =>
-    assessDanger(type, threat(safe), visible)!.level;
+    assessDanger(type, threat(safe), [], visible)!.level;
 
   // 白 (type 31) is a dragon = yakuhai: fully live ⇒ 危険度高
   eq(level(31, seen(31, 0)), "危険度高", "live dragon = high");
@@ -171,28 +171,147 @@ Deno.test("danger: evidence notes carry suji, kabe/chance, and live counts", () 
     { seat: 1, safeTypes: new Set<number>(safe), valueHonors: new Set<number>([31]) },
   ];
   const notes = (type: number, visible: number[], safe: number[] = [], own?: number[]) =>
-    assessDanger(type, threat(safe), visible, own)!.details[0].notes;
+    assessDanger(type, threat(safe), [], visible, own)!.details[0].notes;
   const vis = (pairs: Array<[number, number]>) => {
     const v = new Array<number>(34).fill(0);
     for (const [t, n] of pairs) v[t] = n;
     return v;
   };
 
-  // 5m (type 4) with 2m and 8m safe = double suji
-  eq(notes(4, vis([]), [1, 7]), ["スジ", "生牌"], "full suji + fresh tile");
+  // 5m (type 4) with 2m and 8m safe = double suji; both ryanmen are furiten-dead,
+  // so only the closed shapes remain on the 当たり形 list
+  eq(
+    notes(4, vis([]), [1, 7]),
+    ["スジ", "当たり形:カンチャン・シャンポン・タンキ", "生牌"],
+    "full suji + fresh tile",
+  );
   // 5m, all four 4m visible and three 6m visible: lower ryanmen dead, upper has
   // one bridging copy left ⇒ ワンチャンス
-  eq(notes(4, vis([[3, 4], [5, 3]])), ["無スジ", "ワンチャンス", "生牌"], "one-chance via kabe");
+  eq(
+    notes(4, vis([[3, 4], [5, 3]])),
+    ["無スジ", "ワンチャンス", "当たり形:リャンメン・シャンポン・タンキ", "生牌"],
+    "one-chance via kabe",
+  );
   // both bridging ranks dead on both sides ⇒ ノーチャンス
-  eq(notes(4, vis([[3, 4], [6, 4]])), ["無スジ", "ノーチャンス", "生牌"], "no-chance");
+  eq(
+    notes(4, vis([[3, 4], [6, 4]])),
+    ["無スジ", "ノーチャンス", "当たり形:シャンポン・タンキ", "生牌"],
+    "no-chance",
+  );
   // the discarder's own tiles count toward the wall they can see
   eq(
     notes(4, vis([[3, 2], [6, 4]]), [], vis([[3, 2]])),
-    ["無スジ", "ノーチャンス", "生牌"],
+    ["無スジ", "ノーチャンス", "当たり形:シャンポン・タンキ", "生牌"],
     "own hand completes the kabe",
   );
   // yakuhai honor: kind + live-count evidence
-  eq(notes(31, vis([[31, 1]])), ["役牌", "場に1枚"], "dragon with one out");
+  eq(
+    notes(31, vis([[31, 1]])),
+    ["役牌", "当たり形:シャンポン・タンキ", "場に1枚"],
+    "dragon with one out",
+  );
+});
+
+Deno.test("danger: wait-shape enumeration narrows the list and caps the level", () => {
+  const threat = (safe: number[] = []) => [
+    { seat: 1, safeTypes: new Set<number>(safe), valueHonors: new Set<number>([31]) },
+  ];
+  const vis = (pairs: Array<[number, number]>) => {
+    const v = new Array<number>(34).fill(0);
+    for (const [t, n] of pairs) v[t] = n;
+    return v;
+  };
+  const one = (type: number, visible: number[], safe: number[] = [], own?: number[]) =>
+    assessDanger(type, threat(safe), [], visible, own)!;
+  const shapes = (d: ReturnType<typeof one>) =>
+    d.details[0].notes.find((n) => n.startsWith("当たり形:"));
+
+  // Suji trap: 5m behind 2m/8m is only 危険度低, but a kanchan/shanpon/tanki can
+  // still be sitting on it — the level says "low", the evidence says "not safe".
+  const suji = one(4, vis([]), [1, 7]);
+  eq(suji.level, "危険度低", "double suji reads low");
+  eq(shapes(suji), "当たり形:カンチャン・シャンポン・タンキ", "suji kills only the ryanmen");
+
+  // Kabe: with all four 4m out, the 4m5m6m kanchan and the lower ryanmen both die.
+  eq(shapes(one(4, vis([[3, 4]]))), "当たり形:リャンメン・シャンポン・タンキ", "kanchan killed");
+
+  // Three copies of 5m accounted for ⇒ no shanpon left (a pair is impossible).
+  eq(
+    shapes(one(4, vis([[4, 2]]), [], vis([[4, 1]]))),
+    "当たり形:リャンメン・カンチャン・タンキ",
+    "shanpon killed by the third copy",
+  );
+
+  // Every shape dead (both bridging ranks walled, the last 5m in our own hand)
+  // ⇒ the tile literally cannot deal in.
+  const dead = one(4, vis([[3, 4], [5, 4], [4, 3]]), [], vis([[4, 1]]));
+  eq(shapes(dead), "当たり形:なし", "no surviving shape");
+  eq(dead.level, "安全", "unhittable tile is safe, but still reported as evidence");
+  eq(dead.seats, [1], "the seat stays on the list (not a genbutsu skip)");
+
+  // Honors: shanpon → tanki → nothing as the copies come out.
+  eq(
+    shapes(one(31, vis([[31, 2]]))),
+    "当たり形:シャンポン・タンキ",
+    "two out: pair still possible",
+  );
+  const tanki = one(31, vis([[31, 3]]));
+  eq(shapes(tanki), "当たり形:タンキ", "three out: tanki only");
+  eq(tanki.level, "危険度低", "tanki-only honor caps low");
+  const gone = one(31, vis([[31, 4]]));
+  eq(shapes(gone), "当たり形:なし", "all four out");
+  eq(gone.level, "安全", "no copy left to pair or wait with");
+});
+
+Deno.test("danger: furo threats damp for suspicion and lift for visible value", () => {
+  const furo = (o: Partial<FuroThreat> = {}): FuroThreat[] => [{
+    seat: 2,
+    safeTypes: new Set<number>(),
+    valueHonors: new Set<number>([31]),
+    openMeldCount: 2,
+    honitsuSuit: null,
+    toitoi: false,
+    yakuhaiMelds: new Set<number>(),
+    meldDora: 0,
+    ...o,
+  }];
+  const vis = new Array<number>(34).fill(0);
+  // 5m: 無スジ middle tile — the riichi-equivalent reading is 危険度高.
+  const at = (o: Partial<FuroThreat> = {}) => assessDanger(4, [], furo(o), vis)!;
+
+  eq(assessDanger(4, [], [], vis), null, "no threats at all ⇒ nothing to say");
+  eq(assessDanger(4, [], furo({ safeTypes: new Set<number>([4]) }), vis)!.seats, [], "genbutsu");
+
+  const plain = at();
+  eq(plain.level, "危険度中", "2 melds: tenpai only suspected ⇒ one step below リーチ");
+  eq([plain.details[0].kind, plain.details[0].openMeldCount], ["furo", 2], "furo discriminator");
+  eq(at({ openMeldCount: 3 }).level, "危険度高", "3 melds: no damping");
+
+  const honitsu = at({ honitsuSuit: "m" });
+  eq(honitsu.level, "危険度高", "flush read lifts its own suit back up");
+  eq(honitsu.details[0].notes.at(-1), "染め手模様(萬子)", "flush note");
+  eq(at({ honitsuSuit: "p" }).level, "危険度中", "flush read in another suit does not lift");
+  // honors are hot against a flush hand regardless of which suit it collects
+  eq(assessDanger(31, [], furo({ honitsuSuit: "p" }), vis)!.level, "危険度高", "honors vs 染め手");
+
+  const value = at({ yakuhaiMelds: new Set<number>([31]), meldDora: 2, toitoi: true });
+  eq(value.level, "危険度高", "yakuhai + 2 visible dora lifts back up");
+  eq(
+    value.details[0].notes.slice(-3),
+    ["トイトイ模様", "役牌副露(白)", "ドラ2(副露内)"],
+    "meld-read evidence trails the standard notes",
+  );
+
+  // the shape cap survives every adjustment: an unhittable tile stays 安全
+  const own = new Array<number>(34).fill(0);
+  own[4] = 1;
+  const walled = new Array<number>(34).fill(0);
+  walled[3] = 4, walled[5] = 4, walled[4] = 3;
+  eq(
+    assessDanger(4, [], furo({ honitsuSuit: "m", openMeldCount: 3 }), walled, own)!.level,
+    "安全",
+    "no surviving wait shape outranks the flush upgrade",
+  );
 });
 
 Deno.test("kan turn integrates into one line; ankan dora before rinshan draw", () => {

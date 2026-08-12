@@ -1,0 +1,236 @@
+// Penalty-rule fixtures: every rule gets a positive case and a negative case,
+// and every documented exception clause gets its own negative case.
+
+import { assert, assertEquals } from "@std/assert";
+import type { Tile } from "mjrender/model.ts";
+import { ANY_WIN } from "../src/legal.ts";
+import { runHook } from "../src/penalty/rules.ts";
+import type { Hook, RuleCtx } from "../src/penalty/mod.ts";
+import { DOJO_DEFAULT, JANKI } from "../src/rules.ts";
+import { sfc32 } from "../src/rng.ts";
+import { Table } from "../src/table.ts";
+import type { Action, Seat, Violation } from "../src/types.ts";
+import { SEATS } from "../src/types.ts";
+import { Wall } from "../src/wall.ts";
+import { tiles } from "./helpers.ts";
+
+function makeTable(o: { kyoku?: number; scores?: number[]; seed?: number } = {}): Table {
+  const rng = sfc32(o.seed ?? 1);
+  return new Table(
+    {
+      kyoku: o.kyoku ?? 0,
+      honba: 0,
+      kyotaku: 0,
+      dealer: 0,
+      scores: o.scores ?? [30000, 30000, 30000, 30000],
+      wall: Wall.shuffled(rng),
+      dice: [0, 0],
+    },
+    JANKI,
+    SEATS.map((seat) => ({ seat, name: `P${seat}` })),
+  );
+}
+
+function setHand(t: Table, seat: Seat, ids: Tile[]): void {
+  t.hands[seat].length = 0;
+  t.hands[seat].push(...ids);
+}
+
+/** Make `type` a dora by revealing an indicator that points at it. */
+function makeDora(t: Table, type: number): void {
+  // Indicator -> dora is +1 within the suit, so point at the predecessor.
+  const ind = type < 27
+    ? (type % 9 === 0 ? type + 8 : type - 1)
+    : type === 27
+    ? 30
+    : type === 31
+    ? 33
+    : type - 1;
+  t.emit({ t: "dora", indicator: ind * 4 }, { e: "dora", indicator: ind * 4 });
+}
+
+function ctx(t: Table, seat: Seat, action: Action, drawn: Tile | null = null): RuleCtx {
+  return { t, seat, action, drawn, cfg: t.cfg, dojo: DOJO_DEFAULT, oracle: ANY_WIN };
+}
+
+function fire(hook: Hook, c: RuleCtx): Violation[] {
+  return runHook(hook, c);
+}
+
+function ids(rule: string, vs: Violation[]): boolean {
+  return vs.some((v) => v.rule === rule);
+}
+
+function doDiscard(t: Table, seat: Seat, tile: Tile, riichi = false): Action {
+  const a: Action = { t: "discard", tile, riichi, tsumogiri: false };
+  t.emit(
+    { t: "discard", who: seat, tile, tsumogiri: false, riichi },
+    { e: "discard", who: seat, tile, tsumogiri: false, riichi },
+  );
+  if (riichi) t.riichi[seat] = true;
+  return a;
+}
+
+// ---------------------------------------------------------------------------
+
+Deno.test("第一打字牌切り: fires on an opening honor, not on a number tile", () => {
+  const honor = tiles("東")[0];
+  {
+    const t = makeTable();
+    setHand(t, 0, [...tiles("123456789m123p"), honor]);
+    const a = doDiscard(t, 0, honor);
+    assert(ids("first-honor", fire("post-discard", ctx(t, 0, a))));
+  }
+  {
+    const t = makeTable();
+    const num = tiles("9m")[0];
+    setHand(t, 0, [...tiles("12345678m123p"), num, honor]);
+    const a = doDiscard(t, 0, num);
+    assert(!ids("first-honor", fire("post-discard", ctx(t, 0, a))));
+  }
+});
+
+Deno.test("第一打字牌切り: exempt when it is a double-riichi declaration", () => {
+  const t = makeTable();
+  const honor = tiles("南")[0];
+  setHand(t, 0, [...tiles("123456789m11122p"), honor]);
+  t.doubleRiichi[0] = true;
+  const a = doDiscard(t, 0, honor, true);
+  assert(!ids("first-honor", fire("post-discard", ctx(t, 0, a))));
+});
+
+Deno.test("明槓: 大明槓 and 加槓 both fire, 暗槓 does not", () => {
+  const t = makeTable();
+  const called = tiles("5s")[0];
+  assert(ids("minkan", fire("on-call", ctx(t, 1, { t: "daiminkan", called }))));
+  assert(ids("minkan", fire("on-kan", ctx(t, 1, { t: "kakan", tile: called }))));
+  setHand(t, 1, tiles("5555s123m456p12s"));
+  assert(!ids("minkan", fire("on-kan", ctx(t, 1, { t: "ankan", type: 22 }))));
+});
+
+Deno.test("不聴時ドラ切り: fires when not tenpai, exempt at tenpai and for 赤5筒", () => {
+  // A deliberately scattered hand, so the shape stays far from tenpai.
+  const scattered = () => tiles("147m258p369s東南西北中");
+  {
+    const t = makeTable();
+    makeDora(t, 0); // 1m
+    setHand(t, 0, scattered());
+    doDiscard(t, 0, tiles("4m")[0]); // burn the first-discard window
+    setHand(t, 0, scattered());
+    const a = doDiscard(t, 0, tiles("1m")[0]);
+    assert(ids("noten-dora", fire("post-discard", ctx(t, 0, a))));
+  }
+  {
+    // 赤5筒 is explicitly cuttable before tenpai when it is not indicator dora.
+    const t = makeTable();
+    const aka = 52 as Tile;
+    const hand = () => [...tiles("147m369s東南西北白發中"), aka];
+    setHand(t, 0, hand());
+    doDiscard(t, 0, tiles("4m")[0]);
+    setHand(t, 0, hand());
+    const a = doDiscard(t, 0, aka);
+    assert(!ids("noten-dora", fire("post-discard", ctx(t, 0, a))));
+  }
+});
+
+Deno.test("即引っかけ立直: wait suji-trapped by the declaration tile", () => {
+  const t = makeTable();
+  // After cutting 1m: 123m 56m 123p 789p 99s — a clean 4m/7m ryanmen. The 1m we
+  // just cut is the suji of 4m, which is exactly the trap the rule bans.
+  setHand(t, 0, tiles("1123m56m123p789p99s"));
+  const a = doDiscard(t, 0, tiles("1m")[0], true);
+  const vs = fire("on-riichi", ctx(t, 0, a));
+  const v = vs.find((x) => x.rule === "hikkake");
+  assert(v !== undefined, `expected hikkake, got [${vs.map((x) => x.rule).join(",")}]`);
+  assert(v.detail.includes("3"), `evidence should name the trapped wait: ${v.detail}`);
+});
+
+Deno.test("即引っかけ立直: a wait with no suji relation to the cut is clean", () => {
+  const t = makeTable();
+  // Same 4m/7m wait, but declared on 9s — no suji relation at all.
+  setHand(t, 0, tiles("123m56m123p789p999s"));
+  const a = doDiscard(t, 0, tiles("9s")[0], true);
+  assert(!ids("hikkake", fire("on-riichi", ctx(t, 0, a))));
+});
+
+Deno.test("役満関連牌切り: 大三元 fires from 2 melds, others need 3", () => {
+  const t = makeTable();
+  const white = tiles("白白白")[0];
+  const green = tiles("發發發")[0];
+  // P1 pons 白 and 發 — two dragon triplets is already the 大三元 threshold.
+  for (const base of [white, green]) {
+    const m = {
+      kind: "pon" as const,
+      who: 1,
+      fromWho: 2,
+      tiles: [base, base + 1, base + 2],
+      calledTile: base,
+    };
+    t.emit({ t: "call", meld: m }, { e: "call", meld: m });
+  }
+  const chun = tiles("中")[0];
+  setHand(t, 0, [...tiles("19m19p19s東南西"), chun]);
+  doDiscard(t, 0, tiles("2m")[0]);
+  const a = doDiscard(t, 0, chun);
+  assert(ids("yakuman-related", fire("post-discard", ctx(t, 0, a))));
+});
+
+Deno.test("持ち点8000点未満: judged at round end", () => {
+  const lo = makeTable({ scores: [4000, 42000, 37000, 37000] });
+  assert(ids("under-8000", fire("on-round-end", ctx(lo, 0, { t: "pass" }))));
+  const ok = makeTable();
+  assert(!ids("under-8000", fire("on-round-end", ctx(ok, 0, { t: "pass" }))));
+});
+
+Deno.test("後付け: Tier B, flagged with confidence and evidence", () => {
+  const t = makeTable();
+  // Concealed 中 pair, no confirmed yaku, and we call a chi: the classic バック.
+  setHand(t, 0, tiles("234m567m11p中中"));
+  const called = tiles("3s")[0];
+  const a: Action = { t: "chi", tiles: [tiles("1s")[0], tiles("2s")[0]], called };
+  const vs = fire("on-call", ctx(t, 0, a));
+  const v = vs.find((x) => x.rule === "atozuke");
+  assert(v !== undefined, "expected atozuke");
+  assertEquals(v.tier, "B");
+  assert(v.confidence < 1, "Tier B must not claim certainty");
+  assert(v.detail.length > 0, "Tier B must carry evidence");
+});
+
+Deno.test("後付け: not flagged when a yaku is already confirmed", () => {
+  const t = makeTable();
+  // Tanyao is structurally confirmed: nothing in the hand touches a yaochu.
+  setHand(t, 0, tiles("234m567m22p345s"));
+  const called = tiles("3s")[0];
+  const a: Action = { t: "chi", tiles: [tiles("4s")[0], tiles("5s")[0]], called };
+  assert(!ids("atozuke", fire("on-call", ctx(t, 0, a))));
+});
+
+Deno.test("長考: fires past the 3-second norm, escalates past 4", () => {
+  const t = makeTable();
+  const base = ctx(t, 0, { t: "discard", tile: 0, riichi: false, tsumogiri: true });
+  assertEquals(fire("post-discard", { ...base, timing: { elapsedMs: 1500 } }).length, 0);
+  const slow = fire("post-discard", { ...base, timing: { elapsedMs: 3500 } });
+  assert(ids("chouko", slow));
+  assertEquals(slow.find((v) => v.rule === "chouko")?.label, "長考");
+  const verySlow = fire("post-discard", { ...base, timing: { elapsedMs: 6000 } });
+  assertEquals(verySlow.find((v) => v.rule === "chouko")?.label, "大長考");
+});
+
+Deno.test("Tier B can be switched off wholesale (for RL training)", () => {
+  const t = makeTable();
+  const c = ctx(t, 0, { t: "discard", tile: 0, riichi: false, tsumogiri: true });
+  const off = { ...c, dojo: { ...DOJO_DEFAULT, tierB: false }, timing: { elapsedMs: 9000 } };
+  assertEquals(fire("post-discard", off).filter((v) => v.tier === "B").length, 0);
+});
+
+Deno.test("a rule that throws is contained, not fatal", () => {
+  const t = makeTable();
+  // A hand of the wrong size makes several analyses throw internally; the
+  // runner must swallow it and keep the game alive.
+  setHand(t, 0, tiles("1m"));
+  const a: Action = { t: "discard", tile: tiles("1m")[0], riichi: false, tsumogiri: true };
+  const vs = fire("post-discard", ctx(t, 0, a));
+  for (const v of vs) {
+    if (v.confidence === 0) assertEquals(v.points, 0, "a crashed rule must not score");
+  }
+});

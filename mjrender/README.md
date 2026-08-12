@@ -77,7 +77,7 @@ server from source), `deno task bundle` (build the `mjrender.mcpb` Claude Deskto
 
 ## MCP server
 
-The stdio server (v0.7.0) is **stateless**, per the 2026-07-28 MCP spec's guidance: it holds no
+The stdio server (v0.8.0) is **stateless**, per the 2026-07-28 MCP spec's guidance: it holds no
 session at all. **Every tool takes `log`** — a local `.mjlog`/`.xml` path or a tenhou.net URL — as
 its first parameter; that value _is_ the handle the model passes back on each call. There is no
 open/close, no cursor, nothing to restore. (A parsed-game cache keyed by path+mtime keeps the
@@ -186,6 +186,11 @@ Recommended loop:
 `deno task test` covers the stateless flow end to end, including draft persistence across separate
 server processes.
 
+Upgrading to **0.8.0**: the discard-danger assessor gained open-hand (副露) threat reading and
+wait-shape enumeration (`当たり形:…`). No tool signatures changed, but the transcript gained danger
+evidence / 押し引き anchors where open hands are threatening, **so anchor ids shift** — saved
+comment JSONs from 0.7.0 must be re-checked against `mj_outline`.
+
 Upgrading to **0.7.0 (stateless redesign)**: removed `mj_open_log` / `mj_next_kyoku` /
 `mj_restore_state`; `mj_render_game` → `mj_outline`; `mj_add_note` now takes `kyoku` per note;
 drafts moved to disk (restart-proof); **no anchor renumbering** vs 0.6.0. Upgrading from 0.4.x: the
@@ -227,6 +232,15 @@ Metrics vocabulary: `向聴N` (shanten), `受入 X種Y枚` (ukeire kinds/tiles),
 waits), `ドラN` (dora in hand), `危険度低/中/高` (a rough genbutsu/suji danger heuristic — the LLM
 supplies real push/fold judgement).
 
+Danger evidence covers riichi **and** open hands worth fearing (`P#副露N` = that seat's open-meld
+count; a hand becomes a threat at 2 melds, or at 1 if it is a yakuhai triplet). Each threat carries
+its own feature list: suji status, `ノーチャンス/ワンチャンス` (kabe), `当たり形:…` — the wait
+shapes (リャンメン/カンチャン/ペンチャン/シャンポン/タンキ) still able to hit that tile after suji
+and wall counts are applied, with `当たり形:なし` meaning the tile cannot deal in at all — copies
+visible, and for open hands the meld read `染め手模様(色)` / `トイトイ模様` / `役牌副露(牌)` /
+`ドラN(副露内)`. Levels for open hands are damped one step below the riichi-equivalent reading while
+tenpai is only suspected (< 3 melds) and lifted back one step when the melds advertise value.
+
 ## Module map
 
 ```
@@ -245,7 +259,7 @@ src/
   meld.ts     decode the packed <N m="…"> meld bitfield
   yaku.ts     yaku / yakuman id → name tables
   shanten.ts  shanten (standard/chiitoi/kokushi) + ukeire engine
-  danger.ts   discard danger: summary level + per-threat evidence (suji/kabe/counts)
+  danger.ts   discard danger vs riichi + open hands: level + evidence (suji/kabe/待ち形/meld read)
   scoring.ts  placements (起家 tie-break) + オーラス overtake-needs search
   eval.ts     ground-truth Q/A generator (JSONL) for transcript evals
   render.ts   replay via BoardState, emit the anchored transcript + beat list

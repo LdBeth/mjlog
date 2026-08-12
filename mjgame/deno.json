@@ -1,0 +1,23 @@
+{
+  "tasks": {
+    "play": "deno run --allow-read --allow-write src/main.ts play",
+    "selfplay": "deno run --allow-read --allow-write src/main.ts selfplay",
+    "bench": "deno run --allow-read src/main.ts bench",
+    "check": "deno check src/*.ts src/*/*.ts",
+    "test": "deno test --allow-read --allow-write",
+    "fmt": "deno fmt"
+  },
+  "imports": {
+    "mjrender/": "../mjrender/src/",
+    "@std/assert": "jsr:@std/assert@^1.0.0",
+    "fast-xml-parser": "npm:fast-xml-parser@^4.5.7"
+  },
+  "compilerOptions": {
+    "strict": true,
+    "noImplicitOverride": true
+  },
+  "fmt": {
+    "lineWidth": 100,
+    "semiColons": true
+  }
+}

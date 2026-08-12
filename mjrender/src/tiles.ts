@@ -23,7 +23,20 @@ export function rankOfType(type: number): number {
 }
 
 /** The three red-five tile ids (the `%4==0` copy of 5m/5p/5s). */
-const AKA_IDS = new Set<number>([16, 52, 88]);
+let AKA_IDS = new Set<number>([16, 52, 88]);
+
+/**
+ * Override which tile ids count as red fives. Rulesets differ: 雀鬼会 uses
+ * 赤5筒 ×2 (ids 52, 53) rather than one red five per suit. Log replay always
+ * wants the Tenhou default, so callers that change this own restoring it.
+ */
+export function setAkaIds(ids: Iterable<number>): void {
+  AKA_IDS = new Set(ids);
+}
+
+export function akaIds(): ReadonlySet<number> {
+  return AKA_IDS;
+}
 
 export function isAka(id: Tile): boolean {
   return AKA_IDS.has(id);

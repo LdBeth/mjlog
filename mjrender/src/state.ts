@@ -8,10 +8,10 @@
 //     disagree because they share this single replay semantics.
 
 import type { Game, GameEvent, Meld, Round, Tile } from "./model.ts";
-import type { RiichiThreat } from "./danger.ts";
+import type { FuroThreat, RiichiThreat } from "./danger.ts";
 import { concealedTilesUsed } from "./meld.ts";
 import { countsFromTiles, shanten, ukeireTypes } from "./shanten.ts";
-import { doraFromIndicatorType, isAka, tileType } from "./tiles.ts";
+import { doraFromIndicatorType, isAka, suitOfType, tileType } from "./tiles.ts";
 
 /** One discarded tile in a player's river (kawa), in discard order. */
 export interface RiverEntry {
@@ -248,6 +248,82 @@ export class BoardState {
           valueHonors: this.valueHonorsBySeat[s] as Set<number>,
         });
       }
+    }
+    return out;
+  }
+
+  /**
+   * Opened hands worth defending against on `who`'s next discard.
+   *
+   * A seat becomes a threat once it has committed publicly: two open melds, or
+   * a single open yakuhai triplet (that one meld already carries a yaku, so the
+   * hand can be driving at tenpai from the first call). An ankan leaves the
+   * hand closed — it neither counts toward 副露N nor activates the read — but
+   * its tiles are still public evidence, so they feed the dora / yakuhai /
+   * flush reads. `nuki` is sanma-only and ignored.
+   */
+  furoThreats(who: number): FuroThreat[] {
+    const aka = this.game.rules.aka;
+    const out: FuroThreat[] = [];
+    for (let s = 0; s < 4; s++) {
+      if (s === who || this.riichiActive[s]) continue;
+      const melds = this.melds[s].filter((m) => m.kind !== "nuki");
+      const open = melds.filter((m) => m.kind !== "ankan");
+      const valueHonors = this.valueHonorsBySeat[s] as Set<number>;
+      const isTriplet = (m: Meld) => m.kind !== "chi";
+      const yakuhaiMelds = new Set<number>();
+      for (const m of melds) {
+        if (isTriplet(m) && valueHonors.has(tileType(m.tiles[0]))) {
+          yakuhaiMelds.add(tileType(m.tiles[0]));
+        }
+      }
+      const openYakuhai = open.some(
+        (m) => isTriplet(m) && valueHonors.has(tileType(m.tiles[0])),
+      );
+      if (open.length < 2 && !openYakuhai) continue;
+
+      // 染め手読み: every meld (ankan included) is honors or one common number
+      // suit, at least one meld IS in that suit, and they have all but stopped
+      // discarding it (≤1 in their river).
+      let honitsuSuit: "m" | "p" | "s" | null = null;
+      if (open.length >= 2) {
+        const suits = new Set(
+          melds.flatMap((m) => m.tiles.map((t) => suitOfType(tileType(t)))).filter(
+            (x) => x !== "z",
+          ),
+        );
+        if (suits.size === 1) {
+          const suit = [...suits][0] as "m" | "p" | "s";
+          const inRiver = this.rivers[s].filter(
+            (e) => suitOfType(tileType(e.tile)) === suit,
+          ).length;
+          if (inRiver <= 1) honitsuSuit = suit;
+        }
+      }
+
+      // トイトイ読み: two or more open triplets and not a single chi.
+      const openTriplets = open.filter(isTriplet).length;
+      const toitoi = openTriplets >= 2 && open.length === openTriplets;
+
+      let meldDora = 0;
+      for (const m of melds) {
+        for (const id of m.tiles) {
+          meldDora += this.doraCount[tileType(id)];
+          if (aka && isAka(id)) meldDora++;
+        }
+      }
+
+      out.push({
+        seat: s,
+        // their own river only — a tile that merely passed them is NOT claimed safe
+        safeTypes: this.discardTypes[s],
+        valueHonors,
+        openMeldCount: open.length,
+        honitsuSuit,
+        toitoi,
+        yakuhaiMelds,
+        meldDora,
+      });
     }
     return out;
   }

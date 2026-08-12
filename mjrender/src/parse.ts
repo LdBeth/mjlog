@@ -157,6 +157,13 @@ export function parseGame(xml: string): Game {
         cur?.events.push({ t: "call", meld });
         if (meld.kind === "ankan" || meld.kind === "daiminkan" || meld.kind === "shouminkan") {
           rinshanPending = true;
+        } else {
+          // After chi/pon the caller discards WITHOUT drawing, so its next
+          // discard can never be tsumogiri. Leaving the stale `lastDraw` in
+          // place mislabels a tedashi whenever the caller happens to discard a
+          // tile it drew (and kept) on an earlier turn — 4 such misfires in the
+          // 1.xml sample alone.
+          lastDraw[who] = -1;
         }
         break;
       }

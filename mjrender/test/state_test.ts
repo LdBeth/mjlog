@@ -3,7 +3,7 @@
 // positional replay (replayTo by eventIndex / junme).
 
 import { BoardState, replayTo } from "../src/state.ts";
-import type { Game, Round } from "../src/model.ts";
+import type { Game, Meld, Round } from "../src/model.ts";
 
 function eq<T>(a: T, b: T, msg: string): void {
   const as = JSON.stringify(a), bs = JSON.stringify(b);
@@ -78,6 +78,102 @@ Deno.test("state: reach step-2 without ten attr falls back to -1000", () => {
   const st = new BoardState(g, g.rounds[0]);
   for (const e of g.rounds[0].events) st.applyEvent(e);
   eq(st.scores, [250, 240, 250, 250], "fallback stick debit");
+});
+
+// Meld helpers: tile ids are type*4+copy, so `ids(type, n)` names n copies.
+const ids = (type: number, n: number) => Array.from({ length: n }, (_, i) => type * 4 + i);
+const pon = (who: number, type: number, fromWho = (who + 3) % 4): Meld => ({
+  kind: "pon",
+  who,
+  fromWho,
+  tiles: ids(type, 3),
+  calledTile: type * 4,
+});
+const chi = (who: number, start: number, fromWho = (who + 3) % 4): Meld => ({
+  kind: "chi",
+  who,
+  fromWho,
+  tiles: [start * 4, (start + 1) * 4, (start + 2) * 4],
+  calledTile: start * 4,
+});
+
+Deno.test("state: furoThreats activate on a yakuhai meld or a second meld", () => {
+  const g = gameWith({
+    events: [
+      // P0: two chi AND a riichi — riichi seats are owned by threats(), so they
+      // must never be double-reported as a furo threat.
+      { t: "call", meld: chi(0, 0) },
+      { t: "call", meld: chi(0, 3) },
+      { t: "draw", who: 0, tile: 100, rinshan: false },
+      { t: "reach", who: 0, step: 1 },
+      { t: "discard", who: 0, tile: 100, tsumogiri: true, riichi: true },
+      { t: "reach", who: 0, step: 2 },
+      { t: "call", meld: pon(1, 31) }, // 白 = yakuhai for everyone ⇒ one meld is enough
+      { t: "call", meld: chi(2, 6) }, // a lone chi commits to nothing
+      { t: "call", meld: chi(3, 0) },
+      { t: "call", meld: chi(3, 3) }, // two melds ⇒ threat
+    ],
+  });
+  const st = new BoardState(g, g.rounds[0]);
+  for (const e of g.rounds[0].events) st.applyEvent(e);
+
+  eq(st.furoThreats(2).map((f) => [f.seat, f.openMeldCount]), [[1, 1], [3, 2]], "seats + counts");
+  eq(st.furoThreats(1).map((f) => f.seat), [3], "a single chi is not a threat");
+  eq(st.furoThreats(3).map((f) => f.seat), [1], "riichi seat excluded, own seat excluded");
+  eq([...st.furoThreats(0)[0].yakuhaiMelds], [31], "白 pon recorded as a yakuhai meld");
+});
+
+Deno.test("state: furoThreats read honitsu, toitoi, and dora inside melds", () => {
+  const base = (events: Round["events"]) => {
+    const g = gameWith({ events });
+    const st = new BoardState(g, g.rounds[0]);
+    for (const e of g.rounds[0].events) st.applyEvent(e);
+    return st;
+  };
+  // firstDora 104 = 9s indicator ⇒ dora type 18 (1s).
+  const soup = base([
+    { t: "call", meld: pon(1, 32) }, // 發 (honor meld — does not break a flush)
+    { t: "call", meld: chi(1, 18) }, // 1s2s3s, and 1s is dora ×1
+    { t: "draw", who: 1, tile: 100, rinshan: false },
+    { t: "discard", who: 1, tile: 100, tsumogiri: true, riichi: false }, // id100 = type 25 = 8s
+  ]);
+  eq(soup.furoThreats(0)[0].honitsuSuit, "s", "melds are honors + one suit, river almost clean");
+  eq(soup.furoThreats(0)[0].meldDora, 1, "the 1s in the chi is dora");
+
+  const dirty = base([
+    { t: "call", meld: pon(1, 32) },
+    { t: "call", meld: chi(1, 18) },
+    { t: "draw", who: 1, tile: 100, rinshan: false },
+    { t: "discard", who: 1, tile: 100, tsumogiri: true, riichi: false },
+    { t: "draw", who: 1, tile: 101, rinshan: false },
+    { t: "discard", who: 1, tile: 101, tsumogiri: true, riichi: false },
+  ]);
+  eq(dirty.furoThreats(0)[0].honitsuSuit, null, "two sou tiles in their own river kills the read");
+
+  const toitoi = base([
+    { t: "call", meld: pon(1, 32) },
+    { t: "call", meld: pon(1, 18) },
+  ]);
+  eq([toitoi.furoThreats(0)[0].toitoi, toitoi.furoThreats(0)[0].meldDora], [true, 3], "two pons");
+
+  // An ankan keeps the hand closed: it neither counts as 副露 nor activates.
+  const ankanOnly = base([
+    {
+      t: "call",
+      meld: { kind: "ankan", who: 1, fromWho: 1, tiles: ids(18, 4), calledTile: 72 },
+    },
+  ]);
+  eq(ankanOnly.furoThreats(0).length, 0, "ankan alone is not an open hand");
+  const ankanPlus = base([
+    { t: "call", meld: { kind: "ankan", who: 1, fromWho: 1, tiles: ids(18, 4), calledTile: 72 } },
+    { t: "call", meld: pon(1, 32) },
+    { t: "call", meld: chi(1, 6) },
+  ]);
+  eq(
+    [ankanPlus.furoThreats(0)[0].openMeldCount, ankanPlus.furoThreats(0)[0].meldDora],
+    [2, 4],
+    "ankan excluded from 副露N but its four dora still count",
+  );
 });
 
 Deno.test("state: replayTo by eventIndex and by junme", () => {
