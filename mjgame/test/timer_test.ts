@@ -60,6 +60,7 @@ function turnObs(): Observation {
     ronnable: [],
     katagari: false,
     discardInfo: new Map(),
+    tsumogiriLock: false,
     ukeire: [],
     doraCount: 0,
     furiten: { permanent: false, temporary: false, riichi: false },
@@ -185,5 +186,60 @@ Deno.test("timer: the countdown reports the turn allowance first, then the bank"
   assertEquals(late.overMs, 0, "not yet overtime while the bank holds out");
   a.feed("t");
   await p;
+  a.stop();
+});
+
+Deno.test("timer: a forced move plays itself and costs no time", async () => {
+  const a = app(60, 200);
+  const obs = turnObs();
+  // Post-riichi shape: the drawn tile is the only thing that can be discarded.
+  const only = obs.legal.find((x) => x.t === "discard" && x.tile === obs.drawn)!;
+  const forced = { ...obs, riichi: [true, false, false, false], legal: [only] };
+
+  const chosen = await a.awaitDecision(forced);
+  assertEquals(chosen, only, "the single legal action resolves without a keypress");
+  assertEquals(a.bankRemainingMs(), 200, "a forced move must not spend the bank");
+  a.stop();
+});
+
+Deno.test("timer: a forced move reports 0ms, never the previous decision's time", async () => {
+  const a = app(60, 200);
+  const seen: number[] = [];
+  a.human.onDecision = (ms) => seen.push(ms);
+
+  // A real decision first, so there is a stale time to be inherited.
+  const p = a.awaitDecision(turnObs());
+  await sleep(40);
+  a.feed("t");
+  await p;
+  assert(a.human.lastDecisionMs! > 0, "a real decision takes real time");
+
+  const obs = turnObs();
+  const only = obs.legal.find((x) => x.t === "discard" && x.tile === obs.drawn)!;
+  await a.awaitDecision({ ...obs, riichi: [true, false, false, false], legal: [only] });
+
+  assertEquals(a.human.lastDecisionMs, 0, "a forced move takes no thought");
+  assertEquals(seen.length, 2, "the forced move is still reported to the timing consumer");
+  assertEquals(seen[1], 0);
+  a.stop();
+});
+
+Deno.test("timer: a lone tedashi is still prompted for, not played for us", async () => {
+  const a = app(400, 300);
+  const obs = turnObs();
+  // One legal action, but a hand discard — a real choice being made, not the
+  // post-riichi lock. The player must see it happen.
+  const lone = obs.legal.find((x) => x.t === "discard" && !x.tsumogiri)!;
+  let settled = false;
+  const p = a.awaitDecision({ ...obs, legal: [lone] }).then((x) => {
+    settled = true;
+    return x;
+  });
+
+  await sleep(60);
+  assertEquals(settled, false, "a lone tedashi must not auto-play");
+
+  a.feed("\r");
+  assertEquals(await p, lone);
   a.stop();
 });

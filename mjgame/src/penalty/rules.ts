@@ -190,6 +190,15 @@ const riichiKanSkip: DojoRule = {
   check(ctx) {
     const { t, seat, action, drawn } = ctx;
     if (action.t !== "discard" || !t.riichi[seat] || drawn === null) return null;
+    // Not the declaring discard. `t.riichi` is set before this hook runs, so a
+    // declaration already looks like a riichi turn here — but that discard was
+    // chosen while riichi did not yet exist, so the rule cannot apply, whether
+    // the declaration cut the drawn tile or a held one.
+    if (action.riichi) return null;
+    // Only a tsumogiri can have passed up a kan: a tedashi leaves `drawn` in
+    // the hand, so the reconstruction below would count it twice and invent a
+    // fourth copy that was never there.
+    if (!action.tsumogiri) return null;
     // The kan would have to be the fourth copy of a type we already hold three
     // of, and it must not change the wait (otherwise it was never available).
     const ty = tileType(drawn);

@@ -70,6 +70,7 @@ function baseObs(over: Partial<Observation> = {}): Observation {
     ronnable: [],
     katagari: false,
     discardInfo: new Map(),
+    tsumogiriLock: false,
     ukeire: [],
     doraCount: 0,
     furiten: { permanent: false, temporary: false, riichi: false },
@@ -311,4 +312,29 @@ Deno.test("heuristic: a short stack folds where a healthy one would push", () =>
   // 1-shanten with a dangerous 東: comfortable stack pushes it, short one does not.
   assertEquals(pick(25000), drawn);
   assert(pick(9000) !== drawn, "a 9000-point stack should not fire the 危険度高 tile");
+});
+
+Deno.test("heuristic: tedashi stops once ドラ切り has been ponned off us", () => {
+  const hand = tiles("123456789m1122p東");
+  const drawn = hand[hand.length - 1]; // 東, the tile a free hand would cut
+  const pick = (tsumogiriLock: boolean) => {
+    const obs = baseObs({ hand, drawn, tsumogiriLock });
+    const chosen = new HeuristicPolicy("cpu", 1).decide(obs);
+    return chosen.t === "discard" ? chosen.tile : -1;
+  };
+  // Unlocked, the lone honor goes. Locked, every tedashi is a violation, so the
+  // drawn tile goes back out instead — which here happens to be the same tile.
+  assertEquals(pick(false), drawn);
+  assertEquals(pick(true), drawn, "a locked hand must tsumogiri");
+
+  // With a drawn tile that efficiency would rather keep, the lock still wins.
+  const keeper = tiles("123456789m1122p1p")[15];
+  const locked = baseObs({
+    hand: [...hand.slice(0, 13), keeper],
+    drawn: keeper,
+    tsumogiriLock: true,
+  });
+  const chosen = new HeuristicPolicy("cpu", 1).decide(locked);
+  assertEquals(chosen.t, "discard");
+  if (chosen.t === "discard") assertEquals(chosen.tile, keeper);
 });

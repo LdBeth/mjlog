@@ -53,6 +53,8 @@ export interface HeuristicWeights {
    * move left.
    */
   katagari: number;
+  /** Any tedashi once 不聴時ドラ切り has been called on us. */
+  tsumogiriLock: number;
   /** Efficiency is scaled by this while folding. */
   foldEfficiency: number;
   /** Danger is scaled by this while folding. */
@@ -70,6 +72,7 @@ export const DEFAULT_WEIGHTS: HeuristicWeights = {
   firstHonor: 4000,
   notenDora: 2500,
   katagari: 1500,
+  tsumogiriLock: 2500,
   foldEfficiency: 0.05,
   foldDanger: 10,
 };
@@ -340,6 +343,10 @@ export class HeuristicPolicy implements SyncPolicy {
     // 片和了り, but only when riichi is not on offer: riichi is itself a yaku,
     // so declaring it makes every wait scoring and the shape stops being split.
     if (!ctx.canRiichi && obs.discardInfo.get(tile)?.katagari) cost += this.w.katagari;
+
+    // ドラ切りをポンされた後の手出し. `legal.ts` will not stop us — the dojo
+    // takes the payment instead — so the price has to be paid here.
+    if (obs.tsumogiriLock && tile !== obs.drawn) cost += this.w.tsumogiriLock;
 
     return cost;
   }

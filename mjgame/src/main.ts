@@ -6,7 +6,9 @@ import { runMatch, runMatchSync } from "./match.ts";
 import { dojoHooks } from "./dojo.ts";
 import type { MatchResult } from "./match.ts";
 import { DOJO_DEFAULT, DOJO_HEADLESS, JANKI } from "./rules.ts";
+import type { DojoConfig } from "./rules.ts";
 import type { Policy, SyncPolicy } from "./policy.ts";
+import { sfc32 } from "./rng.ts";
 // Real yaku + fu scoring.
 import { scorer } from "./score.ts";
 import { SEATS } from "./types.ts";
@@ -106,10 +108,27 @@ const USAGE = `mjgame — 雀鬼流ルールの4人麻雀 (人間1 + CPU3)
                       雀鬼流の長考ペナルティのみ
   --seats=hrrr        席ごとのCPU: h=手作り評価関数, r=ランダム (既定 hhhh)。
                       短く書くと最後の文字を繰り返す ("hr" ⇒ "hrrr")。
-                      play では席0は常に人間なので1文字目は無視される
+                      play では人間の席はシードから決まり、その席の文字は無視される
   --no-intro          開始演出と配牌アニメを飛ばす
   --help, -h          このヘルプ
 `;
+
+// ---------------------------------------------------------------------------
+// dojo wiring (shared by every driver)
+// ---------------------------------------------------------------------------
+
+/**
+ * The penalty registry's entry points. EVERY driver needs these: rules only
+ * ever run from `onAction`/`onRoundEnd`, so a driver that omits them plays with
+ * a permanently empty 違反台帳 — and with `Table.tsumogiriLock` never armed,
+ * because that flag is set by a rule (ドラ切り後の手出し), not by the engine.
+ *
+ * `dojo` is deliberately a parameter: it must be the same config the round is
+ * run with, or the ledger would judge by rules the round was not played under.
+ */
+export function makeDojoHooks(dojo: DojoConfig) {
+  return dojoHooks({ dojo, oracle: scorer });
+}
 
 // ---------------------------------------------------------------------------
 // play
@@ -124,7 +143,12 @@ async function cmdPlay(a: Args): Promise<void> {
         "CPU同士の対局は `selfplay` を使ってください。",
     );
   }
-  const names = ["あなた", "CPU東", "CPU南", "CPU西"];
+  // Which seat the player sits in comes from the match seed, so it is fixed for
+  // a given `--seed` but is not always East-1's dealer. Forked with a tag so it
+  // does not consume — or mirror — the match's own stream.
+  const humanSeat = sfc32(a.seed).fork(0x5ea7).int(4) as Seat;
+  const WINDS = ["東", "南", "西", "北"];
+  const names = SEATS.map((s) => s === humanSeat ? "あなた" : `CPU${WINDS[s]}`);
   const app = new App({
     glyphs: a.glyphs,
     aka: JANKI.akaIds,
@@ -134,12 +158,13 @@ async function cmdPlay(a: Args): Promise<void> {
     timerBankMs: a.timerBank,
     cpuDelayMs: Math.max(0, a.speed),
     cfg: JANKI,
+    humanSeat,
     noIntro: a.noIntro,
   });
 
   const cpu = (s: Seat) =>
     new PacedPolicy(makePolicy(a.seats[s], names[s], a.seed * 4 + s), () => app.paceDelay());
-  const policies: Policy[] = [app.human, cpu(1), cpu(2), cpu(3)];
+  const policies: Policy[] = SEATS.map((s) => s === humanSeat ? app.human : cpu(s));
 
   try {
     app.start();
@@ -150,8 +175,10 @@ async function cmdPlay(a: Args): Promise<void> {
       dojo: DOJO_DEFAULT,
       scorer,
       players: SEATS.map((seat) => ({ seat, name: names[seat] })),
-      // The human seat sees events through `notify`; CPU seats ignore them.
+      // Every public event, including each `violation` the hooks below file,
+      // reaches the UI here — that is what fills the 違反台帳 panel.
       sink: (e) => app.onEvent(e),
+      ...makeDojoHooks(DOJO_DEFAULT),
     });
     await app.showFinal(result);
   } finally {
@@ -179,13 +206,12 @@ function headless(
     );
     // Without the hooks the ledger is always empty and the stats line would
     // report "違反 0件" no matter what actually happened.
-    const hooks = dojoHooks({ dojo: DOJO_HEADLESS, oracle: scorer });
     results.push(runMatchSync(policies, {
       seed: s,
       cfg: JANKI,
       dojo: DOJO_HEADLESS,
       scorer,
-      ...hooks,
+      ...makeDojoHooks(DOJO_HEADLESS),
     }));
   }
   return { results, ms: performance.now() - t0 };

@@ -234,3 +234,56 @@ Deno.test("a rule that throws is contained, not fatal", () => {
     if (v.confidence === 0) assertEquals(v.points, 0, "a crashed rule must not score");
   }
 });
+
+Deno.test("立直後カン見送り: fires on a riichi tsumogiri that passed up a kan", () => {
+  const t = makeTable();
+  // 111m as a concealed triplet inside a tenpai hand; the 4th 1m is drawn and
+  // thrown away rather than kanned. The kan does not touch the 456p78p wait.
+  const hand = tiles("111m456p78p111s99s");
+  const drawn = tiles("1111m")[3]; // the fourth copy, id 3
+  setHand(t, 0, hand);
+  t.riichi[0] = true;
+  const a: Action = { t: "discard", tile: drawn, riichi: false, tsumogiri: true };
+  t.emit(
+    { t: "discard", who: 0, tile: drawn, tsumogiri: true, riichi: false },
+    { e: "discard", who: 0, tile: drawn, tsumogiri: true, riichi: false },
+  );
+  assert(ids("riichi-kan-skip", fire("post-discard", ctx(t, 0, a, drawn))));
+});
+
+Deno.test("立直後カン見送り: the declaring discard is exempt", () => {
+  // Regression: `t.riichi` is set before the post-discard hook runs, so the
+  // declaring tedashi used to look like a riichi turn. Worse, reconstructing
+  // the hand as `[...hand, drawn]` counts the still-held drawn tile twice and
+  // invents a fourth copy — the rule fired on a kan that never existed.
+  const t = makeTable();
+  const hand = tiles("111m456p78p111s99s");
+  const drawn = tiles("1111m")[3];
+  setHand(t, 0, [...hand.slice(0, 12), drawn]);
+  const cut = hand[12]; // some other tile: a tedashi, as a declaration must be
+  const a: Action = { t: "discard", tile: cut, riichi: true, tsumogiri: false };
+  t.emit(
+    { t: "discard", who: 0, tile: cut, tsumogiri: false, riichi: true },
+    { e: "discard", who: 0, tile: cut, tsumogiri: false, riichi: true },
+  );
+  t.riichi[0] = true;
+  assert(!ids("riichi-kan-skip", fire("post-discard", ctx(t, 0, a, drawn))));
+});
+
+Deno.test("立直後カン見送り: a declaration that cuts the drawn 4th copy is exempt too", () => {
+  // Regression: the exemption used to test only `!tsumogiri`, so a declaration
+  // made by cutting the drawn tile still reached the rule — and the tile it cut
+  // was the very 4th copy the rule looks for, ledgering a kan-skip on the turn
+  // riichi was declared. Same fixture as the positive case, but `riichi: true`.
+  const t = makeTable();
+  const hand = tiles("111m456p78p111s99s");
+  const drawn = tiles("1111m")[3];
+  setHand(t, 0, hand);
+  const a: Action = { t: "discard", tile: drawn, riichi: true, tsumogiri: true };
+  t.emit(
+    { t: "discard", who: 0, tile: drawn, tsumogiri: true, riichi: true },
+    { e: "discard", who: 0, tile: drawn, tsumogiri: true, riichi: true },
+  );
+  t.riichi[0] = true; // as round.ts does, before the hook fires
+  assert(!ids("riichi-kan-skip", fire("post-discard", ctx(t, 0, a, drawn))));
+});

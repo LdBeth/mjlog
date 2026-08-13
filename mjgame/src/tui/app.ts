@@ -50,6 +50,7 @@ interface Layout {
   sideY: number;
   sepY: number;
   ownY: number;
+  ownRiverY: number;
   handY: number;
   caretY: number;
   metricsY: number;
@@ -71,7 +72,8 @@ function layout(cols: number, rows: number): Layout {
   const sideY = toimenY + panelRows;
   const sepY = sideY + panelRows;
   const ownY = sepY + 1;
-  const handY = ownY + 1;
+  const ownRiverY = ownY + 1;
+  const handY = ownRiverY + 1;
   const caretY = handY + 1;
   const metricsY = caretY + 1;
   const dangerY = metricsY + 1;
@@ -93,6 +95,7 @@ function layout(cols: number, rows: number): Layout {
     sideY,
     sepY,
     ownY,
+    ownRiverY,
     handY,
     caretY,
     metricsY,
@@ -152,9 +155,9 @@ export class HumanPolicy implements Policy {
 export class PacedPolicy implements Policy {
   readonly name: string;
   #inner: SyncPolicy;
-  #delay: () => number;
+  #delay: () => number | Promise<number>;
 
-  constructor(inner: SyncPolicy, delay: () => number) {
+  constructor(inner: SyncPolicy, delay: () => number | Promise<number>) {
     this.name = inner.name;
     this.#inner = inner;
     this.#delay = delay;
@@ -162,7 +165,7 @@ export class PacedPolicy implements Policy {
 
   async decide(obs: Observation): Promise<Action> {
     const a = this.#inner.decide(obs);
-    const ms = this.#delay();
+    const ms = await this.#delay();
     if (ms > 0) await sleep(ms);
     return a;
   }
@@ -189,6 +192,8 @@ export interface AppOptions {
   /** Per-CPU-decision delay, ms. 0 makes the game instant (for debugging). */
   cpuDelayMs: number;
   cfg: RuleConfig;
+  /** Absolute seat the human plays. Defaults to 0. */
+  humanSeat?: Seat;
   /** Skip the opening sequence. */
   noIntro?: boolean;
   /** Where frames go. Defaults to stdout; tests pass a sink to stay quiet. */
@@ -232,15 +237,15 @@ export class App {
   private liveRiichi = [false, false, false, false];
   private liveScores: number[] | null = null;
   private liveWall: number | null = null;
-  /** Extra pause after a round result so the summary is readable. */
-  private hold = 0;
+  /** Armed while a 局結果 overlay is up; resolved by the keypress that closes it. */
+  private resultGate: Promise<void> | null = null;
 
   constructor(opts: AppOptions) {
     this.opts = opts;
     this.glyph = { mode: opts.glyphs, aka: opts.aka };
     const { cols, rows } = size();
     this.scr = new Screen(cols, rows, { write: opts.write });
-    this.human = new HumanPolicy(opts.names[0] ?? "あなた", this);
+    this.human = new HumanPolicy(opts.names[opts.humanSeat ?? 0] ?? "あなた", this);
     this.bankLeftMs = opts.timerBankMs;
   }
 
@@ -249,10 +254,19 @@ export class App {
     this.table = t;
   }
 
-  /** Delay a CPU decision should wait, honouring the post-result hold. */
-  paceDelay(): number {
-    const extra = Math.max(0, this.hold - Date.now());
-    return this.opts.cpuDelayMs + extra;
+  /** Block until the player dismisses the round-result overlay, if one is up. */
+  private async gate(): Promise<void> {
+    if (this.resultGate) {
+      await this.resultGate;
+      this.resultGate = null;
+    }
+  }
+
+  /** Delay a CPU decision should wait. It also parks on the 局結果 overlay, so
+   *  the next hand cannot start behind the player's back. */
+  async paceDelay(): Promise<number> {
+    await this.gate();
+    return this.opts.cpuDelayMs;
   }
 
   // --- lifecycle -----------------------------------------------------------
@@ -336,7 +350,7 @@ export class App {
     // 2. Then the seating, one player at a time.
     const seats = SEATS.map((s) => ({
       text: `${WINDS[s]}   ${this.opts.names[s] ?? `P${s}`}`,
-      sgr: s === 0 ? SGR.brightGreen : SGR.gray,
+      sgr: s === (this.opts.humanSeat ?? 0) ? SGR.brightGreen : SGR.gray,
     }));
     for (let n = 1; n <= seats.length; n++) {
       frame([{ text: title, sgr: SGR.bold }, { text: "" }, ...seats.slice(0, n)]);
@@ -392,8 +406,7 @@ export class App {
 
   /** Present `obs` and resolve once the key handler picks a legal action. */
   async awaitDecision(obs: Observation): Promise<Action> {
-    const wait = this.hold - Date.now();
-    if (wait > 0) await sleep(wait);
+    await this.gate();
     if (this.overlayState?.kind === "text") this.closeOverlay();
 
     this.obs = obs;
@@ -412,6 +425,28 @@ export class App {
       await this.animateDeal();
       this.refreshSelectable();
     }
+
+    // A forced move is not a decision. Post-riichi the hand is locked to the
+    // drawn tile, so unless a kan or a win is also on offer there is nothing to
+    // choose — play it without prompting and without starting the clock. Being
+    // made to press a key every turn of a riichi is not a game mechanic.
+    //
+    // Only *that* shape auto-plays. Other singleton `legal` lists (a kuikae-
+    // forced lone tedashi, say) are still real choices from the player's side of
+    // the table — they get the normal prompt, so the move is at least seen.
+    const only = obs.legal.length === 1 ? obs.legal[0] : null;
+    if (only && only.t === "discard" && only.tsumogiri) {
+      this.phase = "idle";
+      // Contract: a forced move reports 0 ms — it took no thought, so a 長考
+      // consumer must never see the previous decision's time standing in for it.
+      this.human.lastDecisionMs = 0;
+      this.human.onDecision?.(0, obs);
+      this.requestRender();
+      const ms = await this.paceDelay();
+      if (ms > 0) await sleep(ms);
+      return only;
+    }
+
     this.startedAt = Date.now();
     this.startTicker();
 
@@ -623,9 +658,13 @@ export class App {
       kind: "text",
       title: "局結果",
       body,
-      footer: "次局へ…",
+      footer: "任意のキーで次局へ",
     };
-    this.hold = Date.now() + 1800;
+    // A hard gate, not a timed pause: the match may not roll on until the
+    // player has actually seen the result and said so.
+    this.resultGate = new Promise((r) => {
+      this.overlayResolve = r;
+    });
   }
 
   private meldText(m: Meld): string {
@@ -646,7 +685,8 @@ export class App {
         this.handleKey(k);
       }
     } catch {
-      // stdin closed — nothing to do; the match keeps running headlessly.
+      // stdin closed — nothing more to feed. Play continues, but a 局結果
+      // overlay can no longer be dismissed, so the match parks at the gate.
     }
   }
 
@@ -979,8 +1019,9 @@ export class App {
     // own seat
     const own = W.ownPanel(c, L.inner);
     this.scr.drawLine(L.x0, L.ownY, own[0], L.inner);
-    this.scr.drawLine(L.x0, L.handY, own[1], L.inner);
-    this.scr.drawLine(L.x0, L.caretY, own[2], L.inner);
+    this.scr.drawLine(L.x0, L.ownRiverY, own[1], L.inner);
+    this.scr.drawLine(L.x0, L.handY, own[2], L.inner);
+    this.scr.drawLine(L.x0, L.caretY, own[3], L.inner);
     this.scr.drawLine(L.x0, L.metricsY, W.metricsLine(c, L.inner), L.inner);
     this.scr.drawLine(L.x0, L.dangerY, W.dangerRow(c, L.inner), L.inner);
 
@@ -1043,7 +1084,10 @@ export class App {
   // --- end of match --------------------------------------------------------
 
   /** Show the final standings and block until a key is pressed. */
-  showFinal(result: MatchResult): Promise<void> {
+  async showFinal(result: MatchResult): Promise<void> {
+    // The last hand's 局結果 is still up; overwriting it would swallow the
+    // result of the round that decided the match.
+    await this.gate();
     this.phase = "over";
     this.stopTicker();
     this.overlayState = {

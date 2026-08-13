@@ -41,10 +41,27 @@ export const ANY_WIN: WinOracle = { hasYaku: () => true };
 
 const uniq = (xs: Tile[]): Tile[] => [...new Set(xs)];
 
-/** One representative id per distinct tile *type* in hand, plus every aka copy. */
-function discardCandidates(t: Table, seat: Seat): Tile[] {
+/**
+ * One representative id per distinct tile *type* in hand, plus every aka copy —
+ * except for the drawn tile's type, which gets two (see below).
+ */
+function discardCandidates(t: Table, seat: Seat, drawn: Tile | null): Tile[] {
   const seen = new Set<number>();
   const out: Tile[] = [];
+  // Copies of one type are interchangeable in the hand but NOT in the river:
+  // letting the drawn one go is a tsumogiri, letting a held one go is a tedashi,
+  // and 不聴時ドラ切りをポンされた後 only the former is allowed. So when the drawn
+  // tile's type is ALSO held, both variants are enumerated — collapsing them to
+  // one id would make either the tsumogiri or the tedashi inexpressible, and the
+  // river, the export and the 禁じ手 hooks all distinguish the two.
+  //
+  // Ordering (load-bearing — seeded policies consume candidate order): the held
+  // representative keeps the position the type has always occupied and the drawn
+  // id is inserted directly after it, so every other candidate keeps its relative
+  // order. Held-first also means a by-type lookup (the TUI's slot fallback)
+  // resolves a hand slot to the tedashi, while the drawn slot still matches the
+  // drawn id exactly.
+  const drawnType = drawn !== null && !t.cfg.akaIds.has(drawn) ? tileType(drawn) : -1;
   for (const id of t.hands[seat]) {
     // Aka copies stay individually selectable: cutting 0p is not cutting 5p.
     if (t.cfg.akaIds.has(id)) {
@@ -54,7 +71,15 @@ function discardCandidates(t: Table, seat: Seat): Tile[] {
     const ty = tileType(id);
     if (seen.has(ty)) continue;
     seen.add(ty);
-    out.push(id);
+    if (ty !== drawnType) {
+      out.push(id);
+      continue;
+    }
+    const held = t.hands[seat].find(
+      (x) => x !== drawn && !t.cfg.akaIds.has(x) && tileType(x) === ty,
+    );
+    if (held !== undefined) out.push(held);
+    out.push(drawn!);
   }
   return out;
 }
@@ -96,7 +121,7 @@ export function turnActions(
     // Post-riichi the hand is locked: the drawn tile is the only discard.
     out.push({ t: "discard", tile: drawn, riichi: false, tsumogiri: true });
   } else {
-    for (const tile of discardCandidates(t, seat)) {
+    for (const tile of discardCandidates(t, seat, drawn)) {
       if (banned?.has(tileType(tile))) continue;
       const tsumogiri = drawn !== null && tile === drawn;
       out.push({ t: "discard", tile, riichi: false, tsumogiri });
@@ -162,6 +187,23 @@ function chiShapes(t: Table, seat: Seat, tile: Tile): Array<[Tile, Tile]> {
   return out;
 }
 
+/**
+ * Whether the caller would still have something to discard after this call.
+ *
+ * 同巡内食い替え can ban every tile a short hand has left: with three melds and
+ * 5m6m7m8m concealed, chi-ing a 5m with 6m7m bans both 5m and 8m, leaving no
+ * legal discard at all. A turn with an empty action list has no way out — the
+ * TUI offers nothing selectable and a policy has nothing to return — so such a
+ * call is simply not offered. This is a mechanical restriction, not a 禁じ手
+ * judgement: the ledger has nothing to say about a move that cannot be played.
+ */
+function leavesLegalDiscard(t: Table, seat: Seat, action: Action): boolean {
+  if (action.t !== "chi" && action.t !== "pon") return true;
+  const banned = kuikaeTypes(action);
+  const spent = new Set<Tile>(action.tiles);
+  return t.hands[seat].some((id) => !spent.has(id) && !banned.has(tileType(id)));
+}
+
 export function claimActions(
   t: Table,
   seat: Seat,
@@ -207,7 +249,8 @@ export function claimActions(
         const key = pair.join(",");
         if (combos.has(key)) continue;
         combos.add(key);
-        out.push({ t: "pon", tiles: pair, called: tile });
+        const pon: Action = { t: "pon", tiles: pair, called: tile };
+        if (leavesLegalDiscard(t, seat, pon)) out.push(pon);
       }
     }
   }
@@ -217,7 +260,8 @@ export function claimActions(
   // Chi is only from the seat to your left (kamicha).
   if (from === ((seat + 3) % 4)) {
     for (const pair of chiShapes(t, seat, tile)) {
-      out.push({ t: "chi", tiles: pair, called: tile });
+      const chi: Action = { t: "chi", tiles: pair, called: tile };
+      if (leavesLegalDiscard(t, seat, chi)) out.push(chi);
     }
   }
   return out;

@@ -67,6 +67,16 @@ export interface Observation {
   furiten: Furiten;
   /** Keyed by the tile of each legal discard. Empty when it is not our turn. */
   discardInfo: Map<Tile, DiscardInfo>;
+  /**
+   * 不聴時のドラ切りをポンされた: every tedashi for the rest of the round is a
+   * violation. Unlike the post-riichi lock this is NOT enforced by `legal.ts`
+   * — the dojo ledgers it — so a policy that cannot see it cannot avoid it.
+   *
+   * The lock is armed by the ドラ切り後の手出し rule, so it only ever goes true
+   * for a driver that wired the dojo hooks (`makeDojoHooks` in `main.ts`);
+   * a bare `runMatch` without them leaves this permanently false.
+   */
+  tsumogiriLock: boolean;
 
   /** Per candidate discard *type*, computed lazily-ish on construction. */
   danger: Map<number, DangerAssessment>;
@@ -176,6 +186,7 @@ export function observe(
     doraCount: t.countDora(seat),
     furiten: { ...t.furiten[seat] },
     discardInfo: discardInfoFor(t, seat, legal, oracle),
+    tsumogiriLock: t.tsumogiriLock[seat],
     danger,
     violations: vio,
     legal,

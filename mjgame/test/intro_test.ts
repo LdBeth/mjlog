@@ -62,6 +62,7 @@ function turnObs(): Observation {
     ronnable: [],
     katagari: false,
     discardInfo: new Map(),
+    tsumogiriLock: false,
     ukeire: [],
     doraCount: 0,
     furiten: { permanent: false, temporary: false, riichi: false },

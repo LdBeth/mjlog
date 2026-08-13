@@ -297,7 +297,7 @@ export function centerBlock(ctx: Ctx): Line[] {
 // own seat
 // ---------------------------------------------------------------------------
 
-/** Name/score/melds line, hand line, and the cursor caret line. */
+/** Name/score/melds line, own river, hand line, and the cursor caret line. */
 export function ownPanel(ctx: Ctx, w: number): Line[] {
   const o = ctx.obs;
   if (!o) return [];
@@ -312,6 +312,13 @@ export function ownPanel(ctx: Ctx, w: number): Line[] {
     sp(`  ${ranks[0]}位   `, DIM),
     sp("副露 ", DIM),
     ...meldSpans(o.melds[0], ctx.glyph),
+  ];
+
+  // Own river, on one long row so it sits between the table centre and the
+  // hand. 24 cells × 3 columns + the 6-column label fits the 80-column minimum.
+  const river: Line = [
+    sp("河    ", DIM),
+    ...riverLines(o.rivers[0], ctx.glyph, 1, 24)[0],
   ];
 
   const hand: Line = [sp("手牌  ", DIM)];
@@ -337,7 +344,7 @@ export function ownPanel(ctx: Ctx, w: number): Line[] {
     ? [sp("   (鳴き判断)", SGR.yellow)]
     : [];
 
-  return [head, [...hand, ...label], caret].map((l) => padLine(l, w));
+  return [head, river, [...hand, ...label], caret].map((l) => padLine(l, w));
 }
 
 export function metricsLine(ctx: Ctx, w: number): Line {
