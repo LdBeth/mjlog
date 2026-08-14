@@ -115,7 +115,16 @@ export function* runRound(
   const finish = (outcome: RoundOutcome): RoundResult => {
     t.syncScores();
     deps.onRoundEnd?.(t, outcome);
-    t.emitPublic({ e: "result", outcome });
+    // Snapshot every seat's hand BEFORE anything downstream can disturb the
+    // table: the 局結果 overlay reveals all four hands, not just the winner's.
+    // Copies, sorted by tile id — `board.hands` is append-ordered, which would
+    // make the reveal jump around between rounds.
+    t.emitPublic({
+      e: "result",
+      outcome,
+      hands: SEATS.map((s) => [...t.hands[s]].sort((a, b) => a - b)),
+      melds: SEATS.map((s) => [...t.melds[s]]),
+    });
     return { outcome, table: t };
   };
 

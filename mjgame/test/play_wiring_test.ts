@@ -94,3 +94,51 @@ Deno.test("play wiring: tsumogiriLock is armed, and an Observation sees it", () 
   }
   assert(armed > 0, "ドラ切り後の手出し never armed the lock in 6 hanchan");
 });
+
+// ---------------------------------------------------------------------------
+// The result event carries the 手牌公開 snapshot the TUI overlay reveals.
+
+Deno.test("play wiring: every result event snapshots all four hands", () => {
+  let rounds = 0;
+  for (let seed = 1; seed <= 4; seed++) {
+    const results: Array<Extract<PublicEvent, { e: "result" }>> = [];
+    runMatchSync(
+      SEATS.map((s) => new RandomPolicy(`R${s}`, seed * 4 + s)),
+      {
+        seed,
+        cfg: JANKI,
+        dojo: DOJO_DEFAULT,
+        scorer,
+        sink: (e: PublicEvent) => {
+          if (e.e === "result") results.push(e);
+        },
+        ...makeDojoHooks(DOJO_DEFAULT),
+      },
+    );
+    assert(results.length > 0, `seed ${seed}: a hanchan has rounds`);
+    for (const r of results) {
+      rounds++;
+      assertEquals(r.hands?.length, 4, `seed ${seed}: four hands`);
+      assertEquals(r.melds?.length, 4, `seed ${seed}: four meld sets`);
+      for (const s of SEATS) {
+        const hand = r.hands![s];
+        const melds = r.melds![s];
+        assert(hand.length > 0, `seed ${seed}: P${s} holds nothing`);
+        assert(hand.length <= 14, `seed ${seed}: P${s} holds ${hand.length} tiles`);
+        // 13 concealed minus three per meld, plus the winner's drawn 14th.
+        assertEquals(
+          hand.length + 3 * melds.length <= 14,
+          true,
+          `seed ${seed}: P${s} hand ${hand.length} + ${melds.length} melds`,
+        );
+        // A snapshot, not a live alias: sorted, and detached from the table.
+        assertEquals(
+          hand,
+          [...hand].sort((a, b) => a - b),
+          `seed ${seed}: P${s}'s revealed hand is unsorted`,
+        );
+      }
+    }
+  }
+  assert(rounds >= 4, "the snapshot should be checked over real rounds");
+});

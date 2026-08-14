@@ -6,8 +6,18 @@
 //    "planes":"<base64 of the 1224 Int8 bytes>",
 //    "scalars":"<base64 of the 39 little-endian float32 = 156 bytes>",
 //    "mask":[legal action indices],"a":<chosen index>}
-//   {"k":"r","deltas":[4 point deltas, ABSOLUTE seats],"outcome":"agari"|"draw"}
+//   {"k":"r","deltas":[4 point deltas, ABSOLUTE seats],"outcome":"agari"|"draw",
+//    "viol":[4 評価点マイナス, ABSOLUTE seats]}
 //   {"k":"m","scores":[4],"net":[4],"violations":[4]}
+//
+// "viol" on an "r" line is the 評価点マイナス INCURRED IN THAT ROUND, per
+// absolute seat (positive magnitudes, 0 when clean). It exists so credit
+// assignment stays causal: the match total charges a 罰符 to every decision in
+// the hanchan, including the ones made before it happened. Files written before
+// this field existed simply lack it — a loader should read a missing "viol" as
+// [0,0,0,0] and fall back to the "m" line. The "m" line's "violations" is
+// UNCHANGED: still the whole-match total, kept for that fallback and for
+// reporting, and it equals the per-seat sum of every "r" line's "viol".
 //
 // "v" is the FEATURE version the planes/scalars were encoded with, so a loader
 // can reject a dataset that predates the current encoder instead of reshaping
@@ -140,11 +150,17 @@ export class RecordingPolicy implements SyncPolicy {
 // round / match lines
 // ---------------------------------------------------------------------------
 
-export function writeRoundEnd(w: TrajectoryWriter, outcome: RoundOutcome): void {
+/** `viol`: 評価点マイナス incurred in THIS round, per absolute seat (length 4). */
+export function writeRoundEnd(
+  w: TrajectoryWriter,
+  outcome: RoundOutcome,
+  viol: number[],
+): void {
   w.writeLine({
     k: "r",
     deltas: [...outcome.deltas],
     outcome: outcome.kind === "agari" ? "agari" : "draw",
+    viol: [...viol],
   });
 }
 
@@ -176,10 +192,25 @@ export function violationPoints(ledger: Violation[]): number[] {
 
 export function writeMatchEnd(
   w: TrajectoryWriter,
-  result: { scores: number[]; outcomes: RoundOutcome[]; ledger: Violation[] },
+  result: {
+    scores: number[];
+    outcomes: RoundOutcome[];
+    ledger: Violation[];
+    ledgerCuts: number[];
+  },
   cfg: RuleConfig,
 ): void {
-  for (const o of result.outcomes) writeRoundEnd(w, o);
+  const cuts = result.ledgerCuts;
+  if (cuts.length !== result.outcomes.length) {
+    // Silently recording a mis-attributed ledger would poison the dataset in a
+    // way no downstream check could see, so refuse to write the match at all.
+    throw new Error(
+      `ledgerCuts/outcomes mismatch: ${cuts.length} cuts for ${result.outcomes.length} rounds`,
+    );
+  }
+  result.outcomes.forEach((o, k) => {
+    writeRoundEnd(w, o, violationPoints(result.ledger.slice(cuts[k - 1] ?? 0, cuts[k])));
+  });
   w.writeLine({
     k: "m",
     scores: [...result.scores],

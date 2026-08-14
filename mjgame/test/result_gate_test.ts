@@ -97,6 +97,7 @@ function matchResult(): MatchResult {
     rounds: [],
     outcomes: [drawOutcome()],
     ledger: [],
+    ledgerCuts: [0],
     game: {
       version: "2.3",
       rules: { raw: 0, aka: true, kuitan: JANKI.kuitan, sanma: false, hanchan: JANKI.hanchan },
@@ -200,4 +201,90 @@ Deno.test("own panel: the player's own river is rendered above the hand", () => 
   }
   // The hand must still be its own line, one row below.
   assert(lines[2].map((s) => s.text).join("").startsWith("手牌"));
+});
+
+// ---------------------------------------------------------------------------
+// 手牌公開: the result overlay reveals every seat's hand, not just the winner's.
+
+Deno.test("result overlay: 手牌公開 shows all four hands when the event carries them", () => {
+  const a = app();
+  const hands = [
+    tiles("123456789m123p9p"),
+    tiles("11122233344455s"),
+    tiles("東南西北白發中東南西"),
+    tiles("456789m456789p"),
+  ];
+  a.onEvent({
+    e: "riichi",
+    who: 1,
+    step: 1,
+  });
+  a.onEvent({
+    e: "result",
+    outcome: drawOutcome(),
+    hands,
+    melds: [[], [], [], []],
+  });
+
+  const lines = a.overlayLines();
+  assert(lines, "a 局結果 overlay must be up");
+  const head = lines.indexOf("手牌公開");
+  assert(head >= 0, `no 手牌公開 header in the overlay: ${JSON.stringify(lines)}`);
+
+  const seatLines = lines.slice(head + 1, head + 5);
+  assertEquals(seatLines.length, 4, "one revealed line per seat");
+  for (let s = 0; s < 4; s++) {
+    const text = seatLines[s];
+    assert(text.startsWith(`P${s}`), `seat ${s} line should be labelled: ${text}`);
+    for (const t of hands[s]) {
+      assert(
+        text.includes(tileText(t, { mode: "ascii", aka: JANKI.akaIds })),
+        `${tileText(t, { mode: "ascii", aka: JANKI.akaIds })} missing from P${s}: ${text}`,
+      );
+    }
+  }
+  // The declaring seat is called out in words; the reveal sits above 点棒移動.
+  assert(seatLines[1].includes("リーチ"), `P1 declared riichi: ${seatLines[1]}`);
+  assert(!seatLines[0].includes("リーチ"), `P0 did not: ${seatLines[0]}`);
+  assert(
+    lines.slice(head).some((l) => l.startsWith("点棒移動")),
+    "点棒移動 must still follow the reveal",
+  );
+  a.stop();
+});
+
+Deno.test("result overlay: no 手牌公開 block at all when the event omits hands", () => {
+  const a = app();
+  a.onEvent({ e: "result", outcome: drawOutcome() });
+
+  const lines = a.overlayLines();
+  assert(lines, "a 局結果 overlay must be up");
+  assertEquals(lines.indexOf("手牌公開"), -1, "an old-shape event reveals nothing");
+  assert(lines.some((l) => l.startsWith("点棒移動")), "the rest of the overlay is unchanged");
+  a.stop();
+});
+
+Deno.test("result overlay: melds are rendered alongside the concealed tiles", () => {
+  const a = app();
+  const pon = tiles("111p");
+  a.onEvent({
+    e: "result",
+    outcome: drawOutcome(),
+    hands: [tiles("123456789m12p"), tiles("2345678999m12p"), tiles("11122233344455s"), []],
+    melds: [
+      [],
+      [],
+      [],
+      [{ kind: "pon", who: 3, fromWho: 0, calledTile: pon[0], tiles: pon }],
+    ],
+  });
+
+  const lines = a.overlayLines()!;
+  const seatLines = lines.slice(lines.indexOf("手牌公開") + 1, lines.indexOf("手牌公開") + 5);
+  const glyph = { mode: "ascii", aka: JANKI.akaIds } as const;
+  assert(
+    seatLines[3].includes("[" + pon.map((t) => tileText(t, glyph)).join("") + "]"),
+    `P3's pon should be bracketed on its line: ${seatLines[3]}`,
+  );
+  a.stop();
 });

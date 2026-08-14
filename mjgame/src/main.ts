@@ -38,6 +38,8 @@ interface Args {
   seats: string;
   /** Manifest for the "n" seats. */
   weights: string;
+  /** Softmax temperature for the "n" seats; 0 keeps them deterministic. */
+  temp: number;
   /** When set, self-play writes a trajectory JSONL here. */
   record: string;
   help: boolean;
@@ -52,13 +54,14 @@ function makePolicy(
   name: string,
   seed: number,
   weights = DEFAULT_WEIGHTS,
+  temp = 0,
 ): SyncPolicy {
   if (kind === "r") return new RandomPolicy(name, seed);
   if (kind === "n") {
     // Eager load: a seat that cannot think is better refused at startup than
     // discovered mid-hanchan.
     try {
-      return new NeuralPolicy(name, seed, weights);
+      return new NeuralPolicy(name, seed, weights, { temperature: temp });
     } catch (e) {
       die(
         `${e instanceof Error ? e.message : String(e)}\n` +
@@ -82,6 +85,7 @@ function parseArgs(argv: string[]): Args {
     noIntro: false,
     seats: "hhhh",
     weights: DEFAULT_WEIGHTS,
+    temp: 0,
     record: "",
     help: false,
   };
@@ -98,7 +102,11 @@ function parseArgs(argv: string[]): Args {
       a.timerBank = Number(m[1]) * 1000;
       a.timerTurn = Number(m[2] ?? 0) * 1000;
     } else if (arg.startsWith("--weights=")) a.weights = arg.slice(10);
-    else if (arg.startsWith("--record=")) a.record = arg.slice(9);
+    else if (arg.startsWith("--temp=")) {
+      const v = Number(arg.slice(7));
+      if (!Number.isFinite(v) || v < 0) die(`--temp は 0 以上の実数: ${arg.slice(7)}`);
+      a.temp = v;
+    } else if (arg.startsWith("--record=")) a.record = arg.slice(9);
     else if (arg.startsWith("--seats=")) {
       const v = arg.slice(8);
       if (!/^[hrn]{1,4}$/.test(v)) die(`--seats は h, r, n を4文字まで: ${v}`);
@@ -144,6 +152,8 @@ const USAGE = `mjgame — 雀鬼流ルールの4人麻雀 (人間1 + CPU3)
                       play では人間の席はシードから決まり、その席の文字は無視される
   --weights=PATH      n席が読む manifest.json (既定 weights/manifest.json)。
                       読めなければ起動時にエラー — trainer か train/randinit.py で作る
+  --temp=T            n席の方策温度。0=決定的(既定)、1=PPO自己対戦のサンプリング。
+                      正の値なら合法手のソフトマックスから席ごとの乱数で1手引く
   --record=PATH       selfplay の全判断を軌跡JSONL (trajectory) に書き出す。
                       1行1判断 ("d") + 局結果 ("r") + 半荘結果 ("m")。学習器の入力
   --no-intro          開始演出と配牌アニメを飛ばす
@@ -235,6 +245,8 @@ async function cmdPlay(a: Args): Promise<void> {
 interface HeadlessOptions {
   /** Manifest path handed to any "n" seat. */
   weights?: string;
+  /** Softmax temperature for any "n" seat; omitted or 0 = greedy. */
+  temp?: number;
   /** Trajectory JSONL to record into; one writer for the whole run. */
   record?: string;
 }
@@ -259,6 +271,7 @@ function headless(
           `${seats[seat].toUpperCase()}${seat}`,
           s * 4 + seat,
           opts.weights,
+          opts.temp,
         );
         return writer ? new RecordingPolicy(p, writer) : p;
       });
@@ -285,6 +298,7 @@ function headless(
 function cmdSelfplay(a: Args): void {
   const { results, ms, traj } = headless(a.games, a.seed, a.seats, {
     weights: a.weights,
+    temp: a.temp,
     record: a.record || undefined,
   });
   const place = SEATS.map(() => [0, 0, 0, 0]);

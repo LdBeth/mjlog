@@ -93,7 +93,18 @@ export type PublicEvent =
   | { e: "riichi"; who: Seat; step: 1 | 2 }
   | { e: "dora"; indicator: Tile }
   | { e: "violation"; v: Violation }
-  | { e: "result"; outcome: RoundOutcome };
+  | {
+    e: "result";
+    outcome: RoundOutcome;
+    /**
+     * Every seat's concealed tiles at the moment the round ended, sorted by
+     * tile id for display stability. Optional so older constructors (and test
+     * literals) stay valid; the 局結果 overlay reveals all four when present.
+     */
+    hands?: Tile[][];
+    /** Every seat's melds at the same moment, parallel to `hands`. */
+    melds?: Meld[][];
+  };
 
 // ---------------------------------------------------------------------------
 // Outcomes

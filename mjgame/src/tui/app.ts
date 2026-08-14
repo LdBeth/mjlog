@@ -472,6 +472,13 @@ export class App {
     return this.timerState();
   }
 
+  /** The text overlay's body, one plain string per line. Exposed for tests. */
+  overlayLines(): string[] | null {
+    const o = this.overlayState;
+    if (!o || o.kind !== "text") return null;
+    return o.body.map((l) => l.map((s) => s.text).join(""));
+  }
+
   /** Remaining turn allowance / match bank for the decision in flight. */
   private timerState(): TimerState {
     const base = this.opts.timerTurnMs;
@@ -620,7 +627,7 @@ export class App {
         this.pushLog(`違反 P${e.v.seat} ${e.v.label} -${e.v.points}`);
         break;
       case "result":
-        this.onResult(e.outcome);
+        this.onResult(e);
         break;
     }
     this.requestRender();
@@ -628,7 +635,8 @@ export class App {
 
   private lastDiscard: { tile: Tile; from: Seat } | null = null;
 
-  private onResult(outcome: RoundOutcome): void {
+  private onResult(ev: Extract<PublicEvent, { e: "result" }>): void {
+    const outcome = ev.outcome;
     const body: Line[] = [];
     if (outcome.kind === "agari") {
       for (const w of outcome.wins) {
@@ -649,6 +657,7 @@ export class App {
       ]);
       this.pushLog(`流局 ${outcome.draw}`);
     }
+    if (ev.hands) body.push(...this.revealLines(ev.hands, ev.melds, outcome));
     body.push([]);
     body.push([sp("点棒移動 " + outcome.deltas.map((d, s) => `P${s}${fmtDelta(d)}`).join("  "))]);
     if (this.liveScores) {
@@ -669,6 +678,38 @@ export class App {
 
   private meldText(m: Meld): string {
     return m.tiles.map((t) => tileText(t, this.glyph)).join("");
+  }
+
+  /**
+   * 手牌公開: every seat's hand at the end of the round, not just the winner's
+   * or the tenpai ones. The human seat and the winner(s) are picked out by
+   * colour; riichi is called out in words, since colour is already spoken for.
+   */
+  private revealLines(
+    hands: readonly Tile[][],
+    melds: readonly Meld[][] | undefined,
+    outcome: RoundOutcome,
+  ): Line[] {
+    const winners = new Set<Seat>(
+      outcome.kind === "agari" ? outcome.wins.map((w) => w.who) : [],
+    );
+    const me = this.opts.humanSeat ?? 0;
+    const out: Line[] = [[], [sp("手牌公開", DIM)]];
+    for (const s of SEATS) {
+      const line: Line = [
+        sp(
+          `P${s}`,
+          winners.has(s) ? SGR.brightGreen : s === me ? SGR.brightCyan : DIM,
+        ),
+        sp(this.liveRiichi[s] ? " リーチ " : " ", this.liveRiichi[s] ? SGR.yellow : ""),
+      ];
+      const m = melds?.[s] ?? [];
+      for (const meld of m) line.push(sp(`[${this.meldText(meld)}]`, DIM));
+      if (m.length > 0) line.push(sp(" "));
+      line.push(sp((hands[s] ?? []).map((t) => tileText(t, this.glyph)).join("")));
+      out.push(line);
+    }
+    return out;
   }
 
   private pushLog(s: string): void {

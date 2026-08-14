@@ -29,6 +29,13 @@ export interface MatchResult {
   rounds: Round[];
   outcomes: RoundOutcome[];
   ledger: Violation[];
+  /**
+   * Round boundaries into `ledger`: `ledgerCuts[k]` is the ledger length once
+   * round `k` finished, so round `k` owns `ledger[ledgerCuts[k-1] ?? 0 ..
+   * ledgerCuts[k])`. Non-decreasing, one entry per outcome, last === ledger
+   * length. `kyoku` alone cannot do this — 連荘 repeats the same kyoku number.
+   */
+  ledgerCuts: number[];
   game: Game;
 }
 
@@ -40,6 +47,7 @@ interface MatchState {
   rounds: Round[];
   outcomes: RoundOutcome[];
   ledger: Violation[];
+  ledgerCuts: number[];
   rng: Rng;
   players: PlayerInfo[];
   game: Game | null;
@@ -56,6 +64,7 @@ function initState(opts: MatchOptions): MatchState {
     rounds: [],
     outcomes: [],
     ledger: [],
+    ledgerCuts: [],
     rng: sfc32(opts.seed),
     players,
     game: null,
@@ -83,6 +92,10 @@ function advance(m: MatchState, t: Table, outcome: RoundOutcome, opts: MatchOpti
   m.rounds.push(t.round);
   m.outcomes.push(outcome);
   m.ledger.push(...t.ledger);
+  // Snapshot the boundary in the same breath as the outcome: this is the only
+  // place the two can be kept in lockstep, and it is what lets a recorder charge
+  // a 罰符 to the round that earned it rather than to the whole match.
+  m.ledgerCuts.push(m.ledger.length);
   if (!m.game) m.game = t.game;
   else m.game.rounds.push(t.round);
 
@@ -133,6 +146,7 @@ function finalize(m: MatchState, opts: MatchOptions): MatchResult {
     rounds: m.rounds,
     outcomes: m.outcomes,
     ledger: m.ledger,
+    ledgerCuts: m.ledgerCuts,
     game,
   };
 }

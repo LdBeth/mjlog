@@ -157,7 +157,9 @@ class Trajectories(NamedTuple):
 
     Unpacks in contract order:
         X, mask, action, seat, match, net, violations
-    with a few extra fields appended for future use.
+    with a few extra fields appended for future use.  New fields are only ever
+    APPENDED, so positional unpacking of the prefix and attribute access both
+    keep working across format additions.
     """
 
     X: np.ndarray            # [n, 1263] float32  planes ++ scalars
@@ -175,6 +177,8 @@ class Trajectories(NamedTuple):
     kyoku: np.ndarray        # [n]      int32
     honba: np.ndarray        # [n]      int32
     junme: np.ndarray        # [n]      int32
+    round_viol: np.ndarray   # [r, 4]   float32  penalty points incurred IN round k
+    has_round_viol: bool     #          True iff EVERY "r" line carried "viol"
 
     def __len__(self) -> int:
         return int(self.X.shape[0])
@@ -230,6 +234,13 @@ def load_trajectories(pattern: Union[str, Sequence[str]]) -> Trajectories:
     `pattern` is a glob (or list of globs / paths).  Lines of one match are
     contiguous: every "d"/"r" line of a match precedes its "m" line, so we
     accumulate decisions and close them out when the "m" arrives.
+
+    An "r" line MAY carry `"viol":[4]` — the 評価点 penalty points incurred
+    during that round, per absolute seat, as positive magnitudes.  It lands in
+    `round_viol`, zero-filled for lines that lack it, and `has_round_viol` is
+    True only when EVERY round line in the whole dataset carried it: a mixed
+    dataset cannot be timestamped consistently, so it counts as not having the
+    field at all and the caller must fall back to the match-level totals.
     """
     files = _expand_files(pattern)
     if not files:
@@ -252,6 +263,8 @@ def load_trajectories(pattern: Union[str, Sequence[str]]) -> Trajectories:
     r_deltas: List[List[float]] = []
     r_outcome: List[str] = []
     r_match: List[int] = []
+    r_viol: List[List[float]] = []
+    r_viol_lines = 0       # "r" lines that actually carried "viol"
 
     match_idx = 0          # index of the match currently being accumulated
     open_decisions = 0     # decisions seen since the last "m" line
@@ -308,6 +321,16 @@ def load_trajectories(pattern: Union[str, Sequence[str]]) -> Trajectories:
                     r_deltas.append([float(v) for v in rec["deltas"]])
                     r_outcome.append(str(rec["outcome"]))
                     r_match.append(match_idx)
+                    rv = rec.get("viol")
+                    if rv is None:
+                        r_viol.append([0.0] * 4)
+                    else:
+                        if len(rv) != 4:
+                            raise ValueError(
+                                f"{path}:{lineno}: viol has {len(rv)} entries, expected 4"
+                            )
+                        r_viol.append([float(v) for v in rv])
+                        r_viol_lines += 1
 
                 elif kind == "m":
                     scores.append([float(v) for v in rec["scores"]])
@@ -350,12 +373,93 @@ def load_trajectories(pattern: Union[str, Sequence[str]]) -> Trajectories:
         kyoku=np.asarray(kyokus, dtype=np.int32),
         honba=np.asarray(honbas, dtype=np.int32),
         junme=np.asarray(junmes, dtype=np.int32),
+        round_viol=np.asarray(r_viol, dtype=np.float32).reshape(-1, 4),
+        has_round_viol=bool(r_deltas) and r_viol_lines == len(r_deltas),
     )
 
 
 # ---------------------------------------------------------------------------
 # Weight export
 # ---------------------------------------------------------------------------
+
+
+def load_weights(path: str) -> PolicyValueNet:
+    """Read manifest.json + policy.f32 back into a `PolicyValueNet`.
+
+    The exact inverse of `export_weights`: `path` is either the directory that
+    holds the pair or the manifest.json inside it.  The manifest is checked
+    field-by-field against `manifest_for(input_dim)` — where `input_dim` is
+    taken from the manifest's own first layer, so a net trained on a different
+    feature width still loads and only DISAGREEMENTS with the fixed
+    architecture (layer count, hidden sizes, action count, feature block) are
+    errors.  The blob is then sliced in the same order it was written, with no
+    transpose: mlx.nn.Linear's `weight` is [out, in], which is the blob layout.
+    """
+    if os.path.isdir(path):
+        mdir, mpath = path, os.path.join(path, MANIFEST_NAME)
+    else:
+        mdir, mpath = os.path.dirname(path) or ".", path
+    if not os.path.exists(mpath):
+        raise ValueError(f"no {MANIFEST_NAME} at {mpath}")
+
+    with open(mpath, "r", encoding="utf-8") as fh:
+        try:
+            manifest = json.load(fh)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"{mpath}: bad JSON: {e}") from e
+
+    layers = manifest.get("layers")
+    if not isinstance(layers, list) or not layers:
+        raise ValueError(f"{mpath}: manifest has no layers")
+    try:
+        input_dim = int(layers[0]["in"])
+    except (KeyError, TypeError, ValueError) as e:
+        raise ValueError(f"{mpath}: first layer has no usable 'in': {e}") from e
+
+    want = manifest_for(input_dim)
+    for key in ("version", "arch", "features", "actions", "blob"):
+        if manifest.get(key) != want[key]:
+            raise ValueError(
+                f"{mpath}: {key} is {manifest.get(key)!r}, expected {want[key]!r}"
+            )
+    if len(layers) != len(want["layers"]):
+        raise ValueError(
+            f"{mpath}: {len(layers)} layer(s), expected {len(want['layers'])}"
+        )
+    for i, (got, exp) in enumerate(zip(layers, want["layers"])):
+        for key in ("in", "out", "act"):
+            gv = got.get(key) if isinstance(got, dict) else None
+            if key != "act":
+                gv = int(gv) if gv is not None else None
+            if gv != exp[key]:
+                raise ValueError(
+                    f"{mpath}: layer {i} {key} is {gv!r}, expected {exp[key]!r}"
+                )
+
+    blob_path = os.path.join(mdir, manifest["blob"])
+    if not os.path.exists(blob_path):
+        raise ValueError(f"no {manifest['blob']} next to {mpath}")
+    blob = np.fromfile(blob_path, dtype="<f4")
+    need = blob_floats(input_dim)
+    if blob.size != need:
+        raise ValueError(
+            f"{blob_path}: {blob.size} float32 ({blob.size * 4} bytes), "
+            f"expected {need} ({need * 4} bytes) for input width {input_dim}"
+        )
+
+    model = PolicyValueNet(input_dim)
+    off = 0
+    for layer, spec in zip(model.ordered_layers, want["layers"]):
+        n_w = spec["out"] * spec["in"]
+        w = blob[off : off + n_w].reshape(spec["out"], spec["in"])
+        off += n_w
+        b = blob[off : off + spec["out"]]
+        off += spec["out"]
+        layer.weight = mx.array(np.ascontiguousarray(w, dtype=np.float32))
+        layer.bias = mx.array(np.ascontiguousarray(b, dtype=np.float32))
+    assert off == need, f"consumed {off} of {need} floats"
+    mx.eval(model.parameters())
+    return model
 
 
 def export_weights(model: PolicyValueNet, outdir: str) -> str:
