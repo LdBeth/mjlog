@@ -9,7 +9,7 @@ import { RandomPolicy } from "../src/ai/random.ts";
 import { runMatchSync } from "../src/match.ts";
 import type { MatchResult } from "../src/match.ts";
 import { makeDojoHooks } from "../src/main.ts";
-import { FEATURES, PLANE_LEN } from "../src/rl/features.ts";
+import { encodeOracle, FEATURES, ORACLE_LEN, PLANE_LEN } from "../src/rl/features.ts";
 import { ACTIONS } from "../src/rl/actionspace.ts";
 import {
   f32leBytes,
@@ -24,10 +24,11 @@ import {
 import { DOJO_HEADLESS, JANKI } from "../src/rules.ts";
 import { sfc32 } from "../src/rng.ts";
 import { scorer } from "../src/score.ts";
+import type { Table } from "../src/table.ts";
 import type { RoundOutcome, Seat, Violation } from "../src/types.ts";
 import { SEATS } from "../src/types.ts";
 
-const SCALAR_BYTES = 39 * 4; // 156: the frozen scalar block (feature v2)
+const SCALAR_BYTES = 42 * 4; // 168: the frozen scalar block (feature v3)
 
 interface Recorded {
   result: MatchResult;
@@ -78,7 +79,11 @@ function expectedNet(scores: number[]): number[] {
   });
 }
 
-/** 供託 still on the table at the end — the last round's sticks, unless won. */
+/**
+ * 供託 the last round left behind — its sticks, unless a 和了 swept them. This
+ * is what `finalize` then pays out to the top finisher, so a seed that leaves
+ * one exercises that payout.
+ */
 function leftoverKyotaku(r: MatchResult): number {
   let k = 0;
   for (let i = 0; i < r.rounds.length; i++) {
@@ -128,10 +133,14 @@ Deno.test("record: 1半荘の JSONL が契約どおりに書かれる", async (t
         const where = `d line ${i + 1}`;
         assertEquals(fromBase64(d.planes as string).length, PLANE_LEN, `${where}: planes`);
         assertEquals(fromBase64(d.scalars as string).length, SCALAR_BYTES, `${where}: scalars`);
-        assertEquals(PLANE_LEN, 1224); // pins the plane count itself (36 × 34)
+        // The two numbers the header comment promises, spelled out: feature v3
+        // is 48 × 34 Int8 planes and 42 little-endian float32 scalars.
+        assertEquals(PLANE_LEN, 1632);
+        assertEquals(fromBase64(d.planes as string).length, 1632, `${where}: 1632 plane bytes`);
+        assertEquals(fromBase64(d.scalars as string).length, 168, `${where}: 168 scalar bytes`);
         // The trainer refuses a line whose feature version it does not know, so
         // every line must carry it — a missing "v" means "v1" over there.
-        assertEquals(d.v, 2, `${where}: feature version`);
+        assertEquals(d.v, 3, `${where}: feature version`);
         assertEquals(d.v, FEATURES.version, `${where}: version tracks the encoder`);
 
         const mask = d.mask as number[];
@@ -203,13 +212,11 @@ Deno.test("record: 1半荘の JSONL が契約どおりに書かれる", async (t
       for (const s of scores) assert(typeof s === "number" && Number.isFinite(s));
       assertEquals(scores, result.scores);
 
-      // 4×30000 minus whatever is still lying on the table as 供託.
+      // Exactly 4×30000: the 供託 the last round left behind is not lost, it is
+      // paid to the top finisher by `finalize` (the Tenhou convention), so the
+      // recorded scores account for every point that went in.
       const sum = scores.reduce((a, b) => a + b, 0);
-      assertEquals(
-        sum + leftoverKyotaku(result) * 1000,
-        JANKI.startScore * 4,
-        `${sum} + ${leftoverKyotaku(result)} sticks != ${JANKI.startScore * 4}`,
-      );
+      assertEquals(sum, JANKI.startScore * 4, `${sum} != ${JANKI.startScore * 4}`);
 
       assertEquals(m.net, settlement(result.scores, JANKI));
       assertEquals(m.net, expectedNet(scores));
@@ -358,6 +365,105 @@ Deno.test("record: 実戦でも局ごとの合計は台帳と一致する", () =
 });
 
 // ---------------------------------------------------------------------------
+// oracle block (optional, trainer-side only)
+// ---------------------------------------------------------------------------
+
+/**
+ * The same hanchan recorded twice: once with the driver's oracle tap wired up,
+ * once without it. `--record` always wires it, but the field is optional on the
+ * wire — a dataset written without it must still be a legal dataset.
+ */
+function recordOracle(path: string, seed: number, wired: boolean): Record<string, unknown>[] {
+  const writer = new TrajectoryWriter(path);
+  const ref: { t: Table | null } = { t: null };
+  const policies = SEATS.map((s) =>
+    new RecordingPolicy(
+      new RandomPolicy(`R${s}`, seed * 4 + s),
+      writer,
+      wired ? (sq) => encodeOracle(ref.t!, sq as Seat) : undefined,
+    )
+  );
+  const result = runMatchSync(policies, {
+    seed,
+    cfg: JANKI,
+    dojo: DOJO_HEADLESS,
+    scorer,
+    tableRef: ref,
+    ...makeDojoHooks(DOJO_HEADLESS),
+  });
+  writeMatchEnd(writer, result, JANKI);
+  writer.close();
+  return Deno.readTextFileSync(path).split("\n").filter((l) => l !== "").map(
+    (l) => JSON.parse(l) as Record<string, unknown>,
+  );
+}
+
+Deno.test("record: オラクル情報は全 d 行に o/sh として乗る", () => {
+  const path = Deno.makeTempFileSync({ prefix: "mjgame_oracle_", suffix: ".jsonl" });
+  try {
+    const ds = recordOracle(path, 966, true).filter((l) => l.k === "d");
+    assert(ds.length > 0, "nothing was recorded");
+    let sawKnownOpponent = false;
+    for (const [i, d] of ds.entries()) {
+      const where = `d line ${i + 1}`;
+      const o = d.o as string;
+      assertEquals(typeof o, "string", `${where}: no oracle block`);
+      assertEquals(o.length, 228, `${where}: base64 length (170 bytes)`);
+      const bytes = fromBase64(o);
+      assertEquals(bytes.length, ORACLE_LEN, `${where}: oracle bytes`);
+      // v3 widened the POLICY input only ("planes"/"scalars"); the hidden-state
+      // block is byte for byte the 170 it has always been.
+      assertEquals(ORACLE_LEN, 170);
+      for (const b of bytes) assert(b >= 0 && b <= 4, `${where}: oracle cell ${b}`);
+      // Each opponent holds 13 tiles minus whatever it has melded, so the first
+      // three planes are never all zero on a real board.
+      const held = bytes.subarray(0, 3 * 34).reduce((a, b) => a + b, 0);
+      assert(held > 0, `${where}: no opponent tiles at all`);
+      if (held === 39) sawKnownOpponent = true;
+
+      const sh = d.sh as number[];
+      assert(Array.isArray(sh) && sh.length === 3, `${where}: sh ${JSON.stringify(sh)}`);
+      for (const v of sh) {
+        assert(Number.isInteger(v) && v >= -1 && v <= 8, `${where}: shanten ${v}`);
+      }
+      // The oracle block does not move the version on its own — "v" is the
+      // POLICY encoder's, and it says v3 because of the per-opponent planes.
+      assertEquals(d.v, FEATURES.version, `${where}: feature version`);
+      assertEquals(d.v, 3, `${where}: feature version`);
+      assertEquals(fromBase64(d.planes as string).length, PLANE_LEN, `${where}: planes`);
+    }
+    assert(sawKnownOpponent, "no decision saw three fully concealed opponents");
+  } finally {
+    Deno.removeSync(path);
+  }
+});
+
+Deno.test("record: タップ無しでは o も sh も現れず、他の列は1バイトも変わらない", () => {
+  const bare = Deno.makeTempFileSync({ prefix: "mjgame_bare_", suffix: ".jsonl" });
+  const wired = Deno.makeTempFileSync({ prefix: "mjgame_wired_", suffix: ".jsonl" });
+  try {
+    const without = recordOracle(bare, 966, false);
+    const with_ = recordOracle(wired, 966, true);
+    for (const l of without) {
+      assert(!("o" in l), "an oracle block appeared without a tap");
+      assert(!("sh" in l), "shanten labels appeared without a tap");
+    }
+    // Same seed, same policies: the oracle must be a pure addition, so stripping
+    // it reproduces the old file line for line, key order included.
+    assertEquals(with_.length, without.length);
+    with_.forEach((l, i) => {
+      const stripped = { ...l };
+      delete stripped.o;
+      delete stripped.sh;
+      assertEquals(JSON.stringify(stripped), JSON.stringify(without[i]), `line ${i + 1}`);
+    });
+  } finally {
+    Deno.removeSync(bare);
+    Deno.removeSync(wired);
+  }
+});
+
+// ---------------------------------------------------------------------------
 // encoding helpers
 // ---------------------------------------------------------------------------
 
@@ -389,7 +495,7 @@ Deno.test("record: f32leBytes はリトルエンディアン", () => {
 
   // ...and the trainer's own read-back (DataView, littleEndian=true) agrees.
   const rng = sfc32(7);
-  const a = new Float32Array(39);
+  const a = new Float32Array(FEATURES.scalars);
   for (let i = 0; i < a.length; i++) a[i] = (rng.float() * 2 - 1) * 100;
   const bytes = f32leBytes(a);
   assertEquals(bytes.length, SCALAR_BYTES);

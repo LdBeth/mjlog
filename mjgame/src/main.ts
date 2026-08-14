@@ -4,6 +4,7 @@ import { RandomPolicy } from "./ai/random.ts";
 import { HeuristicPolicy } from "./ai/heuristic.ts";
 import { NeuralPolicy } from "./rl/policy.ts";
 import { RecordingPolicy, TrajectoryWriter, writeMatchEnd } from "./rl/record.ts";
+import { encodeOracle } from "./rl/features.ts";
 import { runMatch, runMatchSync } from "./match.ts";
 import { dojoHooks } from "./dojo.ts";
 import type { MatchResult } from "./match.ts";
@@ -13,6 +14,7 @@ import type { Policy, SyncPolicy } from "./policy.ts";
 import { sfc32 } from "./rng.ts";
 // Real yaku + fu scoring.
 import { scorer } from "./score.ts";
+import type { Table } from "./table.ts";
 import { SEATS } from "./types.ts";
 import type { Seat } from "./types.ts";
 import { App, PacedPolicy } from "./tui/app.ts";
@@ -34,7 +36,12 @@ interface Args {
   /** One pool for the whole match, spent only after the turn allowance. */
   timerBank: number;
   noIntro: boolean;
-  /** One char per seat, "h" heuristic, "r" random or "n" neural — seat 0 first. */
+  /**
+   * CPU kinds, "h" heuristic, "r" random or "n" neural. selfplay/bench read one
+   * char per absolute seat (seat 0 first). play deals the first three chars to
+   * the CPU seats in seat order, skipping wherever the human landed — so
+   * "nhhh" always yields exactly one neural CPU regardless of the human's seat.
+   */
   seats: string;
   /** Manifest for the "n" seats. */
   weights: string;
@@ -146,16 +153,21 @@ const USAGE = `mjgame — 雀鬼流ルールの4人麻雀 (人間1 + CPU3)
                       毎打の3秒を超えると持ち時間を消費し、使い切ると
                       マイナス表示になる。打牌は強制されず、遅さの代償は
                       雀鬼流の長考ペナルティのみ
-  --seats=hrrn        席ごとのCPU: h=手作り評価関数, r=ランダム,
+  --seats=hrrn        CPUの種類: h=手作り評価関数, r=ランダム,
                       n=学習済みニューラルポリシー (既定 hhhh)。
                       短く書くと最後の文字を繰り返す ("hr" ⇒ "hrrr")。
-                      play では人間の席はシードから決まり、その席の文字は無視される
+                      selfplay/bench では席番号ごと。play では人間の席を
+                      飛ばして先頭3文字を席順に割り当てるので、"nhhh" なら
+                      必ずAI(学習済み)が1人入る。n のCPUは AI東 のように表示
   --weights=PATH      n席が読む manifest.json (既定 weights/manifest.json)。
                       読めなければ起動時にエラー — trainer か train/randinit.py で作る
   --temp=T            n席の方策温度。0=決定的(既定)、1=PPO自己対戦のサンプリング。
                       正の値なら合法手のソフトマックスから席ごとの乱数で1手引く
   --record=PATH       selfplay の全判断を軌跡JSONL (trajectory) に書き出す。
-                      1行1判断 ("d") + 局結果 ("r") + 半荘結果 ("m")。学習器の入力
+                      1行1判断 ("d") + 局結果 ("r") + 半荘結果 ("m")。学習器の入力。
+                      "d" 行には非対称critic用のオラクル情報 (他家3人の手牌・
+                      残り山・裏ドラ = "o"、他家の向聴数 = "sh") も必ず入る。
+                      1判断あたり向聴計算が3回増える分だけ遅くなる (推論側は不使用)
   --no-intro          開始演出と配牌アニメを飛ばす
   --help, -h          このヘルプ
 `;
@@ -181,6 +193,17 @@ export function makeDojoHooks(dojo: DojoConfig) {
 // play
 // ---------------------------------------------------------------------------
 
+/**
+ * play's reading of `--seats`: the first three kinds are dealt to the three
+ * non-human seats in seat order, so "nhhh" is one neural CPU no matter where
+ * the human landed. (selfplay/bench read the same string per absolute seat.)
+ */
+export function cpuKindAt(cpu: string, humanSeat: Seat, seat: Seat): string {
+  let i = 0;
+  for (let s = 0; s < seat; s++) if (s !== humanSeat) i++;
+  return cpu[i] ?? "h";
+}
+
 async function cmdPlay(a: Args): Promise<void> {
   // Without a terminal there is no keyboard, so the first decision would block
   // forever behind a hidden alt-screen. Refuse with a hint instead of hanging.
@@ -195,7 +218,13 @@ async function cmdPlay(a: Args): Promise<void> {
   // does not consume — or mirror — the match's own stream.
   const humanSeat = sfc32(a.seed).fork(0x5ea7).int(4) as Seat;
   const WINDS = ["東", "南", "西", "北"];
-  const names = SEATS.map((s) => s === humanSeat ? "あなた" : `CPU${WINDS[s]}`);
+  // Neural CPUs announce themselves: facing the learned policy should be a
+  // choice the player can see, not a surprise discovered by its style.
+  const names = SEATS.map((s) =>
+    s === humanSeat
+      ? "あなた"
+      : `${cpuKindAt(a.seats, humanSeat, s) === "n" ? "AI" : "CPU"}${WINDS[s]}`
+  );
   const app = new App({
     glyphs: a.glyphs,
     aka: JANKI.akaIds,
@@ -211,7 +240,7 @@ async function cmdPlay(a: Args): Promise<void> {
 
   const cpu = (s: Seat) =>
     new PacedPolicy(
-      makePolicy(a.seats[s], names[s], a.seed * 4 + s, a.weights),
+      makePolicy(cpuKindAt(a.seats, humanSeat, s), names[s], a.seed * 4 + s, a.weights),
       () => app.paceDelay(),
     );
   const policies: Policy[] = SEATS.map((s) => s === humanSeat ? app.human : cpu(s));
@@ -261,6 +290,10 @@ function headless(
   // One file, one handle, every seat and every match of the run: the trainer
   // reads a single stream and the "r"/"m" lines terminate each match in it.
   const writer = opts.record ? new TrajectoryWriter(opts.record) : null;
+  // The recorder's window onto hidden state. `runMatchSync` points it at the
+  // round in play, so `ref.t` is non-null for the whole life of a decision;
+  // outside a round nobody calls the tap.
+  const ref: { t: Table | null } = { t: null };
   const t0 = performance.now();
   try {
     for (let g = 0; g < games; g++) {
@@ -273,7 +306,9 @@ function headless(
           opts.weights,
           opts.temp,
         );
-        return writer ? new RecordingPolicy(p, writer) : p;
+        return writer
+          ? new RecordingPolicy(p, writer, (sq) => encodeOracle(ref.t!, sq as Seat))
+          : p;
       });
       // Without the hooks the ledger is always empty and the stats line would
       // report "違反 0件" no matter what actually happened.
@@ -282,6 +317,7 @@ function headless(
         cfg: JANKI,
         dojo: DOJO_HEADLESS,
         scorer,
+        tableRef: writer ? ref : undefined,
         ...makeDojoHooks(DOJO_HEADLESS),
       });
       results.push(r);
@@ -307,16 +343,37 @@ function cmdSelfplay(a: Args): void {
   const deals = [0, 0, 0, 0]; // 放銃
   const tenpai = [0, 0, 0, 0]; // 流局時聴牌
   const vio = [0, 0, 0, 0];
+  const riichis = [0, 0, 0, 0]; // 立直を掛けた局数
+  const furo = [0, 0, 0, 0]; // 副露した局数 (暗槓は門前なので除く)
+  const winPts = [0, 0, 0, 0]; // 和了局の実収支合計 (本場・供託込み)
+  const winN = [0, 0, 0, 0];
+  const dealPts = [0, 0, 0, 0]; // 放銃局の実支出合計
+  const dealN = [0, 0, 0, 0];
   let rounds = 0;
   let draws = 0;
   for (const r of results) {
     rounds += r.rounds.length;
     for (const v of r.ledger) vio[v.seat]++;
+    for (const s of SEATS) {
+      riichis[s] += (r.riichis ?? [0, 0, 0, 0])[s];
+      furo[s] += (r.furoRounds ?? [0, 0, 0, 0])[s];
+    }
     for (const o of r.outcomes) {
       if (o.kind === "agari") {
         for (const w of o.wins) {
           wins[w.who]++;
           if (w.fromWho !== w.who) deals[w.fromWho]++;
+        }
+        for (const w of o.wins) {
+          winN[w.who]++;
+          winPts[w.who] += o.deltas[w.who];
+        }
+        // 放銃打点は「振り込んだ局」単位。ダブロンは1局1回だけ数え、
+        // その局の支出 (両家ぶん) をまとめて負担額とする。
+        const head = o.wins[0];
+        if (head && head.fromWho !== head.who) {
+          dealN[head.fromWho]++;
+          dealPts[head.fromWho] += -o.deltas[head.fromWho];
         }
       } else {
         draws++;
@@ -348,6 +405,19 @@ function cmdSelfplay(a: Args): void {
         `${avgPts.toFixed(0).padStart(7)}   ${pct(wins[s], rounds).padStart(6)}  ` +
         `${pct(deals[s], rounds).padStart(6)}  ${pct(tenpai[s], draws).padStart(6)}  ` +
         `${String(vio[s]).padStart(4)}`,
+    );
+  }
+  // Second table, appended rather than folded into the first: the rows above are
+  // grepped by the training scripts and must stay byte-identical.
+  const mean = (sum: number, n: number) => n === 0 ? "-" : String(Math.round(sum / n));
+  console.log("");
+  console.log("席     リーチ率  副露率  平均和了打点  平均放銃打点");
+  for (const s of SEATS) {
+    console.log(
+      `${a.seats[s]}P${s}${pct(riichis[s], rounds).padStart(12)}` +
+        `${pct(furo[s], rounds).padStart(8)}` +
+        `${mean(winPts[s], winN[s]).padStart(14)}` +
+        `${mean(dealPts[s], dealN[s]).padStart(14)}`,
     );
   }
   console.log("");

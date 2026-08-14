@@ -131,8 +131,15 @@ export function* runRound(
   const settleWin = (wins: WinInfo[]): RoundResult => {
     // Win rules (e.g. the 南2局以降 浮き restriction) judge the table as it
     // stood when the hand was declared, so they run before the transfer.
+    //
+    // On a tsumo the winning tile is passed as `drawn`, because it IS the drawn
+    // tile and it is still sitting in the hand: the 後付け/片和了り rules judge
+    // the wait the hand held one tile ago, and without it they cannot subtract
+    // the win from the hand. On a ron there is nothing to subtract — the tile is
+    // in the discarder's river.
     for (const w of wins) {
-      deps.onAction?.(t, w.who, { t: w.fromWho === w.who ? "tsumo" : "ron" }, null);
+      const tsumo = w.fromWho === w.who;
+      deps.onAction?.(t, w.who, { t: tsumo ? "tsumo" : "ron" }, tsumo ? w.winTile : null);
     }
     const deltas = scorer.winDeltas(t, wins);
     for (const s of SEATS) t.scores[s] += deltas[s];

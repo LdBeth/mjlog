@@ -34,6 +34,11 @@ export class NeuralPolicy implements SyncPolicy {
    * Loads the weights eagerly: a missing manifest must fail at startup. An
    * already-loaded `Net` is accepted too, for callers (tests, batched rollout
    * workers) that share one net across seats instead of re-reading the blob.
+   *
+   * A path gives this seat its OWN net, and so its own native context when the
+   * Accelerate shim is in play; a shared `Net` shares that one context, which
+   * is fine because seats decide one at a time inside a match — but a net must
+   * never be handed across Workers, whose calls would genuinely overlap.
    */
   constructor(name: string, seed: number, net: string | Net, opts: PolicyOptions = {}) {
     this.name = name;

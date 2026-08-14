@@ -64,6 +64,39 @@ Two KL backstops guard the update, both against the mean over each minibatch:
 past 1.5x --target-kl the policy terms (surrogate + entropy) are dropped and
 the remaining minibatches fit the value head only; past 4x the update aborts
 outright, since value-only steps still move the policy through the trunk.
+
+THE ORACLE CRITIC.  When the trajectories carry the privileged "o"/"sh" fields
+(see common.py), the baseline moves OUT of the policy net entirely and into a
+separate 1433-wide critic that sees the policy's features PLUS the opponents'
+hands, the hidden remainder and the ura indicators.  This is asymmetric
+actor-critic: only the baseline peeks, and it is used only to subtract, so the
+policy stays exactly as blind as it will be at inference time while the
+variance from "what the wall happened to hold" is explained away instead of
+being charged to the policy gradient.  Two things follow, and both are the
+point:
+
+  * the policy's in-tensor value head (output 78) STOPS RECEIVING GRADIENT.
+    It was the loss that owned the shared trunk -- the whole RETURN_SCALE
+    apparatus above exists to keep it from dragging the policy -- and with the
+    critic carrying the baseline the trunk is freed for the policy and its
+    auxiliary heads.  Output 78 is now vestigial: it drifts with the trunk,
+    nothing reads it, the engine ignores it.
+  * the critic is trained by plain MSE against the same TD(lambda) targets on
+    its OWN optimizer.  It never touches the policy's parameters, so a large
+    critic loss cannot move the policy at all -- only through the advantage it
+    computes on the NEXT iteration.
+
+AUXILIARY SPEED HEADS.  fc3 grows 24 rows during training (79 -> 103), read as
+3 opponents x 8 shanten classes, and is asked to predict each opponent's
+current shanten FROM PUBLIC FEATURES ONLY -- the oracle supplies the label, not
+the input.  This deliberately shapes the trunk toward 速度読み: in 雀鬼流 the
+read that matters is how fast the table is, not precisely what each player is
+waiting on, and a trunk that can answer "how close is kamicha" is already
+carrying most of what push/fold needs.  `export_weights` slices those 24 rows
+off, so the blob the engine loads is unchanged; they persist in aux.f32.
+
+Without the oracle fields, everything above is skipped and the ORIGINAL shared
+value-head path runs verbatim -- same losses, same prints, same weights out.
 """
 
 from __future__ import annotations
@@ -78,13 +111,25 @@ import numpy as np
 
 from common import (
     ACTIONS,
+    AUX_CLASSES,
+    AUX_MISSING,
+    AUX_OPP,
+    CRITIC_BLOB_NAME,
+    CRITIC_MANIFEST_NAME,
     FEATURE_VERSION,
     INPUT_DIM,
+    ORACLE_LEN,
+    CriticNet,
     PolicyValueNet,
+    export_critic,
     export_weights,
+    load_aux,
+    load_critic,
     load_trajectories,
     load_weights,
+    split_aux,
     split_head,
+    widen_for_aux,
 )
 
 # Value-head units: V predicts G / RETURN_SCALE.  Frozen across iterations.
@@ -123,6 +168,40 @@ def masked_entropy(logp: mx.array, mask: mx.array) -> mx.array:
     safe = mx.where(mask, logp, zero)
     p = mx.where(mask, mx.exp(safe), zero)
     return -(p * safe).sum(axis=-1).mean()
+
+
+# ---------------------------------------------------------------------------
+# Auxiliary shanten heads
+# ---------------------------------------------------------------------------
+
+
+def aux_ce_acc(aux_logits: mx.array, labels: mx.array, valid: mx.array):
+    """(masked mean cross-entropy, masked top-1 accuracy) over 3 x 8 heads.
+
+    `aux_logits` is [B, 3, 8], `labels` int [B, 3] already clipped into 0..7,
+    `valid` float [B, 3] with 0 where the line carried no label.  The mean is
+    over VALID (sample, opponent) pairs, so a batch that is half unlabelled
+    contributes half as many terms rather than half-strength ones; a batch with
+    none at all yields a hard zero and therefore a zero gradient.
+    """
+    logp = aux_logits - mx.logsumexp(aux_logits, axis=-1, keepdims=True)
+    idx = labels.reshape(-1, AUX_OPP, 1).astype(mx.int32)
+    picked = mx.take_along_axis(logp, idx, axis=-1).reshape(-1, AUX_OPP)
+    denom = mx.maximum(valid.sum(), 1.0)
+    l_aux = -(picked * valid).sum() / denom
+    hit = (mx.argmax(aux_logits, axis=-1) == labels).astype(mx.float32)
+    acc = (hit * valid).sum() / denom
+    return l_aux, acc
+
+
+def xo_batch(X, O, sel) -> mx.array:
+    """[X ++ oracle] for one minibatch, assembled on the fly.
+
+    Materialising the full 1433-wide matrix would double the trainer's peak
+    memory over a big collection batch for no benefit -- the critic only ever
+    sees it a minibatch at a time.
+    """
+    return mx.concatenate([mx.array(X[sel]), mx.array(O[sel])], axis=1)
 
 
 # ---------------------------------------------------------------------------
@@ -353,6 +432,23 @@ def behaviour_pass(model: PolicyValueNet, X, mask, action, batch: int):
     return lp, vv
 
 
+def critic_pass(critic: CriticNet, X, O, batch: int) -> np.ndarray:
+    """V_old from the FROZEN --critic-init net over [X ++ oracle], as numpy.
+
+    A fresh critic makes this noise, exactly as the value head was noise on
+    iteration 1 of the shared-head path; advantage normalisation below is what
+    keeps that first update scaled like a policy-gradient step regardless.
+    """
+    n = X.shape[0]
+    vv = np.empty(n, dtype=np.float32)
+    for i in range(0, n, batch):
+        sel = slice(i, i + batch)
+        v = critic(xo_batch(X, O, sel))
+        mx.eval(v)
+        vv[sel] = np.array(v)
+    return vv
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="PPO on mjgame self-play trajectories")
     ap.add_argument("--data", required=True, nargs="+", help="glob(s) for trajectory JSONL")
@@ -361,8 +457,28 @@ def main() -> None:
     ap.add_argument("--epochs", type=int, default=3)
     ap.add_argument("--batch", type=int, default=4096)
     ap.add_argument("--lr", type=float, default=1e-4)
+    ap.add_argument(
+        "--critic-init",
+        default=None,
+        dest="critic_init",
+        help="directory holding critic.json/critic.f32 for the oracle critic "
+        "(default: --init); a missing pair means a fresh critic",
+    )
     ap.add_argument("--clip", type=float, default=0.2, help="PPO ratio clip epsilon")
-    ap.add_argument("--vf", type=float, default=0.5, help="value loss coefficient")
+    ap.add_argument(
+        "--vf",
+        type=float,
+        default=0.5,
+        help="value loss coefficient (shared-head fallback only -- the oracle "
+        "critic trains on its own optimizer and its own pure MSE)",
+    )
+    ap.add_argument(
+        "--aux-coef",
+        type=float,
+        default=0.5,
+        dest="aux_coef",
+        help="weight of the auxiliary opponent-shanten loss on the policy net",
+    )
     ap.add_argument("--ent", type=float, default=0.01, help="entropy bonus coefficient")
     ap.add_argument(
         "--viol-lambda",
@@ -414,7 +530,60 @@ def main() -> None:
     model = load_weights(args.init)
     if model.input_dim != input_dim:
         raise SystemExit(
-            f"--init net takes {model.input_dim} inputs but the data is {input_dim} wide"
+            f"--init net takes {model.input_dim} inputs but the data is {input_dim} "
+            f"wide (feature v{FEATURE_VERSION}).\n"
+            f"  {args.init} は旧特徴量の重みです / that weight set predates the "
+            f"current feature layout.\n"
+            f"  Migrate it, function-preserving, with:\n"
+            f"      python train/widen.py --in {args.init} --out <v{FEATURE_VERSION}-dir>\n"
+            f"  (the loaders keep reading historical weight sets on purpose, so "
+            f"this check -- not load_weights -- is what stops the mismatch)"
+        )
+
+    # ---- baseline selection -------------------------------------------------
+    # The oracle path needs the privileged fields on EVERY decision line; a
+    # partially-labelled batch would train the critic on two different input
+    # distributions, so the loader's all-or-nothing flag decides, and anything
+    # short of all of it falls back to the shared value head end to end.
+    use_oracle = traj.has_oracle
+    critic = None
+    critic_dir = args.critic_init or args.init
+    if use_oracle:
+        aux0 = load_aux(args.init)
+        widen_for_aux(model, aux0, seed=args.seed)
+        print(
+            f"aux heads: {'loaded from ' + args.init if aux0 is not None else 'fresh random init'} "
+            f"({AUX_OPP} opponents x {AUX_CLASSES} shanten classes, coef {args.aux_coef})"
+        )
+        critic = load_critic(critic_dir)
+        if critic is None:
+            critic = CriticNet(input_dim + ORACLE_LEN)
+            mx.eval(critic.parameters())
+            print(
+                f"critic: no {CRITIC_MANIFEST_NAME} in {critic_dir} -- fresh init "
+                f"({input_dim + ORACLE_LEN} inputs); V_old is noise this iteration"
+            )
+        else:
+            print(f"critic: loaded from {critic_dir} ({critic.input_dim} inputs)")
+        if critic.input_dim != input_dim + ORACLE_LEN:
+            raise SystemExit(
+                f"critic takes {critic.input_dim} inputs but the data gives "
+                f"{input_dim} + {ORACLE_LEN} = {input_dim + ORACLE_LEN}.\n"
+                f"  {critic_dir} の critic は旧特徴量です / that critic predates the "
+                f"current feature layout.\n"
+                f"  `python train/widen.py --in {critic_dir} --out <v{FEATURE_VERSION}-dir>` "
+                f"migrates policy, aux and critic together;\n"
+                f"  or delete {CRITIC_MANIFEST_NAME}/{CRITIC_BLOB_NAME} to start the "
+                f"critic from a fresh init."
+            )
+    else:
+        print(
+            "WARNING: the trajectories carry no oracle side channel ('o'/'sh' on "
+            "every 'd' line) -- falling back to the SHARED VALUE HEAD baseline "
+            "and training no auxiliary shanten heads.  This is the pre-oracle "
+            "behaviour, not a degraded one, but the policy gradient keeps the "
+            "hand-luck variance a privileged critic would have absorbed; "
+            "re-record with an engine that emits 'o'/'sh' to enable it."
         )
 
     if not traj.has_round_viol:
@@ -436,11 +605,27 @@ def main() -> None:
     if n == 0:
         raise SystemExit("no usable decisions after return attribution")
 
-    # Behaviour log-probs and baseline, from the UNMODIFIED --init net.  Taken
+    # Oracle side channel, if this dataset has one.  `aux_valid` is 0 for a
+    # missing label, which is the sentinel and not a shanten value; the clip
+    # would otherwise turn -9 into a confident "tenpai" target.
+    if use_oracle:
+        O = traj.oracle[keep]
+        sh = traj.opp_shanten[keep]
+        aux_lab = np.clip(sh, 0, AUX_CLASSES - 1).astype(np.int32)
+        aux_valid = (sh != AUX_MISSING).astype(np.float32)
+    else:
+        O = aux_lab = aux_valid = None
+
+    # Behaviour log-probs, from the UNMODIFIED --init net (widening fc3 leaves
+    # the first 79 rows alone, so the policy it computes is unchanged).  Taken
     # before the optimizer exists so the training net starts from exactly these
-    # weights; both are frozen numpy from here on.
+    # weights; frozen numpy from here on.  The baseline it returns is used only
+    # by the shared-head path -- under the oracle critic V_old comes from the
+    # frozen critic instead, and the policy's own value head is never read.
     tb = time.time()
     old_logp_np, V_old = behaviour_pass(model, X, mask, action, args.batch)
+    if use_oracle:
+        V_old = critic_pass(critic, X, O, args.batch)
 
     # Everything the losses see is in value-head units (reward / RETURN_SCALE),
     # which is what V_old already predicts; `G` comes back in raw uma points for
@@ -459,8 +644,16 @@ def main() -> None:
     print(
         f"gae  gamma={args.gamma:g}  lambda={args.gae_lambda:g}  "
         f"penalty={'per-round' if traj.has_round_viol else 'match-terminal'}  "
+        f"baseline={'oracle-critic' if use_oracle else 'shared-head'}  "
         f"adv(pre-norm) mean {A.mean():+.4f}  std {A.std():.4f}"
     )
+    if use_oracle:
+        lab_pct = 100.0 * float(aux_valid.mean())
+        print(
+            f"oracle  {ORACLE_LEN} privileged inputs/decision  "
+            f"critic {critic.input_dim}->512->256->1  "
+            f"aux labels {lab_pct:.1f}% of {n * AUX_OPP} (opponent, decision) pairs"
+        )
 
     # The value head is random-init out of behaviour cloning, so V_old is noise
     # on iteration 1.  Normalising the advantage is what keeps that first update
@@ -469,11 +662,17 @@ def main() -> None:
 
     print(
         f"ppo  n={n}  epochs={args.epochs}  batch={args.batch}  lr={args.lr}  "
-        f"clip={args.clip}  vf={args.vf}  ent={args.ent}  "
-        f"viol_lambda={args.viol_lambda}"
+        f"clip={args.clip}  ent={args.ent}  viol_lambda={args.viol_lambda}  "
+        + (
+            f"aux_coef={args.aux_coef}  [oracle critic: own Adam, pure MSE; "
+            "--vf unused, policy value head untrained]"
+            if use_oracle
+            else f"vf={args.vf}  [shared value head]"
+        )
     )
 
     opt = optim.Adam(learning_rate=args.lr)
+    copt = optim.Adam(learning_rate=args.lr) if use_oracle else None
 
     # `pi_coef` gates the policy terms (surrogate + entropy): 1.0 normally, 0.0
     # once the KL budget is spent, which turns the step into a pure value fit.
@@ -493,36 +692,100 @@ def main() -> None:
         clipfrac = (mx.abs(ratio - 1.0) > args.clip).astype(mx.float32).mean()
         return total, (l_pi, l_v, ent, kl, clipfrac)
 
-    grad_fn = nn.value_and_grad(model, loss_fn)
+    def policy_loss_fn(m, xb, mb, ab, oldb, adv, lab, valid):
+        """Oracle path: surrogate + entropy + auxiliary shanten, NO value term.
+
+        The baseline lives in the critic, so nothing here reads output 78 and
+        no gradient reaches it -- the policy's own value head is vestigial from
+        this point on and drifts only as the shared trunk moves under it.
+        """
+        out = m(xb)
+        lp_all = masked_logp(out, mb)
+        lp = gather(lp_all, ab)
+        ratio = mx.exp(lp - oldb)
+        l_pi = -mx.minimum(
+            ratio * adv,
+            mx.clip(ratio, 1.0 - args.clip, 1.0 + args.clip) * adv,
+        ).mean()
+        ent = masked_entropy(lp_all, mb)
+        l_aux, a_acc = aux_ce_acc(split_aux(out), lab, valid)
+        total = l_pi - args.ent * ent + args.aux_coef * l_aux
+        kl = (oldb - lp).mean()
+        clipfrac = (mx.abs(ratio - 1.0) > args.clip).astype(mx.float32).mean()
+        return total, (l_pi, l_aux, a_acc, ent, kl, clipfrac)
+
+    def critic_loss_fn(c, xob, gb):
+        """Plain MSE against the same TD(lambda) targets, on the critic alone."""
+        return mx.square(c(xob) - gb).mean()
+
+    grad_fn = nn.value_and_grad(model, policy_loss_fn if use_oracle else loss_fn)
+    cgrad_fn = nn.value_and_grad(critic, critic_loss_fn) if use_oracle else None
 
     frozen = False
     aborted = False
     for epoch in range(1, args.epochs + 1):
         order = rng.permutation(n)
-        acc = np.zeros(6, dtype=np.float64)
+        acc = np.zeros(7 if use_oracle else 6, dtype=np.float64)
+        crit_acc = 0.0
         seen = 0
         te = time.time()
         for i in range(0, n, args.batch):
             sel = order[i : i + args.batch]
+            bs = len(sel)
             xb = mx.array(X[sel])
             mb = mx.array(mask[sel])
             ab = mx.array(action[sel].astype(np.int32))
             oldb = mx.array(old_logp_np[sel])
             adv = mx.array(A[sel])
             gb = mx.array(Gv[sel])
-            pi_coef = mx.array(0.0 if frozen else 1.0)
-            (total, aux), grads = grad_fn(model, xb, mb, ab, oldb, adv, gb, pi_coef)
-            opt.update(model, grads)
-            mx.eval(model.parameters(), opt.state, total, *aux)
-            bs = len(sel)
+
+            if use_oracle:
+                # The critic trains every minibatch, on its own optimizer and
+                # its own parameters: it cannot move the policy at all this
+                # iteration, only the advantages of the next one.
+                l_v, cgrads = cgrad_fn(critic, xo_batch(X, O, sel), gb)
+                copt.update(critic, cgrads)
+                mx.eval(critic.parameters(), copt.state, l_v)
+                crit_acc += bs * float(l_v)
+
+                lab = mx.array(aux_lab[sel])
+                valid = mx.array(aux_valid[sel])
+                if frozen:
+                    # Frozen means the POLICY PARAMETERS STOP MOVING -- which
+                    # takes the aux heads with it, since their gradient flows
+                    # through the same trunk.  Forward only, for the stats; the
+                    # critic above keeps training either way.
+                    total, aux = policy_loss_fn(
+                        model, xb, mb, ab, oldb, adv, lab, valid
+                    )
+                    mx.eval(total, *aux)
+                else:
+                    (total, aux), grads = grad_fn(
+                        model, xb, mb, ab, oldb, adv, lab, valid
+                    )
+                    opt.update(model, grads)
+                    mx.eval(model.parameters(), opt.state, total, *aux)
+                kl_batch = float(aux[4])
+            else:
+                pi_coef = mx.array(0.0 if frozen else 1.0)
+                (total, aux), grads = grad_fn(model, xb, mb, ab, oldb, adv, gb, pi_coef)
+                opt.update(model, grads)
+                mx.eval(model.parameters(), opt.state, total, *aux)
+                kl_batch = float(aux[3])
+
             acc += bs * np.array([float(total)] + [float(a) for a in aux])
             seen += bs
-            kl_batch = float(aux[3])
             if kl_batch > 4.0 * args.target_kl:
                 print(
                     f"epoch {epoch}: KL {kl_batch:+.5f} > 4x target "
-                    f"{args.target_kl} -- aborting the update (value-only steps "
-                    "are still dragging the policy through the trunk)"
+                    f"{args.target_kl} -- aborting the update ("
+                    + (
+                        "the critic alone cannot pull the policy back"
+                        if use_oracle
+                        else "value-only steps are still dragging the policy "
+                        "through the trunk"
+                    )
+                    + ")"
                 )
                 aborted = True
                 break
@@ -530,20 +793,43 @@ def main() -> None:
                 frozen = True
                 print(
                     f"epoch {epoch}: KL {kl_batch:+.5f} > 1.5x target "
-                    f"{args.target_kl} -- policy terms frozen, fitting value only"
+                    f"{args.target_kl} -- "
+                    + (
+                        "policy and aux updates frozen, training the critic only"
+                        if use_oracle
+                        else "policy terms frozen, fitting value only"
+                    )
                 )
-        loss, l_pi, l_v, ent, kl, clipfrac = acc / max(seen, 1)
-        print(
-            f"epoch {epoch:3d}/{args.epochs}  loss {loss:+.4f}  "
-            f"L_pi {l_pi:+.5f}  L_v {l_v:.4f}  H {ent:.4f}  "
-            f"KL {kl:+.5f}  clip {clipfrac * 100:.2f}%  "
-            f"({time.time() - te:.1f}s){'  [policy frozen]' if frozen else ''}"
-        )
+        stats = acc / max(seen, 1)
+        if use_oracle:
+            loss, l_pi, l_aux, a_acc, ent, kl, clipfrac = stats
+            print(
+                f"epoch {epoch:3d}/{args.epochs}  loss {loss:+.4f}  "
+                f"L_pi {l_pi:+.5f}  L_aux {l_aux:.4f}  "
+                f"aux acc {a_acc * 100:.2f}%  critic L_v {crit_acc / max(seen, 1):.4f}  "
+                f"H {ent:.4f}  KL {kl:+.5f}  clip {clipfrac * 100:.2f}%  "
+                f"({time.time() - te:.1f}s){'  [policy frozen]' if frozen else ''}"
+            )
+        else:
+            loss, l_pi, l_v, ent, kl, clipfrac = stats
+            print(
+                f"epoch {epoch:3d}/{args.epochs}  loss {loss:+.4f}  "
+                f"L_pi {l_pi:+.5f}  L_v {l_v:.4f}  H {ent:.4f}  "
+                f"KL {kl:+.5f}  clip {clipfrac * 100:.2f}%  "
+                f"({time.time() - te:.1f}s){'  [policy frozen]' if frozen else ''}"
+            )
         if aborted:
             break
 
     export_weights(model, args.out)
-    print(f"wrote weights to {args.out}")
+    if use_oracle:
+        export_critic(critic, args.out)
+        print(
+            f"wrote weights to {args.out} (policy.f32 sliced back to "
+            f"{ACTIONS + 1} outputs; aux.f32 + critic.json/critic.f32 beside it)"
+        )
+    else:
+        print(f"wrote weights to {args.out}")
 
 
 if __name__ == "__main__":

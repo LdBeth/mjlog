@@ -124,12 +124,12 @@ function testInput(): Float32Array {
   return x;
 }
 
-Deno.test("net: 単層 1263→79 の forward が手計算と一致する", () => {
+Deno.test(`net: 単層 ${INPUT_LEN}→79 の forward が手計算と一致する`, () => {
   const dir = tempDir();
   try {
     const IN = INPUT_LEN, OUT = FEATURES.actions + 1;
     // w[o][i] = 1 when i === o, plus a fixed 2 on the very last input, so every
-    // output reads one distinct input AND one shared one: out[o] = x[o] + 2·x[1262] + b[o].
+    // output reads one distinct input AND one shared one: out[o] = x[o] + 2·x[IN−1] + b[o].
     const w = new Float32Array(OUT * IN);
     const b = new Float32Array(OUT);
     for (let o = 0; o < OUT; o++) {
@@ -155,22 +155,23 @@ Deno.test("net: 単層 1263→79 の forward が手計算と一致する", () =>
   }
 });
 
-Deno.test("net: 二層 1263→4(relu)→79 で relu と連鎖が効く", () => {
+Deno.test(`net: 二層 ${INPUT_LEN}→4(relu)→79 で relu と連鎖が効く`, () => {
   const dir = tempDir();
   try {
     const IN = INPUT_LEN, H = 4, OUT = FEATURES.actions + 1;
-    // The input's 1263 quarters sum to exactly −1.5 (180 whole periods of 7 sum
-    // to 0; the tail i=1260..1262 contributes (−3−2−1)/4).
+    // Every whole period of 7 sums to 0, so only the tail survives — and a
+    // partial period runs −3,−2,… , making the total ≤ 0 at any INPUT_LEN.
+    // That sign is what makes h3's relu clamp below actually fire.
     const x = testInput();
     let sum = 0;
     for (const v of x) sum += v;
-    assertEquals(sum, -1.5);
+    assert(sum <= 0, `input sum ${sum} should be ≤ 0`);
 
     const w0 = new Float32Array(H * IN);
     const b0 = new Float32Array(H);
     for (let i = 0; i < IN; i++) {
-      w0[0 * IN + i] = 1; // h0 = relu(sum + 4)     = 2.5
-      w0[1 * IN + i] = -1; // h1 = relu(−sum)        = 1.5
+      w0[0 * IN + i] = 1; // h0 = relu(sum + 4)     = sum + 4
+      w0[1 * IN + i] = -1; // h1 = relu(−sum)        = −sum
       w0[3 * IN + i] = 1; // h3 = relu(sum)         = 0   ← the relu clamp
     }
     w0[2 * IN + 5] = 1; // h2 = relu(x[5] + 0.25) = 0.75
@@ -192,7 +193,7 @@ Deno.test("net: 二層 1263→4(relu)→79 で relu と連鎖が効く", () => {
     const y = forward(net, x);
     assertEquals(y.length, 79);
 
-    const h = [2.5, 1.5, 0.75, 0];
+    const h = [sum + 4, -sum, 0.75, 0];
     for (let o = 0; o < OUT; o++) {
       let want = o / 64;
       for (let j = 0; j < H; j++) want += h[j] * (((o + j) % 4 + 1) / 8);
@@ -397,14 +398,11 @@ Deno.test("net: NeuralPolicy 4席で半荘を1回打ち切れる", () => {
     assertEquals(result.outcomes.length, result.rounds.length);
     for (const s of result.scores) assert(Number.isFinite(s), `score ${s} is not finite`);
 
-    // Same conservation law as the self-play smoke test: whatever is not on the
-    // table is on the 供託 sticks of the final round.
-    let kyotaku = 0;
-    for (let i = 0; i < result.rounds.length; i++) {
-      kyotaku = result.outcomes[i].kind === "agari" ? 0 : result.rounds[i].kyotaku;
-    }
+    // Same conservation law as the self-play smoke test: every point that went
+    // in is on the table at the end, the last round's leftover 供託 included —
+    // `finalize` pays those sticks to the top finisher rather than dropping them.
     const sum = result.scores.reduce((a, b) => a + b, 0);
-    assertEquals(sum + kyotaku * 1000, JANKI.startScore * 4);
+    assertEquals(sum, JANKI.startScore * 4);
   } finally {
     Deno.removeSync(dir, { recursive: true });
   }

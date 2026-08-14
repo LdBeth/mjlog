@@ -2,10 +2,11 @@
 //
 // One file holds many matches. Line kinds (FROZEN contract):
 //
-//   {"k":"d","v":2,"seat":0,"kyoku":0,"honba":0,"junme":3,
-//    "planes":"<base64 of the 1224 Int8 bytes>",
-//    "scalars":"<base64 of the 39 little-endian float32 = 156 bytes>",
-//    "mask":[legal action indices],"a":<chosen index>}
+//   {"k":"d","v":3,"seat":0,"kyoku":0,"honba":0,"junme":3,
+//    "planes":"<base64 of the 1632 Int8 bytes>",
+//    "scalars":"<base64 of the 42 little-endian float32 = 168 bytes>",
+//    "mask":[legal action indices],"a":<chosen index>,
+//    "o":"<base64 of the 170 oracle Int8 bytes>","sh":[3 opponent shanten]}
 //   {"k":"r","deltas":[4 point deltas, ABSOLUTE seats],"outcome":"agari"|"draw",
 //    "viol":[4 評価点マイナス, ABSOLUTE seats]}
 //   {"k":"m","scores":[4],"net":[4],"violations":[4]}
@@ -22,6 +23,19 @@
 // "v" is the FEATURE version the planes/scalars were encoded with, so a loader
 // can reject a dataset that predates the current encoder instead of reshaping
 // stale bytes into the wrong network.
+//
+// "o" and "sh" are OPTIONAL and appear only when the driver supplied an oracle
+// tap (`RecordingPolicy`'s third constructor argument); a consumer must read
+// their absence as "this dataset carries no oracle data" and fall back to a
+// symmetric critic rather than erroring. They are HIDDEN state — the three
+// opponents' concealed hands, the unseen remainder, the ura indicators, and the
+// opponents' shanten — meant for an asymmetric critic and for auxiliary
+// (opponent-speed) losses at TRAINING time only. TS inference never reads them,
+// and they are no part of the policy input, so the oracle block never moves
+// "v" on its own: it was added without a bump, and feature v3 (the per-opponent
+// planes) left it untouched. Layout: `encodeOracle` in features.ts
+// (5 planes × 34 types, then `sh` in the same relative seat order, raw shanten
+// values — -1 means a complete hand, they are labels, not clamped).
 //
 // "d" lines are written by `RecordingPolicy` as play happens; "r" and "m" come
 // from the driver once a match finishes (the policy cannot see round results).
@@ -110,12 +124,26 @@ export class TrajectoryWriter {
 // per-decision recording
 // ---------------------------------------------------------------------------
 
+/** The hidden state for one decision, as `encodeOracle` returns it. */
+export type OracleTap = (seat: number) => { oplanes: Int8Array; oppShanten: number[] };
+
 /** Wraps any sync policy and logs one "d" line per decision it makes. */
 export class RecordingPolicy implements SyncPolicy {
   readonly name: string;
   readonly sync = true;
 
-  constructor(readonly inner: SyncPolicy, readonly writer: TrajectoryWriter) {
+  /**
+   * `oracle` is optional: with it every "d" line also carries "o"/"sh" (hidden
+   * state for an asymmetric critic), without it the line is byte-identical to
+   * what this class has always written. The tap is a callback rather than a
+   * Table because the policy has no business holding the table — the driver
+   * owns it and hands over only the reading.
+   */
+  constructor(
+    readonly inner: SyncPolicy,
+    readonly writer: TrajectoryWriter,
+    readonly oracle?: OracleTap,
+  ) {
     this.name = inner.name;
   }
 
@@ -130,7 +158,7 @@ export class RecordingPolicy implements SyncPolicy {
   decide(obs: Observation): Action {
     const a = this.inner.decide(obs);
     const { planes, scalars } = encode(obs);
-    this.writer.writeLine({
+    const line: Record<string, unknown> = {
       k: "d",
       v: FEATURES.version,
       seat: obs.seat,
@@ -141,7 +169,13 @@ export class RecordingPolicy implements SyncPolicy {
       scalars: toBase64(f32leBytes(scalars)),
       mask: maskIndices(obs.legal),
       a: actionIndex(a, obs.akaIds),
-    });
+    };
+    if (this.oracle) {
+      const { oplanes, oppShanten } = this.oracle(obs.seat);
+      line.o = toBase64(new Uint8Array(oplanes.buffer, oplanes.byteOffset, oplanes.byteLength));
+      line.sh = oppShanten;
+    }
+    this.writer.writeLine(line);
     return a;
   }
 }

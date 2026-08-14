@@ -204,9 +204,11 @@ Deno.test("持ち点8000点未満: judged at round end", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 後付け. Judged at the waiting hand, by the real scorer — so every fixture
-// below is built against `scorer`, not the `ANY_WIN` placeholder (under which
-// every wait is ronnable and the rule can never fire).
+// 後付け / 片和了り. Both are judged at the WIN, never at the waiting hand:
+// sitting in an open 形式聴牌 or on a split wait is a shape, not a 禁じ手 — the
+// foul is cashing it. Both read the pre-win hand through the real scorer, so
+// every fixture below is built against `scorer`, not the `ANY_WIN` placeholder
+// (under which every wait is ronnable and neither rule can fire).
 // ---------------------------------------------------------------------------
 
 /**
@@ -228,11 +230,98 @@ function yakulessTenpai(t: Table): Tile[] {
   return all;
 }
 
-Deno.test("後付け: open tenpai where no wait scores at all", () => {
+/**
+ * The canonical split wait: 456m 678p 22s 白白 — シャンポン 2s/白, either open
+ * (チー123m in front of it) or 門前 (123m held). 白 completes a 役牌 triplet and
+ * scores; 2s completes nothing that does — the 1m kills 断幺九 and 456m kills
+ * 混全帯幺九, and a 白 PAIR is not a yaku.
+ *
+ * The spare copies come back with it: the third 白 is the winning tile, and the
+ * two loose 2s are what a 純カラ fixture buries.
+ */
+function splitWait(t: Table, open = true): { haku: Tile; loose2s: [Tile, Tile] } {
+  const body = tiles("123m1p456m678p"); // 123m, stray 1p, 456m, 678p
+  const s2 = tiles("2222s");
+  const w = tiles("白白白");
+  if (open) chi(t, 0, body.slice(0, 3));
+  setHand(t, 0, [
+    ...(open ? [] : body.slice(0, 3)),
+    ...body.slice(4),
+    s2[0],
+    s2[1],
+    w[0],
+    w[1],
+  ]);
+  return { haku: w[2], loose2s: [s2[2], s2[3]] };
+}
+
+Deno.test("片和了り: ロン on the scoring side of a live split wait is charged", () => {
+  const t = makeTable();
+  const { haku } = splitWait(t);
+  doDiscard(t, 1, haku); // P1 lets the 白 go and P0 takes it
+  const vs = fire("on-win", ctx(t, 0, { t: "ron" }, null, scorer));
+  const v = vs.find((x) => x.rule === "katagari");
+  assert(v !== undefined, `expected katagari, got [${vs.map((x) => x.rule).join(",")}]`);
+  assertEquals(v.tier, "A");
+  assertEquals(v.confidence, 1, "the win oracle answers exactly");
+  assert(v.detail.includes("19") && v.detail.includes("31"), `evidence names 2s/白: ${v.detail}`);
+  assert(!ids("atozuke", vs), "a wait that scores is not 後付け");
+});
+
+Deno.test("片和了り: 門前ツモ is exempt — 門前清自摸和 scores on every tile", () => {
+  const t = makeTable();
+  const { haku } = splitWait(t, false);
+  t.hands[0].push(haku); // the drawn 白, still in hand at the on-win hook
+  assert(!ids("katagari", fire("on-win", ctx(t, 0, { t: "tsumo" }, haku, scorer))));
+});
+
+Deno.test("片和了り: a 門前 RON on the scoring side still charges", () => {
+  // The exemption above is 自摸 only. A closed hand that waits on a tile it
+  // cannot use and rons the one it can has done exactly what the rule forbids —
+  // and unlike a 立直 hand it never certified the other side.
+  const t = makeTable();
+  const { haku } = splitWait(t, false);
+  doDiscard(t, 1, haku);
+  const vs = fire("on-win", ctx(t, 0, { t: "ron" }, null, scorer));
+  assert(ids("katagari", vs), `expected katagari, got [${vs.map((x) => x.rule).join(",")}]`);
+});
+
+Deno.test("片和了り: 立直 dissolves the split — 立直 itself scores on every wait", () => {
+  // Pinning down how `analyze` resolves this rather than legislating over it:
+  // `hasYaku` runs with `t.riichi[seat]`, so after a declaration EVERY wait is
+  // ronnable, `katagari` is false, and the rule never reaches its test. A
+  // 片和了り therefore cannot survive a 立直 — which is why the 門前 clause above
+  // needs no riichi carve-out.
+  const t = makeTable();
+  const { haku } = splitWait(t, false);
+  t.riichi[0] = true;
+  doDiscard(t, 1, haku);
+  assert(!ids("katagari", fire("on-win", ctx(t, 0, { t: "ron" }, null, scorer))));
+});
+
+Deno.test("片和了り: an OPEN 自摸 on the split wait is charged", () => {
+  const t = makeTable();
+  const { haku } = splitWait(t);
+  t.hands[0].push(haku); // drawn, and still in hand when the hook fires
+  const vs = fire("on-win", ctx(t, 0, { t: "tsumo" }, haku, scorer));
+  const v = vs.find((x) => x.rule === "katagari");
+  assert(v !== undefined, `expected katagari, got [${vs.map((x) => x.rule).join(",")}]`);
+  assert(v.detail.includes("ツモ"), `evidence should name the win: ${v.detail}`);
+});
+
+Deno.test("片和了り: exempt when the yakuless side is 純カラ", () => {
+  const t = makeTable();
+  const { haku, loose2s } = splitWait(t);
+  for (const two of loose2s) doDiscard(t, 1, two); // both remaining 2s are gone
+  doDiscard(t, 1, haku);
+  assert(!ids("katagari", fire("on-win", ctx(t, 0, { t: "ron" }, null, scorer))));
+});
+
+Deno.test("後付け: a win with no scoring wait at all", () => {
   const t = makeTable();
   const all = yakulessTenpai(t);
-  const a = doDiscard(t, 0, all[3]); // the stray 1p
-  const vs = fire("post-discard", ctx(t, 0, a, null, scorer));
+  doDiscard(t, 0, all[3]); // the stray 1p — now waiting 6s/9s, neither scoring
+  const vs = fire("on-win", ctx(t, 0, { t: "ron" }, null, scorer));
   const v = vs.find((x) => x.rule === "atozuke");
   assert(v !== undefined, `expected atozuke, got [${vs.map((x) => x.rule).join(",")}]`);
   assertEquals(v.tier, "A");
@@ -241,75 +330,84 @@ Deno.test("後付け: open tenpai where no wait scores at all", () => {
   assert(!ids("katagari", vs), "no wait scores, so this is not 片和了り");
 });
 
-Deno.test("後付け: a 混一色 build is not a violation (neither noten nor tenpai)", () => {
-  // The false positive the old on-call rule produced: a 白 back pair inside an
-  // obvious honitsu build read as バック, though every completion carries 混一色.
-  {
-    const t = makeTable();
-    // チー123s ＋ 456s 789s 3s 白白 5m 6m — still 1向聴 after cutting the 6m.
-    const all = tiles("123s6m456789s3s白白5m");
-    chi(t, 0, all.slice(0, 3));
-    setHand(t, 0, all.slice(3));
-    const a = doDiscard(t, 0, all[3]); // the 6m
-    assert(!ids("atozuke", fire("post-discard", ctx(t, 0, a, null, scorer))));
-  }
-  {
-    const t = makeTable();
-    // The same build, now tenpai: シャンポン 3s/白, and both waits carry 混一色.
-    const all = tiles("123s5m456789s33s白白");
-    chi(t, 0, all.slice(0, 3));
-    setHand(t, 0, all.slice(3));
-    const a = doDiscard(t, 0, all[3]); // the stray 5m
-    assert(!ids("atozuke", fire("post-discard", ctx(t, 0, a, null, scorer))));
-  }
-});
-
-Deno.test("後付け: a mixed wait belongs to 片和了り, not here", () => {
-  const t = makeTable();
-  // チー123m ＋ 456m 678p 22s 白白: シャンポン 2s/白. 白 scores (役牌), 2s does not.
-  const all = tiles("123m1p456m678p22s白白");
-  chi(t, 0, all.slice(0, 3));
-  setHand(t, 0, all.slice(3));
-  const a = doDiscard(t, 0, all[3]);
-  const vs = fire("post-discard", ctx(t, 0, a, null, scorer));
-  assert(ids("katagari", vs), "the split wait is 片和了り");
-  assert(!ids("atozuke", vs), "and must not be charged twice");
-});
-
-Deno.test("後付け: charged once per round, not on every later discard", () => {
+Deno.test("後付け: the same win judged by ANY_WIN charges nothing", () => {
+  // The documented degradation. With the placeholder oracle every wait is
+  // ronnable, so `ronnable.length === 0` is never true: with no scorer wired in
+  // there is no evidence, and the ledger does not guess.
   const t = makeTable();
   const all = yakulessTenpai(t);
-  const first = doDiscard(t, 0, all[3]); // the stray 1p
-  const vs = fire("post-discard", ctx(t, 0, first, null, scorer));
-  const v = vs.find((x) => x.rule === "atozuke");
-  assert(v !== undefined, "expected the first discard to be charged");
-  t.addViolation(v); // runHook does not write the ledger; the driver does
-
-  // A later 巡, same hand, same yakuless tenpai (the drawn tile goes straight
-  // back out, so the concealed shape is untouched).
-  const second = doDiscard(t, 0, tiles("9p")[0], false);
-  assert(!ids("atozuke", fire("post-discard", ctx(t, 0, second, null, scorer))));
+  doDiscard(t, 0, all[3]);
+  const vs = fire("on-win", ctx(t, 0, { t: "ron" }, null, ANY_WIN));
+  assert(!ids("atozuke", vs));
+  assert(!ids("katagari", vs));
 });
 
-Deno.test("後付け: exempt when the yakuless wait is 純カラ", () => {
+Deno.test("後付け: an open 自摸 bailed out by a lucky yaku is still 後付け", () => {
+  // The shape the shipped wiring actually catches: `legal.ts` never offers a ron
+  // on a yakuless wait, but it does offer the 自摸 whose only yaku is 海底/嶺上 —
+  // a yaku the WAIT never carried. The hand won without ever having one.
   const t = makeTable();
-  // チー123m ＋ 456m 678p 55s 79s: a lone 8s カンチャン, and all four 8s are gone.
-  const all = tiles("123m1p456m678p55s79s");
-  chi(t, 0, all.slice(0, 3));
-  setHand(t, 0, all.slice(3));
-  for (const eight of tiles("8888s")) doDiscard(t, 1, eight);
-  const a = doDiscard(t, 0, all[3]);
-  assert(!ids("atozuke", fire("post-discard", ctx(t, 0, a, null, scorer))));
+  const all = yakulessTenpai(t);
+  doDiscard(t, 0, all[3]);
+  const six = tiles("6s")[0]; // completes 678s; no copy of it is in the fixture
+  t.hands[0].push(six);
+  assert(ids("atozuke", fire("on-win", ctx(t, 0, { t: "tsumo" }, six, scorer))));
 });
 
-Deno.test("後付け: a closed hand is exempt — it can cure the shape with 立直", () => {
+Deno.test("後付け: a 門前 win is exempt — 立直 certifies, 門前ツモ scores", () => {
   const t = makeTable();
-  // The very same 14 tiles, none of them melded: 門前 so 立直 puts a yaku on
-  // every wait, and the dojo's objection disappears.
+  // The very same 13 tiles, none of them melded.
   const all = tiles("123m1p456m678p55s78s");
   setHand(t, 0, all);
-  const a = doDiscard(t, 0, all[3]);
-  assert(!ids("atozuke", fire("post-discard", ctx(t, 0, a, null, scorer))));
+  doDiscard(t, 0, all[3]);
+  assert(!ids("atozuke", fire("on-win", ctx(t, 0, { t: "ron" }, null, scorer))));
+  const six = tiles("6s")[0];
+  t.hands[0].push(six);
+  assert(!ids("atozuke", fire("on-win", ctx(t, 0, { t: "tsumo" }, six, scorer))));
+});
+
+Deno.test("後付け: a 混一色 build is not a violation — every completion scores", () => {
+  // The false positive the original on-call rule produced: a 白 back pair inside
+  // an obvious honitsu build read as バック, though every completion carries
+  // 混一色. チー123s ＋ 456s 789s 33s 白白: シャンポン 3s/白, both sides scoring.
+  const t = makeTable();
+  const all = tiles("123s5m456789s33s白白");
+  chi(t, 0, all.slice(0, 3));
+  setHand(t, 0, all.slice(3));
+  doDiscard(t, 0, all[3]); // the stray 5m
+  const vs = fire("on-win", ctx(t, 0, { t: "ron" }, null, scorer));
+  assert(!ids("atozuke", vs));
+  assert(!ids("katagari", vs), "both waits score, so the wait was never split");
+});
+
+Deno.test("後付け/片和了り: nothing is charged while the hand merely waits", () => {
+  // The inversion this reworking is about. An open yakuless tenpai is a legal
+  // shape — it takes 聴牌料 at a draw — so no discard, and no 立直, may ledger it.
+  const t = makeTable();
+  const all = yakulessTenpai(t);
+  const first = doDiscard(t, 0, all[3]); // into the yakuless tenpai
+  assertEquals(fire("post-discard", ctx(t, 0, first, null, scorer)), []);
+  assertEquals(fire("on-riichi", ctx(t, 0, first, null, scorer)), []);
+  // Several 巡 later, same shape (the drawn tile goes straight back out).
+  for (const spare of tiles("9p9p9p")) {
+    const later = doDiscard(t, 0, spare);
+    assertEquals(
+      fire("post-discard", ctx(t, 0, later, null, scorer)),
+      [],
+      "the waiting hand must stay clean however long it waits",
+    );
+  }
+  assertEquals(t.ledger, []);
+});
+
+Deno.test("片和了り: a split wait charges only once — the seat wins once", () => {
+  // The state-time rule needed a ledger-dedupe clause to avoid charging on every
+  // later discard. At the win there is nothing to dedupe: one win, one charge.
+  const t = makeTable();
+  const { haku } = splitWait(t);
+  doDiscard(t, 1, haku);
+  const vs = fire("on-win", ctx(t, 0, { t: "ron" }, null, scorer));
+  assertEquals(vs.filter((v) => v.rule === "katagari").length, 1);
 });
 
 Deno.test("長考: fires past the 3-second norm, escalates past 4", () => {

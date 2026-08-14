@@ -53,6 +53,14 @@ export interface Net {
   layers: Layer[];
   /** Width of the network's output, = actions + 1 (the value head). */
   outputs: number;
+  /** Set by `loadNative` when the Accelerate shim took this net over. */
+  native?: NativeCtx;
+}
+
+/** A live `rlnet` context. Opaque to everything but `net.ts`. */
+export interface NativeCtx {
+  handle: bigint;
+  lib: RlnetLib;
 }
 
 /** Logits width the caller should read; index `ACTION_OUTPUTS` is the value. */
@@ -93,6 +101,7 @@ function fail(path: string, why: string): never {
 /** Names the feature version a (planes, scalars) pair belongs to, if known. */
 function versionLabel(planes: number | undefined, scalars: number | undefined): string {
   if (planes === 22 && scalars === 33) return "v1";
+  if (planes === 36 && scalars === 39) return "v2";
   if (planes === FEATURES.planes && scalars === FEATURES.scalars) return `v${FEATURES.version}`;
   return "不明な版";
 }
@@ -171,18 +180,186 @@ export function loadNet(manifestPath: string): Net {
     return { ...l, w, b };
   });
 
-  return {
+  const net: Net = {
     manifest,
     path: manifestPath,
     layers,
     outputs: manifest.layers[manifest.layers.length - 1].out,
   };
+  loadNative(net);
+  return net;
+}
+
+// ---------------------------------------------------------------------------
+// optional native inference (Accelerate via Deno FFI)
+// ---------------------------------------------------------------------------
+//
+// `native/rlnet.c` is a generic MLP over cblas_sgemv. It is an OPTIONAL
+// accelerator: with the dylib absent, or FFI not permitted, or the gate turned
+// off, every net keeps running the pure-TS loop below and behaves identically.
+//
+// The dylib is looked for at ONE place: `native/librlnet.dylib` resolved
+// relative to THIS MODULE (…/mjgame/src/rl/net.ts → …/mjgame/native/), so the
+// working directory does not matter. Build it with `deno task build-native`.
+//
+// Gate — the `MJGAME_NATIVE` environment variable:
+//   "0"    force the TypeScript path, even with the dylib built
+//   "1"    require the native path; anything missing throws with the build line
+//   unset  try native, fall back silently
+// Reading it needs `--allow-env`; when that is denied the gate reads as unset.
+//
+// LIFETIME: a context is created per loaded `Net` and lives for the process
+// (self-play and the TUI both run one process per session). `closeNet` exists
+// for callers — tests, mostly — that churn through many nets. A context owns
+// its scratch buffers and is NOT re-entrant: one caller at a time per net,
+// which is exactly how a `NeuralPolicy` uses its own.
+
+const NATIVE_SYMBOLS = {
+  rlnet_create: { parameters: ["i32", "buffer", "buffer", "buffer"], result: "i64" },
+  rlnet_forward: { parameters: ["i64", "buffer", "buffer"], result: "void" },
+  rlnet_destroy: { parameters: ["i64"], result: "void" },
+} as const;
+
+export type RlnetLib = Deno.DynamicLibrary<typeof NATIVE_SYMBOLS>;
+
+const LIB_EXT = Deno.build.os === "windows"
+  ? ".dll"
+  : Deno.build.os === "darwin"
+  ? ".dylib"
+  : ".so";
+
+/** The one place the shim is looked for, module-relative. */
+export const NATIVE_LIB_URL = new URL(`../../native/librlnet${LIB_EXT}`, import.meta.url);
+
+const BUILD_HINT = `mjgame/ で \`deno task build-native\` ` +
+  `(clang -O3 -dynamiclib -framework Accelerate -o native/librlnet${LIB_EXT} native/rlnet.c) ` +
+  `を実行し、--allow-ffi をつけて起動してください`;
+
+type Gate = "off" | "require" | "auto";
+
+/**
+ * Whether a permission is already granted. This is ASKED, never taken: reading
+ * the env var or calling `dlopen` without the flag would put an interactive
+ * prompt in front of a self-play run that never wanted native inference in the
+ * first place. `querySync` prompts for nothing.
+ */
+function granted(desc: Deno.PermissionDescriptor): boolean {
+  try {
+    return Deno.permissions.querySync(desc).state === "granted";
+  } catch {
+    return false;
+  }
+}
+
+function gate(): Gate {
+  // --allow-env withheld: the gate reads as unset, and native is merely tried.
+  if (!granted({ name: "env", variable: "MJGAME_NATIVE" })) return "auto";
+  const v = Deno.env.get("MJGAME_NATIVE");
+  if (v === "0") return "off";
+  if (v === "1") return "require";
+  return "auto";
+}
+
+// dlopen once per process; `null` remembers a failure so every later net skips
+// the retry (and, under gate "1", so the same reason is reported again).
+let libCache: RlnetLib | null | undefined;
+let libError = "";
+
+function openLib(required: boolean): RlnetLib | null {
+  if (libCache === undefined) {
+    if (!granted({ name: "ffi", path: NATIVE_LIB_URL })) {
+      libCache = null;
+      libError = "--allow-ffi がありません";
+    } else {
+      try {
+        libCache = Deno.dlopen(NATIVE_LIB_URL, NATIVE_SYMBOLS);
+      } catch (e) {
+        libCache = null;
+        libError = e instanceof Error ? e.message : String(e);
+      }
+    }
+  }
+  if (libCache === null && required) {
+    throw new Error(
+      `MJGAME_NATIVE=1 ですが native 推論を読み込めません: ${libError} — ${BUILD_HINT}`,
+    );
+  }
+  return libCache;
+}
+
+/** Layer weights+biases back into one `policy.f32`-shaped buffer. */
+function packBlob(net: Net): Float32Array {
+  let n = 0;
+  for (const l of net.layers) n += l.w.length + l.b.length;
+  const blob = new Float32Array(n);
+  let off = 0;
+  for (const l of net.layers) {
+    blob.set(l.w, off);
+    off += l.w.length;
+    blob.set(l.b, off);
+    off += l.b.length;
+  }
+  return blob;
+}
+
+/**
+ * Hands `net` to the native shim, if the gate and the filesystem allow it.
+ * Returns whether `forward` will now go through Accelerate. Idempotent; called
+ * for you by `loadNet`, and safe to call on a hand-built `Net` too.
+ */
+export function loadNative(net: Net): boolean {
+  if (net.native) return true;
+  const g = gate();
+  if (g === "off") return false;
+  const lib = openLib(g === "require");
+  if (!lib) return false;
+
+  const dims = new Int32Array(net.layers.length + 1);
+  const acts = new Uint8Array(net.layers.length);
+  dims[0] = net.layers[0].in;
+  net.layers.forEach((l, i) => {
+    dims[i + 1] = l.out;
+    acts[i] = l.act === "relu" ? 1 : 0;
+  });
+
+  const handle = lib.symbols.rlnet_create(net.layers.length, dims, acts, packBlob(net));
+  if (handle === 0n) {
+    if (g === "require") {
+      throw new Error(`MJGAME_NATIVE=1 ですが rlnet_create が失敗しました (${net.path})`);
+    }
+    return false;
+  }
+  net.native = { handle, lib };
+  return true;
+}
+
+/** Whether this net's `forward` currently runs natively. */
+export function isNative(net: Net): boolean {
+  return net.native !== undefined;
+}
+
+/**
+ * Releases the native context, if any; the net keeps working on the TS path.
+ * Optional — process exit frees everything — but tests that build many nets
+ * should call it.
+ */
+export function closeNet(net: Net): void {
+  if (!net.native) return;
+  net.native.lib.symbols.rlnet_destroy(net.native.handle);
+  net.native = undefined;
 }
 
 /** One forward pass. `input` must be `INPUT_LEN` long; the result is fresh. */
 export function forward(net: Net, input: Float32Array): Float32Array {
   if (input.length !== INPUT_LEN) {
     throw new Error(`入力長 ${input.length} は ${INPUT_LEN} であるべきです`);
+  }
+  if (net.native) {
+    // A fresh output buffer per call, as the contract promises — it doubles as
+    // the FFI destination, so nothing is copied afterwards.
+    const out = new Float32Array(net.outputs);
+    net.native.lib.symbols.rlnet_forward(net.native.handle, input, out);
+    return out;
   }
   let x = input;
   for (const l of net.layers) {

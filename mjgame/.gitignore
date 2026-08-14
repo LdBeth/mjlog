@@ -3,3 +3,5 @@ weights/
 train/.venv/
 *.traj.jsonl
 runs/
+native/*.dylib
+native/*.so

@@ -9,6 +9,7 @@
 import type { Meld, Tile } from "mjrender/model.ts";
 import { countsFromTiles, shanten } from "mjrender/shanten.ts";
 import { doraFromIndicatorType, rankOfType, suitOfType, tileType } from "mjrender/tiles.ts";
+import type { TenpaiInfo } from "../hand.ts";
 import { analyze, isOkurikan, wouldChangeWait } from "../hand.ts";
 import { PENALTY } from "../rules.ts";
 import type { Table } from "../table.ts";
@@ -65,6 +66,40 @@ function tripletTypes(melds: readonly Meld[]): number[] {
   return melds
     .filter((m) => m.kind !== "chi")
     .map((m) => tileType(m.tiles[0]));
+}
+
+/**
+ * Ask a question of the winner's PRE-WIN hand — the shape it was waiting with
+ * one tile ago, which is what the 後付け family is actually about.
+ *
+ * On a ron the table already holds exactly that: the winning tile is in the
+ * discarder's river, never in the hand. On a tsumo the drawn tile IS in the
+ * hand, and handing `analyze` a `drawn` argument is not enough — `analyze`
+ * derives `ronnable` from `oracle.hasYaku`, which reads `t.hands` directly
+ * (score.ts::buildContext) and would score a 15-tile hand. So the tile comes
+ * out of the table for the duration of the question and goes back in the same
+ * tick, before anything else can observe the table.
+ *
+ * Returns null when the pre-win hand cannot be recovered (a tsumo whose drawn
+ * tile the hook was not given) — silence beats charging off a mis-sized hand.
+ */
+function onPreWinHand<T>(
+  ctx: RuleCtx,
+  ask: (info: TenpaiInfo, hand: Tile[]) => T | null,
+): T | null {
+  const { t, seat, action, drawn, oracle } = ctx;
+  const hand = t.hands[seat];
+  let cut = -1;
+  if (action.t === "tsumo") {
+    cut = drawn === null ? -1 : hand.lastIndexOf(drawn);
+    if (cut < 0) return null;
+    hand.splice(cut, 1);
+  }
+  try {
+    return ask(analyze(t, seat, null, oracle), [...hand]);
+  } finally {
+    if (cut >= 0) hand.splice(cut, 0, drawn!);
+  }
 }
 
 // --- Tier A -----------------------------------------------------------------
@@ -280,75 +315,107 @@ const bigThreatRiichi: DojoRule = {
   },
 };
 
+/**
+ * 片和了り, judged at the WIN.
+ *
+ * A split wait — some winning tiles carry a yaku, some do not — is not itself a
+ * foul. Sitting in one is a shape, and a shape can still be pushed off or
+ * folded; what the dojo objects to is CASHING it. So the rule asks its question
+ * of the hand as it stood one tile ago, at the moment the seat declared.
+ *
+ * 例外:
+ *   (a) 門前ツモ — 門前清自摸和 is a yaku on every winning tile, so the split
+ *       never decided anything. (立直 needs no clause: it too puts a yaku on
+ *       every wait, so `analyze` reports `katagari: false` for a riichi hand and
+ *       the rule never reaches its test.)
+ *   (b) 純カラ — the yakuless side has no live copy left, so there was nothing
+ *       one-sided to exploit.
+ * A RON on the scoring side charges whether the hand was 門前 or not: the seat
+ * sat on a tile it could not use and took the one it could. An OPEN 自摸 on such
+ * a wait charges for the same reason.
+ */
 const katagariAgari: DojoRule = {
   id: "katagari",
   label: "片和了り",
   tier: "A",
   points: PENALTY.medium,
-  hooks: ["on-riichi", "post-discard"],
+  hooks: ["on-win"],
   check(ctx) {
-    const { t, seat, action, oracle } = ctx;
-    if (action.t !== "discard") return null;
-    const info = analyze(t, seat, null, oracle);
-    if (!info.katagari) return null;
-    // 例外: allowed when the yakuless side is 純カラ (no live copies left).
-    const dead = info.waits
-      .filter((w) => !info.ronnable.includes(w))
-      .every((w) => 4 - tableVisible(t, w) - countsFromTiles(t.hands[seat])[w] <= 0);
-    if (dead) return null;
-    return [{
-      detail: `待ち ${info.waits.join("/")} のうち役があるのは ${info.ronnable.join("/")}`,
-    }];
+    const { t, seat, action, drawn } = ctx;
+    if (action.t !== "ron" && action.t !== "tsumo") return null;
+    if (action.t === "tsumo" && t.isMenzen(seat)) return null; // 例外(a)
+    return onPreWinHand(ctx, (info, hand) => {
+      if (!info.katagari) return null;
+      // 例外(b): the yakuless side is 純カラ (no live copies left).
+      const counts = countsFromTiles(hand);
+      const dead = info.waits
+        .filter((w) => !info.ronnable.includes(w))
+        .every((w) => 4 - tableVisible(t, w) - counts[w] <= 0);
+      if (dead) return null;
+      const waits = info.waits.join("/");
+      const yaku = info.ronnable.join("/");
+      return [{
+        detail: action.t === "tsumo"
+          ? `片和了りの待ち ${waits} (役があるのは ${yaku}) のまま ${tileType(drawn!)} でツモ和了`
+          : `片和了りの待ち ${waits} のうち役のある ${yaku} でロン和了`,
+      }];
+    });
   },
 };
 
 /**
- * 後付け, judged where it is actually decidable: at the WAITING hand.
+ * 後付け, judged at the WIN.
  *
  * The dojo test this implements is "the hand plus any one of its winning tiles
- * must carry a yaku". An open tenpai where SOME waits score and some do not is
- * 片和了り and belongs to the rule above; an open tenpai where NO wait scores at
- * all is 後付け — the hand is playing for a yaku it does not have, and every
- * tile it is waiting on is unwinnable until that yaku arrives.
+ * must carry a yaku". A tenpai where SOME waits score is 片和了り and belongs to
+ * the rule above; a tenpai where NO wait scores at all is 後付け — the hand is
+ * playing for a yaku it does not have.
  *
- * This replaces an older on-call version that guessed structurally at "yaku
- * confirmed by this call". That guess was wrong in both directions (it read a
- * honitsu build as バック, and "confirmed" chanta/toitoi shapes that a single
- * draw could dissolve). Here the win oracle answers exactly, so the rule is
- * Tier A. A closed hand is exempt: riichi is itself a yaku, so 門前 never has
- * this problem — its split-wait case is katagari's business.
+ * Nothing is charged while such a hand merely SITS there. An open 形式聴牌 is a
+ * legitimate shape (it collects 聴牌料 at an exhaustive draw), and a seat that
+ * folds it or never completes it has taken nothing. The foul is the win.
  *
- * Under the placeholder `ANY_WIN` oracle every wait is ronnable, so the rule
- * never fires. That is the intended degradation: with no scorer wired in there
- * is no evidence, and the ledger does not guess.
+ * Where a win with no scoring wait can come from, honestly stated:
+ *   - The ledger's oracle IS the real scorer (main.ts wiring). `legal.ts` never
+ *     offers a ron with no scoring wait, so what reaches this hook is a TSUMO
+ *     whose only yaku is one the wait never carried — 海底摸月, 嶺上開花 — taken
+ *     on an open hand. That is 後付け in its purest form, and it is charged.
+ *   - The round ran under a permissive oracle (self-play harnesses, fixtures)
+ *     while the ledger judges with the real scorer: the yakuless win goes
+ *     through and is charged here.
+ *   - The ledger's own oracle is the placeholder `ANY_WIN`: every wait is
+ *     ronnable, `ronnable.length === 0` is never true, and the rule cannot fire.
+ *     That is the intended degradation — with no scorer wired in there is no
+ *     evidence, and the ledger does not guess. (The predecessor state-time rule
+ *     went silent under `ANY_WIN` for the same reason; only the moment of the
+ *     question moved.)
+ *
+ * 門前 is exempt on both counts: 立直 certifies every wait, and 門前ツモ is itself
+ * the yaku the hand was missing. No dedupe clause is needed — unlike the
+ * state-time version this replaces, a seat wins at most once per round.
+ *
+ * The 純カラ exception the state-time version carried is gone with it: a hand
+ * that just won on a wait has proved the wait was live, and on a ron the tile is
+ * already in the river, where `tableVisible` would count it against itself.
  */
 const atozuke: DojoRule = {
   id: "atozuke",
   label: "後付け",
   tier: "A",
   points: PENALTY.medium,
-  hooks: ["post-discard"],
+  hooks: ["on-win"],
   check(ctx) {
-    const { t, seat, action, oracle } = ctx;
-    if (action.t !== "discard") return null;
-    // 門前 cures itself by declaring riichi.
+    const { t, seat, action } = ctx;
+    if (action.t !== "ron" && action.t !== "tsumo") return null;
     if (t.isMenzen(seat)) return null;
-    // The state persists across every later discard; charge for it once.
-    if (t.ledger.some((v) => v.rule === "atozuke" && v.seat === seat)) return null;
-
-    const info = analyze(t, seat, null, oracle);
-    if (!info.tenpai) return null;
-    // Some waits score ⇒ 片和了り, which the rule above already charges for.
-    if (info.ronnable.length > 0) return null;
-    // 例外: 純カラ — no live copy of any wait, so nothing can be won either way.
-    const dead = info.waits.every(
-      (w) => 4 - tableVisible(t, w) - countsFromTiles(t.hands[seat])[w] <= 0,
-    );
-    if (dead) return null;
-    return [{
-      detail: `副露手が役の無い待ちで聴牌 (待ち ${info.waits.join("/")})。` +
-        `どの待ちでも和了に役が付かない`,
-    }];
+    return onPreWinHand(ctx, (info) => {
+      if (!info.tenpai) return null;
+      // Some wait scored ⇒ 片和了り, which the rule above charges for.
+      if (info.ronnable.length > 0) return null;
+      return [{
+        detail: `どの待ちにも役の無い副露手 (待ち ${info.waits.join("/")}) のまま和了した`,
+      }];
+    });
   },
 };
 
