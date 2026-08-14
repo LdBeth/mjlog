@@ -1,0 +1,239 @@
+// Feature encoding v2: an Observation → (36 tile planes, 39 scalars).
+//
+// The layout is a FROZEN contract shared with the Python/MLX trainer: the same
+// bytes this module writes into a trajectory are what the trainer reshapes, so
+// nothing here may be reordered without bumping `FEATURES.version` on both
+// sides.
+//
+// Every plane is a 34-long stretch indexed by tile TYPE (0..33, aka fives fold
+// onto their type — plane 5 is what keeps the red information). Per-seat planes
+// and scalars keep the Observation's RELATIVE ordering (0 = self), which is
+// what lets one network play all four seats.
+//
+// v2 over v1: planes 0–21 and scalars 0–32 are BYTE-IDENTICAL to v1; what is
+// new is (a) the tile a claim decision is being offered (v1 could not tell pon
+// from pass because it never saw the tile), (b) the oracle-derived per-discard
+// facts the teacher heuristic consults — keeps-best shanten, 片和了り, yakuless
+// — and (c) danger levels, the other seats' last discards, waits/ukeire, the
+// aka outside our hand, the dora count and the dealer.
+
+import type { Tile } from "mjrender/model.ts";
+import type { DangerLevel } from "mjrender/danger.ts";
+import { doraFromIndicatorType, tileType } from "mjrender/tiles.ts";
+import type { Observation } from "../observe.ts";
+
+export const FEATURES = {
+  version: 2,
+  planes: 36,
+  scalars: 39,
+  actions: 78,
+} as const;
+
+/** 34 tile types per plane. */
+export const TYPES = 34;
+
+/** Length of the flattened plane buffer (36 × 34). */
+export const PLANE_LEN = FEATURES.planes * TYPES;
+
+/** Flattened input width the network takes: planes ++ scalars. */
+export const INPUT_LEN = PLANE_LEN + FEATURES.scalars;
+
+export interface Encoded {
+  planes: Int8Array;
+  scalars: Float32Array;
+}
+
+function countTypes(ids: Iterable<Tile>): Uint8Array {
+  const c = new Uint8Array(TYPES);
+  for (const id of ids) c[tileType(id)]++;
+  return c;
+}
+
+/** Which of p26–p28 a danger level lights. 安全 lights none. */
+const DANGER_PLANE: Partial<Record<DangerLevel, number>> = {
+  "危険度低": 26,
+  "危険度中": 27,
+  "危険度高": 28,
+};
+
+/**
+ * The offered tile recovered from the call actions, for Observations that
+ * predate `claimTile`. Every pon/chi/daiminkan on the table names the same
+ * discarded tile in `called`, so the first one found is the answer; ron and
+ * pass carry nothing, which is why the field itself is the primary source.
+ */
+function claimTileFromLegal(obs: Observation): Tile | null {
+  for (const a of obs.legal) {
+    if (a.t === "pon" || a.t === "chi" || a.t === "daiminkan") return a.called;
+  }
+  return null;
+}
+
+/**
+ * Encode one observation.
+ *
+ * Plane map (each entry is one 34-long stretch):
+ *   0–3   own hand (drawn tile included) count ≥1 / ≥2 / ≥3 / ≥4
+ *   4     the drawn tile's type (all zero when it is not our draw)
+ *   5     types of the aka fives we hold
+ *   6–13  rivers, two planes per relative seat r: count ≥1 then ≥2
+ *   14–17 tile types appearing in relative seat r's melds
+ *   18    dora types;  19  dora indicator types
+ *   20    visible-to-me count ≥3;  21  visible count = 4
+ *   22    the tile a claim is being offered (all zero on a turn decision)
+ *   23–25 last river entry of relative seat 1 / 2 / 3
+ *   26–28 danger level 低 / 中 / 高 (安全 lights nothing)
+ *   29    types we may legally discard
+ *   30    discards that leave the BEST shanten of all our discards
+ *   31    discards that leave 片和了り;  32  discards that leave a yakuless tenpai
+ *   33    our waits;  34  our ukeire types
+ *   35    aka fives visible OUTSIDE our concealed hand (rivers + every meld)
+ *
+ * "Visible" is the POLICY'S OWN view and deliberately approximate: own hand +
+ * every river entry + every meld tile + the indicators, each tile id counted
+ * once. It therefore misses tiles buried in other seats' hands and in the dead
+ * wall, which is exactly the information the seat is not allowed to have.
+ */
+export function encode(obs: Observation): Encoded {
+  const planes = new Int8Array(PLANE_LEN);
+  const set = (p: number, ty: number) => {
+    planes[p * TYPES + ty] = 1;
+  };
+
+  // --- p0–p3: own hand ---
+  const hand = countTypes(obs.hand);
+  for (let ty = 0; ty < TYPES; ty++) {
+    for (let k = 0; k < 4; k++) if (hand[ty] > k) set(k, ty);
+  }
+
+  // --- p4: the drawn tile ---
+  if (obs.drawn !== null) set(4, tileType(obs.drawn));
+
+  // --- p5: aka held ---
+  for (const id of obs.hand) if (obs.akaIds.has(id)) set(5, tileType(id));
+
+  // --- p6–p13: rivers ---
+  for (let r = 0; r < 4; r++) {
+    const c = countTypes((obs.rivers[r] ?? []).map((e) => e.tile));
+    for (let ty = 0; ty < TYPES; ty++) {
+      if (c[ty] >= 1) set(6 + 2 * r, ty);
+      if (c[ty] >= 2) set(7 + 2 * r, ty);
+    }
+  }
+
+  // --- p14–p17: melds ---
+  for (let r = 0; r < 4; r++) {
+    for (const m of obs.melds[r] ?? []) {
+      for (const id of m.tiles) set(14 + r, tileType(id));
+    }
+  }
+
+  // --- p18/p19: dora ---
+  for (const ind of obs.doraIndicators) {
+    const ity = tileType(ind);
+    set(18, doraFromIndicatorType(ity));
+    set(19, ity);
+  }
+
+  // --- p20/p21: visible counts ---
+  const seen = new Set<Tile>();
+  for (const id of obs.hand) seen.add(id);
+  for (let r = 0; r < 4; r++) {
+    for (const e of obs.rivers[r] ?? []) seen.add(e.tile);
+    for (const m of obs.melds[r] ?? []) for (const id of m.tiles) seen.add(id);
+  }
+  for (const id of obs.doraIndicators) seen.add(id);
+  const vis = countTypes(seen);
+  for (let ty = 0; ty < TYPES; ty++) {
+    if (vis[ty] >= 3) set(20, ty);
+    if (vis[ty] >= 4) set(21, ty);
+  }
+
+  // --- p22: the tile a claim is offered on ---
+  // `claimTile` is what the driver hands us; the fallback reconstructs it from
+  // the call actions themselves, so an Observation built without the field
+  // (older fixtures, hand-built tests) still encodes the claim correctly.
+  const claimed = obs.claimTile ?? claimTileFromLegal(obs);
+  if (claimed !== null) set(22, tileType(claimed));
+
+  // --- p23–p25: the other seats' last discards ---
+  for (let r = 1; r < 4; r++) {
+    const river = obs.rivers[r] ?? [];
+    if (river.length > 0) set(22 + r, tileType(river[river.length - 1].tile));
+  }
+
+  // --- p26–p28: danger buckets (安全 lights nothing) ---
+  for (const [ty, d] of obs.danger) {
+    const p = DANGER_PLANE[d.level];
+    if (p !== undefined) set(p, ty);
+  }
+
+  // --- p29: types we may legally discard ---
+  for (const a of obs.legal) if (a.t === "discard") set(29, tileType(a.tile));
+
+  // --- p30–p32: what each discard leaves behind ---
+  let best = Infinity;
+  for (const info of obs.discardInfo.values()) best = Math.min(best, info.shanten);
+  for (const [tile, info] of obs.discardInfo) {
+    const ty = tileType(tile);
+    if (info.shanten === best) set(30, ty);
+    if (info.katagari) set(31, ty);
+    if (info.yakuless) set(32, ty);
+  }
+
+  // --- p33/p34: waits and ukeire ---
+  for (const ty of obs.waits) set(33, ty);
+  for (const u of obs.ukeire) set(34, u.type);
+
+  // --- p35: aka seen outside our own concealed hand ---
+  // Our own melds count as "outside": a red five in an ankan is public and is
+  // no longer a tile we can choose to hold or cut.
+  for (let r = 0; r < 4; r++) {
+    for (const e of obs.rivers[r] ?? []) if (obs.akaIds.has(e.tile)) set(35, tileType(e.tile));
+    for (const m of obs.melds[r] ?? []) {
+      for (const id of m.tiles) if (obs.akaIds.has(id)) set(35, tileType(id));
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // scalars
+  // -------------------------------------------------------------------------
+  const s = new Float32Array(FEATURES.scalars);
+  for (let r = 0; r < 4; r++) {
+    s[0 + r] = (obs.scores[r] ?? 0) / 25000;
+    s[4 + r] = obs.riichi[r] ? 1 : 0;
+    const rj = obs.riichiJunme[r] ?? -1;
+    s[8 + r] = rj < 0 ? 0 : rj / 18;
+  }
+  s[12] = obs.junme / 18;
+  s[13] = obs.wallRemaining / 70;
+  s[14] = obs.kyoku / 8;
+  s[15] = Math.min(obs.honba, 8) / 8;
+  s[16] = Math.min(obs.kyotaku, 4) / 4;
+  s[17] = obs.roundWind === 27 ? 1 : 0;
+  for (let w = 0; w < 4; w++) s[18 + w] = obs.seatWind === 27 + w ? 1 : 0;
+  s[22] = Math.max(0, obs.shanten) / 8;
+  s[23] = obs.furiten.permanent ? 1 : 0;
+  s[24] = obs.furiten.temporary ? 1 : 0;
+  s[25] = obs.furiten.riichi ? 1 : 0;
+  s[26] = obs.tsumogiriLock ? 1 : 0;
+  for (let r = 0; r < 4; r++) s[27 + r] = Math.min(obs.violations[r] ?? 0, 4) / 4;
+  // 門前: an ankan does not open the hand, so a hand of nothing but ankan is
+  // still menzen — and so is a hand with no melds at all (vacuously true).
+  s[31] = obs.melds[0].every((m) => m.kind === "ankan") ? 1 : 0;
+  s[32] = obs.melds[0].length / 4;
+  s[33] = Math.min(obs.doraCount, 8) / 8;
+  // 親 as a RELATIVE seat, like everything else here: 起家 rotates with kyoku.
+  s[34 + ((obs.kyoku % 4) - obs.seat + 4) % 4] = 1;
+  s[38] = obs.legal.some((a) => a.t === "pass") ? 1 : 0;
+
+  return { planes, scalars: s };
+}
+
+/** planes ++ scalars as one Float32Array — the network's input vector. */
+export function flatten(e: Encoded): Float32Array {
+  const out = new Float32Array(INPUT_LEN);
+  for (let i = 0; i < PLANE_LEN; i++) out[i] = e.planes[i];
+  out.set(e.scalars, PLANE_LEN);
+  return out;
+}

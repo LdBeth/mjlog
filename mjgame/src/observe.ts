@@ -32,6 +32,12 @@ export interface DiscardInfo {
   shanten: number;
   /** 片和了り: the resulting tenpai has waits that score and waits that do not. */
   katagari: boolean;
+  /**
+   * The resulting tenpai has NO wait that scores. Like `katagari` this needs the
+   * win oracle; unlike it, this is the discard that walks an OPEN hand straight
+   * into the 後付け penalty (a closed hand cures the same shape with riichi).
+   */
+  yakuless: boolean;
 }
 
 export interface Observation {
@@ -44,6 +50,13 @@ export interface Observation {
 
   hand: Tile[];
   drawn: Tile | null;
+  /**
+   * The tile just discarded, when this is a CLAIM decision (null/absent on a
+   * turn decision). Optional so the many hand-built Observations in tests need
+   * no edits; a policy that wants it on every claim should read it here rather
+   * than digging it out of `legal`.
+   */
+  claimTile?: Tile | null;
   /** Relative index 0..3. */
   melds: Meld[][];
   rivers: RiverEntry[][];
@@ -86,7 +99,8 @@ export interface Observation {
 }
 
 /**
- * Per legal discard: the shanten it leaves, and whether that shape is 片和了り.
+ * Per legal discard: the shanten it leaves, and whether that shape is 片和了り
+ * or yakuless outright.
  *
  * The oracle can only judge the hand the table is actually holding, so each
  * candidate is evaluated by lifting the tile out and putting it straight back.
@@ -112,8 +126,12 @@ function discardInfoFor(
     const [lifted] = hand.splice(i, 1);
     try {
       const sh = shanten(countsFromTiles(hand), open, closed);
-      const katagari = sh <= 0 ? analyze(t, seat, null, oracle).katagari : false;
-      out.set(a.tile, { shanten: sh, katagari });
+      const info = sh <= 0 ? analyze(t, seat, null, oracle) : null;
+      out.set(a.tile, {
+        shanten: sh,
+        katagari: info?.katagari ?? false,
+        yakuless: info !== null && info.tenpai && info.ronnable.length === 0,
+      });
     } finally {
       hand.splice(i, 0, lifted);
     }
@@ -127,6 +145,7 @@ export function observe(
   legal: Action[],
   drawn: Tile | null,
   oracle: WinOracle = ANY_WIN,
+  claimTile: Tile | null = null,
 ): Observation {
   const rel = <T>(pick: (s: Seat) => T): T[] => SEATS.map((s) => pick(((seat + s) % 4) as Seat));
 
@@ -169,6 +188,7 @@ export function observe(
     wallRemaining: t.wall.remaining,
     hand,
     drawn,
+    claimTile,
     melds: rel((s) => t.melds[s]),
     rivers: rel((s) => t.board.rivers[s]),
     scores: rel((s) => t.scores[s]),

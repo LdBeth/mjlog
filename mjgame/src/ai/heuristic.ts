@@ -14,8 +14,7 @@ import type { DangerLevel } from "mjrender/danger.ts";
 import type { Meld, Tile } from "mjrender/model.ts";
 import { countsFromTiles, shanten, ukeireTypes } from "mjrender/shanten.ts";
 import { doraFromIndicatorType, rankOfType, suitOfType, tileType } from "mjrender/tiles.ts";
-import { isHonor } from "../tiles.ts";
-import { confirmedYaku } from "../hand.ts";
+import { isHonor, isYaochu } from "../tiles.ts";
 import type { Observation } from "../observe.ts";
 import type { SyncPolicy } from "../policy.ts";
 import type { Rng } from "../rng.ts";
@@ -53,6 +52,12 @@ export interface HeuristicWeights {
    * move left.
    */
   katagari: number;
+  /**
+   * 後付け: the discard would leave an OPEN hand tenpai on nothing that scores.
+   * Weighted like `firstHonor` because it buys exactly that — a Tier A medium
+   * ledger entry — and unlike 片和了り there is no riichi available to cure it.
+   */
+  yakulessTenpai: number;
   /** Any tedashi once 不聴時ドラ切り has been called on us. */
   tsumogiriLock: number;
   /** Efficiency is scaled by this while folding. */
@@ -72,6 +77,7 @@ export const DEFAULT_WEIGHTS: HeuristicWeights = {
   firstHonor: 4000,
   notenDora: 2500,
   katagari: 1500,
+  yakulessTenpai: 4000,
   tsumogiriLock: 2500,
   foldEfficiency: 0.05,
   foldDanger: 10,
@@ -82,10 +88,12 @@ export interface HeuristicOptions {
   /** 喰いタン. Only affects whether an open tanyao counts as a confirmed yaku. */
   kuitan?: boolean;
   /**
-   * Obey the dojo 禁じ手 the CPU can see for itself (no 明槓, no 後付け calls,
-   * no first-turn honor discard, no 不聴時ドラ切り, no 地獄単騎/引っかけ riichi).
-   * This is an approximation of `penalty/rules.ts`, not a use of it: the ledger
-   * judges committed actions, and a policy has to decide beforehand.
+   * Obey the dojo 禁じ手 the CPU can see for itself (no 明槓, no first-turn
+   * honor discard, no 不聴時ドラ切り, no 地獄単騎/引っかけ riichi, no call with
+   * no route to a yaku, and no discard that leaves an open hand waiting on
+   * nothing that scores). This is an approximation of `penalty/rules.ts`, not a
+   * use of it: the ledger judges committed actions, and a policy has to decide
+   * beforehand.
    */
   dojo?: boolean;
   /** Probability of taking a uniformly random legal action instead. */
@@ -344,6 +352,11 @@ export class HeuristicPolicy implements SyncPolicy {
     // so declaring it makes every wait scoring and the shape stops being split.
     if (!ctx.canRiichi && obs.discardInfo.get(tile)?.katagari) cost += this.w.katagari;
 
+    // 後付け: an open hand tenpai on nothing that scores. A closed hand can cure
+    // the same shape by declaring, so only the open case is a violation — and
+    // the only prevention is not making that discard.
+    if (!ctx.closed && obs.discardInfo.get(tile)?.yakuless) cost += this.w.yakulessTenpai;
+
     // ドラ切りをポンされた後の手出し. `legal.ts` will not stop us — the dojo
     // takes the payment instead — so the price has to be paid here.
     if (obs.tsumogiriLock && tile !== obs.drawn) cost += this.w.tsumogiriLock;
@@ -468,13 +481,63 @@ export class HeuristicPolicy implements SyncPolicy {
     };
     const melds = [...obs.melds[0], meld];
 
-    if (this.dojo) {
-      // 後付け禁止: a call must leave a yaku that holds in every completion.
-      const yaku = confirmedYaku(rest, melds, ctx.valueHonors, this.kuitan);
-      if (yaku.length === 0) return null;
+    if (this.dojo && !this.hasYakuProspect(rest, melds, ctx.valueHonors, this.kuitan)) {
+      return null;
     }
 
     return shanten(countsFromTiles(rest), melds.length, false);
+  }
+
+  /**
+   * Is there a yaku this open shape can plausibly still land on?
+   *
+   * GUIDANCE ONLY, and deliberately looser than the ledger's 後付け rule. That
+   * rule judges the finished waiting hand with the real scorer (`yakuless` in
+   * `DiscardInfo`, priced in `dojoCost`); this one only has to stop the CPU
+   * from opening a hand with no route to a yaku at all. A concealed 役牌 pair —
+   * the classic バック — passes here on purpose: under the new reading the crime
+   * is the yakuless WAIT, not the hopeful call, so refusing every バック would
+   * cost the policy hands the dojo has no objection to.
+   */
+  private hasYakuProspect(
+    rest: Tile[],
+    melds: Meld[],
+    valueHonors: Set<number>,
+    kuitan: boolean,
+  ): boolean {
+    const restTypes = rest.map(tileType);
+    const meldTypes = melds.map((m) => m.tiles.map(tileType));
+
+    // 役牌: already melded, or held concealed as a pair waiting on the third.
+    for (const m of melds) {
+      if (m.kind !== "chi" && valueHonors.has(tileType(m.tiles[0]))) return true;
+    }
+    const counts = new Map<number, number>();
+    for (const ty of restTypes) counts.set(ty, (counts.get(ty) ?? 0) + 1);
+    for (const [ty, n] of counts) if (n >= 2 && valueHonors.has(ty)) return true;
+
+    // 断幺九: nothing melded touches a yaochu, and the concealed part holds at
+    // most one — which the discard that follows this call can throw away.
+    if (kuitan) {
+      const meldClean = meldTypes.every((ts) => ts.every((ty) => !isYaochu(ty)));
+      if (meldClean && restTypes.filter(isYaochu).length <= 1) return true;
+    }
+
+    // 混一色/清一色: the melds sit in one suit and at most two concealed tiles
+    // are stranded in another (honors are always welcome in a 混一色).
+    const meldSuits = new Set(
+      meldTypes.flat().filter((ty) => !isHonor(ty)).map((ty) => suitOfType(ty)),
+    );
+    if (meldSuits.size === 1) {
+      const [suit] = [...meldSuits];
+      const strays = restTypes.filter((ty) => !isHonor(ty) && suitOfType(ty) !== suit);
+      if (strays.length <= 2) return true;
+    }
+
+    // 対々和: no chi anywhere means the hand is still a pure triplet build.
+    if (melds.every((m) => m.kind !== "chi")) return true;
+
+    return false;
   }
 
   // -------------------------------------------------------------------- kan

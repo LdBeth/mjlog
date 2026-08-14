@@ -3,10 +3,13 @@
 
 import { assert, assertEquals } from "@std/assert";
 import type { Tile } from "mjrender/model.ts";
+import type { Meld } from "mjrender/model.ts";
+import type { WinOracle } from "../src/legal.ts";
 import { ANY_WIN } from "../src/legal.ts";
 import { runHook } from "../src/penalty/rules.ts";
 import type { Hook, RuleCtx } from "../src/penalty/mod.ts";
 import { DOJO_DEFAULT, JANKI } from "../src/rules.ts";
+import { scorer } from "../src/score.ts";
 import { sfc32 } from "../src/rng.ts";
 import { Table } from "../src/table.ts";
 import type { Action, Seat, Violation } from "../src/types.ts";
@@ -49,8 +52,26 @@ function makeDora(t: Table, type: number): void {
   t.emit({ t: "dora", indicator: ind * 4 }, { e: "dora", indicator: ind * 4 });
 }
 
-function ctx(t: Table, seat: Seat, action: Action, drawn: Tile | null = null): RuleCtx {
-  return { t, seat, action, drawn, cfg: t.cfg, dojo: DOJO_DEFAULT, oracle: ANY_WIN };
+function ctx(
+  t: Table,
+  seat: Seat,
+  action: Action,
+  drawn: Tile | null = null,
+  oracle: WinOracle = ANY_WIN,
+): RuleCtx {
+  return { t, seat, action, drawn, cfg: t.cfg, dojo: DOJO_DEFAULT, oracle };
+}
+
+/** Apply a chi meld for `seat`, built from explicit ids so nothing collides. */
+function chi(t: Table, seat: Seat, meldTiles: Tile[]): void {
+  const meld: Meld = {
+    kind: "chi",
+    who: seat,
+    fromWho: ((seat + 3) % 4) as Seat,
+    tiles: [...meldTiles].sort((a, b) => a - b),
+    calledTile: meldTiles[0],
+  };
+  t.emit({ t: "call", meld }, { e: "call", meld });
 }
 
 function fire(hook: Hook, c: RuleCtx): Violation[] {
@@ -182,27 +203,113 @@ Deno.test("持ち点8000点未満: judged at round end", () => {
   assert(!ids("under-8000", fire("on-round-end", ctx(ok, 0, { t: "pass" }))));
 });
 
-Deno.test("後付け: Tier B, flagged with confidence and evidence", () => {
+// ---------------------------------------------------------------------------
+// 後付け. Judged at the waiting hand, by the real scorer — so every fixture
+// below is built against `scorer`, not the `ANY_WIN` placeholder (under which
+// every wait is ronnable and the rule can never fire).
+// ---------------------------------------------------------------------------
+
+/**
+ * The canonical yakuless open tenpai:
+ *
+ *   副露 チー123m ＋ 手牌 456m 678p 55s 78s   (待ち 6s/9s)
+ *
+ * 6s finishes 123m 456m 678p 678s 55s, 9s finishes …789s 55s. Neither scores:
+ * the 1m in the meld kills 断幺九 (喰いタン is ON in JANKI), 456m kills 混全帯幺九,
+ * three suits kill 混一色, the chi kills 対々和, and there is no 役牌 anywhere.
+ *
+ * Index 3 of the returned ids is a stray 1p: the tile the fixture discards to
+ * arrive at the shape.
+ */
+function yakulessTenpai(t: Table): Tile[] {
+  const all = tiles("123m1p456m678p55s78s");
+  chi(t, 0, all.slice(0, 3));
+  setHand(t, 0, all.slice(3));
+  return all;
+}
+
+Deno.test("後付け: open tenpai where no wait scores at all", () => {
   const t = makeTable();
-  // Concealed 中 pair, no confirmed yaku, and we call a chi: the classic バック.
-  setHand(t, 0, tiles("234m567m11p中中"));
-  const called = tiles("3s")[0];
-  const a: Action = { t: "chi", tiles: [tiles("1s")[0], tiles("2s")[0]], called };
-  const vs = fire("on-call", ctx(t, 0, a));
+  const all = yakulessTenpai(t);
+  const a = doDiscard(t, 0, all[3]); // the stray 1p
+  const vs = fire("post-discard", ctx(t, 0, a, null, scorer));
   const v = vs.find((x) => x.rule === "atozuke");
-  assert(v !== undefined, "expected atozuke");
-  assertEquals(v.tier, "B");
-  assert(v.confidence < 1, "Tier B must not claim certainty");
-  assert(v.detail.length > 0, "Tier B must carry evidence");
+  assert(v !== undefined, `expected atozuke, got [${vs.map((x) => x.rule).join(",")}]`);
+  assertEquals(v.tier, "A");
+  assertEquals(v.confidence, 1, "the win oracle answers exactly");
+  assert(v.detail.includes("23") && v.detail.includes("26"), `evidence names 6s/9s: ${v.detail}`);
+  assert(!ids("katagari", vs), "no wait scores, so this is not 片和了り");
 });
 
-Deno.test("後付け: not flagged when a yaku is already confirmed", () => {
+Deno.test("後付け: a 混一色 build is not a violation (neither noten nor tenpai)", () => {
+  // The false positive the old on-call rule produced: a 白 back pair inside an
+  // obvious honitsu build read as バック, though every completion carries 混一色.
+  {
+    const t = makeTable();
+    // チー123s ＋ 456s 789s 3s 白白 5m 6m — still 1向聴 after cutting the 6m.
+    const all = tiles("123s6m456789s3s白白5m");
+    chi(t, 0, all.slice(0, 3));
+    setHand(t, 0, all.slice(3));
+    const a = doDiscard(t, 0, all[3]); // the 6m
+    assert(!ids("atozuke", fire("post-discard", ctx(t, 0, a, null, scorer))));
+  }
+  {
+    const t = makeTable();
+    // The same build, now tenpai: シャンポン 3s/白, and both waits carry 混一色.
+    const all = tiles("123s5m456789s33s白白");
+    chi(t, 0, all.slice(0, 3));
+    setHand(t, 0, all.slice(3));
+    const a = doDiscard(t, 0, all[3]); // the stray 5m
+    assert(!ids("atozuke", fire("post-discard", ctx(t, 0, a, null, scorer))));
+  }
+});
+
+Deno.test("後付け: a mixed wait belongs to 片和了り, not here", () => {
   const t = makeTable();
-  // Tanyao is structurally confirmed: nothing in the hand touches a yaochu.
-  setHand(t, 0, tiles("234m567m22p345s"));
-  const called = tiles("3s")[0];
-  const a: Action = { t: "chi", tiles: [tiles("4s")[0], tiles("5s")[0]], called };
-  assert(!ids("atozuke", fire("on-call", ctx(t, 0, a))));
+  // チー123m ＋ 456m 678p 22s 白白: シャンポン 2s/白. 白 scores (役牌), 2s does not.
+  const all = tiles("123m1p456m678p22s白白");
+  chi(t, 0, all.slice(0, 3));
+  setHand(t, 0, all.slice(3));
+  const a = doDiscard(t, 0, all[3]);
+  const vs = fire("post-discard", ctx(t, 0, a, null, scorer));
+  assert(ids("katagari", vs), "the split wait is 片和了り");
+  assert(!ids("atozuke", vs), "and must not be charged twice");
+});
+
+Deno.test("後付け: charged once per round, not on every later discard", () => {
+  const t = makeTable();
+  const all = yakulessTenpai(t);
+  const first = doDiscard(t, 0, all[3]); // the stray 1p
+  const vs = fire("post-discard", ctx(t, 0, first, null, scorer));
+  const v = vs.find((x) => x.rule === "atozuke");
+  assert(v !== undefined, "expected the first discard to be charged");
+  t.addViolation(v); // runHook does not write the ledger; the driver does
+
+  // A later 巡, same hand, same yakuless tenpai (the drawn tile goes straight
+  // back out, so the concealed shape is untouched).
+  const second = doDiscard(t, 0, tiles("9p")[0], false);
+  assert(!ids("atozuke", fire("post-discard", ctx(t, 0, second, null, scorer))));
+});
+
+Deno.test("後付け: exempt when the yakuless wait is 純カラ", () => {
+  const t = makeTable();
+  // チー123m ＋ 456m 678p 55s 79s: a lone 8s カンチャン, and all four 8s are gone.
+  const all = tiles("123m1p456m678p55s79s");
+  chi(t, 0, all.slice(0, 3));
+  setHand(t, 0, all.slice(3));
+  for (const eight of tiles("8888s")) doDiscard(t, 1, eight);
+  const a = doDiscard(t, 0, all[3]);
+  assert(!ids("atozuke", fire("post-discard", ctx(t, 0, a, null, scorer))));
+});
+
+Deno.test("後付け: a closed hand is exempt — it can cure the shape with 立直", () => {
+  const t = makeTable();
+  // The very same 14 tiles, none of them melded: 門前 so 立直 puts a yaku on
+  // every wait, and the dojo's objection disappears.
+  const all = tiles("123m1p456m678p55s78s");
+  setHand(t, 0, all);
+  const a = doDiscard(t, 0, all[3]);
+  assert(!ids("atozuke", fire("post-discard", ctx(t, 0, a, null, scorer))));
 });
 
 Deno.test("長考: fires past the 3-second norm, escalates past 4", () => {

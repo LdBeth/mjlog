@@ -2,13 +2,16 @@
 //
 // Distinct from `decompose.ts` (pure shape math) and `observe.ts` (what a policy
 // sees): this module answers questions *about a seat at this table* — is it
-// tenpai, on what, can it actually win on each of those, and which yaku are
-// already locked in regardless of how the hand finishes.
+// tenpai, on what, and can it actually win on each of those.
+//
+// Note what is deliberately absent: any structural guess at "the yaku this hand
+// will end up with". The dojo's 後付け test is asked of the WAITING hand (does
+// every winning tile carry a yaku?) and answered by the real scorer through
+// `analyze`, not by pattern-matching a half-built hand.
 
-import type { Meld, Tile } from "mjrender/model.ts";
+import type { Tile } from "mjrender/model.ts";
 import { countsFromTiles, shanten, ukeireTypes } from "mjrender/shanten.ts";
-import { rankOfType, suitOfType, tileType } from "mjrender/tiles.ts";
-import { isHonor, isYaochu } from "./tiles.ts";
+import { tileType } from "mjrender/tiles.ts";
 import type { WinOracle } from "./legal.ts";
 import { ANY_WIN } from "./legal.ts";
 import type { Table } from "./table.ts";
@@ -98,79 +101,4 @@ export function wouldChangeWait(
  */
 export function isOkurikan(kanType: number, drawn: Tile | null): boolean {
   return drawn !== null && tileType(drawn) !== kanType;
-}
-
-// ---------------------------------------------------------------------------
-// 後付け support
-// ---------------------------------------------------------------------------
-
-/**
- * Yaku that hold in EVERY completion of this hand, computed structurally
- * rather than by enumerating completions.
- *
- * This is the 後付け test: the dojo allows 先付け (call with a yaku already
- * determined) but forbids calling while the only yaku is one you still hope to
- * arrive. Enumerating completions instead would produce false negatives — a
- * single lucky completion that happens to carry a yaku does not make the call
- * 先付け in the dojo's reading.
- */
-export function confirmedYaku(
-  hand: readonly Tile[],
-  melds: readonly Meld[],
-  valueHonors: ReadonlySet<number>,
-  kuitan: boolean,
-): string[] {
-  const out: string[] = [];
-  const all = [...hand, ...melds.flatMap((m) => m.tiles)];
-  const types = all.map(tileType);
-
-  // 役牌: a melded triplet of a value honor can never go away.
-  for (const m of melds) {
-    const ty = tileType(m.tiles[0]);
-    if (m.kind !== "chi" && valueHonors.has(ty)) {
-      out.push("役牌");
-      break;
-    }
-  }
-
-  // 断幺九: no yaochu anywhere, and no partial shape that needs one.
-  if (kuitan && types.every((ty) => !isYaochu(ty))) out.push("断幺九");
-
-  // 混一色/清一色: one suit (plus honors) across hand and melds.
-  const suits = new Set(types.filter((ty) => !isHonor(ty)).map((ty) => suitOfType(ty)));
-  if (suits.size <= 1) {
-    out.push(types.some(isHonor) ? "混一色" : "清一色");
-  }
-
-  // 対々和: every meld is a triplet/kan and the concealed part is pairs only.
-  if (melds.length > 0 && melds.every((m) => m.kind !== "chi")) {
-    const counts = new Map<number, number>();
-    for (const ty of hand.map(tileType)) counts.set(ty, (counts.get(ty) ?? 0) + 1);
-    if ([...counts.values()].every((n) => n >= 2)) out.push("対々和");
-  }
-
-  // 混全帯幺九: every block reachable from here still touches a yaochu.
-  if (melds.length > 0 && melds.every((m) => m.tiles.map(tileType).some(isYaochu))) {
-    const handTypes = new Set(hand.map(tileType));
-    const reachable = [...handTypes].every((ty) => {
-      if (isYaochu(ty)) return true;
-      const r = rankOfType(ty);
-      return r <= 3 || r >= 7; // could still be part of a 123 / 789 run
-    });
-    if (reachable) out.push("混全帯幺九");
-  }
-
-  return out;
-}
-
-/** Value honors this seat holds concealed as a pair — the classic バック shape. */
-export function concealedYakuhaiPairs(
-  hand: readonly Tile[],
-  valueHonors: ReadonlySet<number>,
-): number[] {
-  const counts = new Map<number, number>();
-  for (const ty of hand.map(tileType)) counts.set(ty, (counts.get(ty) ?? 0) + 1);
-  return [...counts.entries()]
-    .filter(([ty, n]) => n >= 2 && valueHonors.has(ty))
-    .map(([ty]) => ty);
 }

@@ -2,6 +2,8 @@
 
 import { RandomPolicy } from "./ai/random.ts";
 import { HeuristicPolicy } from "./ai/heuristic.ts";
+import { NeuralPolicy } from "./rl/policy.ts";
+import { RecordingPolicy, TrajectoryWriter, writeMatchEnd } from "./rl/record.ts";
 import { runMatch, runMatchSync } from "./match.ts";
 import { dojoHooks } from "./dojo.ts";
 import type { MatchResult } from "./match.ts";
@@ -32,14 +34,40 @@ interface Args {
   /** One pool for the whole match, spent only after the turn allowance. */
   timerBank: number;
   noIntro: boolean;
-  /** One char per seat, "h" heuristic or "r" random — seat 0 first. */
+  /** One char per seat, "h" heuristic, "r" random or "n" neural — seat 0 first. */
   seats: string;
+  /** Manifest for the "n" seats. */
+  weights: string;
+  /** When set, self-play writes a trajectory JSONL here. */
+  record: string;
   help: boolean;
 }
 
+/** Where `--weights` points by default: what the trainer writes. */
+const DEFAULT_WEIGHTS = "weights/manifest.json";
+
 /** Seat letter → policy. Seeded per seat so a match seed reproduces exactly. */
-function makePolicy(kind: string, name: string, seed: number): SyncPolicy {
-  return kind === "r" ? new RandomPolicy(name, seed) : new HeuristicPolicy(name, seed);
+function makePolicy(
+  kind: string,
+  name: string,
+  seed: number,
+  weights = DEFAULT_WEIGHTS,
+): SyncPolicy {
+  if (kind === "r") return new RandomPolicy(name, seed);
+  if (kind === "n") {
+    // Eager load: a seat that cannot think is better refused at startup than
+    // discovered mid-hanchan.
+    try {
+      return new NeuralPolicy(name, seed, weights);
+    } catch (e) {
+      die(
+        `${e instanceof Error ? e.message : String(e)}\n` +
+          `n席 (学習済みポリシー) には重みが要ります。先に trainer を回すか、\n` +
+          `\`python train/randinit.py\` で初期重みを作ってから --weights=PATH を指定してください。`,
+      );
+    }
+  }
+  return new HeuristicPolicy(name, seed);
 }
 
 function parseArgs(argv: string[]): Args {
@@ -53,6 +81,8 @@ function parseArgs(argv: string[]): Args {
     timerBank: 10_000,
     noIntro: false,
     seats: "hhhh",
+    weights: DEFAULT_WEIGHTS,
+    record: "",
     help: false,
   };
   for (const arg of argv) {
@@ -67,9 +97,11 @@ function parseArgs(argv: string[]): Args {
       if (!m) die(`--timer は 10+3 の形式: ${arg.slice(8)}`);
       a.timerBank = Number(m[1]) * 1000;
       a.timerTurn = Number(m[2] ?? 0) * 1000;
-    } else if (arg.startsWith("--seats=")) {
+    } else if (arg.startsWith("--weights=")) a.weights = arg.slice(10);
+    else if (arg.startsWith("--record=")) a.record = arg.slice(9);
+    else if (arg.startsWith("--seats=")) {
       const v = arg.slice(8);
-      if (!/^[hr]{1,4}$/.test(v)) die(`--seats は h と r を4文字まで: ${v}`);
+      if (!/^[hrn]{1,4}$/.test(v)) die(`--seats は h, r, n を4文字まで: ${v}`);
       // Short forms repeat the last letter: "hr" ⇒ "hrrr".
       a.seats = v.padEnd(4, v[v.length - 1]);
     } else if (arg.startsWith("--glyphs=")) {
@@ -106,9 +138,14 @@ const USAGE = `mjgame — 雀鬼流ルールの4人麻雀 (人間1 + CPU3)
                       毎打の3秒を超えると持ち時間を消費し、使い切ると
                       マイナス表示になる。打牌は強制されず、遅さの代償は
                       雀鬼流の長考ペナルティのみ
-  --seats=hrrr        席ごとのCPU: h=手作り評価関数, r=ランダム (既定 hhhh)。
+  --seats=hrrn        席ごとのCPU: h=手作り評価関数, r=ランダム,
+                      n=学習済みニューラルポリシー (既定 hhhh)。
                       短く書くと最後の文字を繰り返す ("hr" ⇒ "hrrr")。
                       play では人間の席はシードから決まり、その席の文字は無視される
+  --weights=PATH      n席が読む manifest.json (既定 weights/manifest.json)。
+                      読めなければ起動時にエラー — trainer か train/randinit.py で作る
+  --record=PATH       selfplay の全判断を軌跡JSONL (trajectory) に書き出す。
+                      1行1判断 ("d") + 局結果 ("r") + 半荘結果 ("m")。学習器の入力
   --no-intro          開始演出と配牌アニメを飛ばす
   --help, -h          このヘルプ
 `;
@@ -163,7 +200,10 @@ async function cmdPlay(a: Args): Promise<void> {
   });
 
   const cpu = (s: Seat) =>
-    new PacedPolicy(makePolicy(a.seats[s], names[s], a.seed * 4 + s), () => app.paceDelay());
+    new PacedPolicy(
+      makePolicy(a.seats[s], names[s], a.seed * 4 + s, a.weights),
+      () => app.paceDelay(),
+    );
   const policies: Policy[] = SEATS.map((s) => s === humanSeat ? app.human : cpu(s));
 
   try {
@@ -192,33 +232,61 @@ async function cmdPlay(a: Args): Promise<void> {
 // selfplay / bench
 // ---------------------------------------------------------------------------
 
+interface HeadlessOptions {
+  /** Manifest path handed to any "n" seat. */
+  weights?: string;
+  /** Trajectory JSONL to record into; one writer for the whole run. */
+  record?: string;
+}
+
 function headless(
   games: number,
   seed: number,
   seats = "hhhh",
-): { results: MatchResult[]; ms: number } {
+  opts: HeadlessOptions = {},
+): { results: MatchResult[]; ms: number; traj: { d: number; r: number; m: number } | null } {
   const results: MatchResult[] = [];
+  // One file, one handle, every seat and every match of the run: the trainer
+  // reads a single stream and the "r"/"m" lines terminate each match in it.
+  const writer = opts.record ? new TrajectoryWriter(opts.record) : null;
   const t0 = performance.now();
-  for (let g = 0; g < games; g++) {
-    const s = seed + g;
-    const policies: SyncPolicy[] = SEATS.map((seat) =>
-      makePolicy(seats[seat], `${seats[seat].toUpperCase()}${seat}`, s * 4 + seat)
-    );
-    // Without the hooks the ledger is always empty and the stats line would
-    // report "違反 0件" no matter what actually happened.
-    results.push(runMatchSync(policies, {
-      seed: s,
-      cfg: JANKI,
-      dojo: DOJO_HEADLESS,
-      scorer,
-      ...makeDojoHooks(DOJO_HEADLESS),
-    }));
+  try {
+    for (let g = 0; g < games; g++) {
+      const s = seed + g;
+      const policies: SyncPolicy[] = SEATS.map((seat) => {
+        const p = makePolicy(
+          seats[seat],
+          `${seats[seat].toUpperCase()}${seat}`,
+          s * 4 + seat,
+          opts.weights,
+        );
+        return writer ? new RecordingPolicy(p, writer) : p;
+      });
+      // Without the hooks the ledger is always empty and the stats line would
+      // report "違反 0件" no matter what actually happened.
+      const r = runMatchSync(policies, {
+        seed: s,
+        cfg: JANKI,
+        dojo: DOJO_HEADLESS,
+        scorer,
+        ...makeDojoHooks(DOJO_HEADLESS),
+      });
+      results.push(r);
+      // Round and match lines close the match out: a policy never sees a
+      // result, so only the driver can write them.
+      if (writer) writeMatchEnd(writer, r, JANKI);
+    }
+    return { results, ms: performance.now() - t0, traj: writer?.stats() ?? null };
+  } finally {
+    writer?.close();
   }
-  return { results, ms: performance.now() - t0 };
 }
 
 function cmdSelfplay(a: Args): void {
-  const { results, ms } = headless(a.games, a.seed, a.seats);
+  const { results, ms, traj } = headless(a.games, a.seed, a.seats, {
+    weights: a.weights,
+    record: a.record || undefined,
+  });
   const place = SEATS.map(() => [0, 0, 0, 0]);
   const total = [0, 0, 0, 0];
   const wins = [0, 0, 0, 0];
@@ -272,10 +340,15 @@ function cmdSelfplay(a: Args): void {
   // Placement here is by raw score. The dojo's own ranking puts every violator
   // below every clean player, so read the 違反 column alongside 平均順位.
   console.log(`所要 ${(ms / 1000).toFixed(2)}s  (${(a.games / (ms / 1000)).toFixed(1)} 半荘/秒)`);
+  if (traj) {
+    console.log(
+      `軌跡 ${a.record}: 判断 ${traj.d}行  局 ${traj.r}行  半荘 ${traj.m}行`,
+    );
+  }
 }
 
 function cmdBench(a: Args): void {
-  const { results, ms } = headless(a.games, a.seed, a.seats);
+  const { results, ms } = headless(a.games, a.seed, a.seats, { weights: a.weights });
   const rounds = results.reduce((n, r) => n + r.rounds.length, 0);
   const secs = ms / 1000;
   console.log(`${a.games} 半荘 / ${rounds} 局 を ${secs.toFixed(3)}s`);

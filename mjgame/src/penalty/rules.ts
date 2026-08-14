@@ -9,13 +9,7 @@
 import type { Meld, Tile } from "mjrender/model.ts";
 import { countsFromTiles, shanten } from "mjrender/shanten.ts";
 import { doraFromIndicatorType, rankOfType, suitOfType, tileType } from "mjrender/tiles.ts";
-import {
-  analyze,
-  concealedYakuhaiPairs,
-  confirmedYaku,
-  isOkurikan,
-  wouldChangeWait,
-} from "../hand.ts";
+import { analyze, isOkurikan, wouldChangeWait } from "../hand.ts";
 import { PENALTY } from "../rules.ts";
 import type { Table } from "../table.ts";
 import {
@@ -308,6 +302,56 @@ const katagariAgari: DojoRule = {
   },
 };
 
+/**
+ * 後付け, judged where it is actually decidable: at the WAITING hand.
+ *
+ * The dojo test this implements is "the hand plus any one of its winning tiles
+ * must carry a yaku". An open tenpai where SOME waits score and some do not is
+ * 片和了り and belongs to the rule above; an open tenpai where NO wait scores at
+ * all is 後付け — the hand is playing for a yaku it does not have, and every
+ * tile it is waiting on is unwinnable until that yaku arrives.
+ *
+ * This replaces an older on-call version that guessed structurally at "yaku
+ * confirmed by this call". That guess was wrong in both directions (it read a
+ * honitsu build as バック, and "confirmed" chanta/toitoi shapes that a single
+ * draw could dissolve). Here the win oracle answers exactly, so the rule is
+ * Tier A. A closed hand is exempt: riichi is itself a yaku, so 門前 never has
+ * this problem — its split-wait case is katagari's business.
+ *
+ * Under the placeholder `ANY_WIN` oracle every wait is ronnable, so the rule
+ * never fires. That is the intended degradation: with no scorer wired in there
+ * is no evidence, and the ledger does not guess.
+ */
+const atozuke: DojoRule = {
+  id: "atozuke",
+  label: "後付け",
+  tier: "A",
+  points: PENALTY.medium,
+  hooks: ["post-discard"],
+  check(ctx) {
+    const { t, seat, action, oracle } = ctx;
+    if (action.t !== "discard") return null;
+    // 門前 cures itself by declaring riichi.
+    if (t.isMenzen(seat)) return null;
+    // The state persists across every later discard; charge for it once.
+    if (t.ledger.some((v) => v.rule === "atozuke" && v.seat === seat)) return null;
+
+    const info = analyze(t, seat, null, oracle);
+    if (!info.tenpai) return null;
+    // Some waits score ⇒ 片和了り, which the rule above already charges for.
+    if (info.ronnable.length > 0) return null;
+    // 例外: 純カラ — no live copy of any wait, so nothing can be won either way.
+    const dead = info.waits.every(
+      (w) => 4 - tableVisible(t, w) - countsFromTiles(t.hands[seat])[w] <= 0,
+    );
+    if (dead) return null;
+    return [{
+      detail: `副露手が役の無い待ちで聴牌 (待ち ${info.waits.join("/")})。` +
+        `どの待ちでも和了に役が付かない`,
+    }];
+  },
+};
+
 const hikkakeRiichi: DojoRule = {
   id: "hikkake",
   label: "即引っかけ立直",
@@ -421,32 +465,6 @@ const underEightThousand: DojoRule = {
 
 // --- Tier B -----------------------------------------------------------------
 
-const atozuke: DojoRule = {
-  id: "atozuke",
-  label: "後付け",
-  tier: "B",
-  points: PENALTY.medium,
-  hooks: ["on-call"],
-  check(ctx) {
-    const { t, seat, action, cfg } = ctx;
-    if (action.t !== "pon" && action.t !== "chi") return null;
-    const confirmed = confirmedYaku(
-      t.hands[seat],
-      t.melds[seat],
-      t.valueHonors(seat),
-      cfg.kuitan,
-    );
-    if (confirmed.length > 0) return null;
-    const backs = concealedYakuhaiPairs(t.hands[seat], t.valueHonors(seat));
-    if (backs.length === 0) return null;
-    return [{
-      detail: `確定役なしで鳴き、役牌 ${backs.join("/")} の暗刻待ち (バック)。` +
-        `構造判定のため、稀に確定役を見落とすことがある`,
-      confidence: 0.8,
-    }];
-  },
-};
-
 const koshi: DojoRule = {
   id: "koshi",
   label: "腰",
@@ -552,10 +570,10 @@ export const RULES: DojoRule[] = [
   suuankouRiichi,
   bigThreatRiichi,
   katagariAgari,
+  atozuke,
   hikkakeRiichi,
   yakumanRelated,
   underEightThousand,
-  atozuke,
   koshi,
   chouko,
   ukiCrush,

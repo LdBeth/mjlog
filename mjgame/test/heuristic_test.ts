@@ -4,7 +4,7 @@
 
 import { assert, assertEquals } from "@std/assert";
 import type { DangerAssessment, DangerLevel } from "mjrender/danger.ts";
-import type { Tile } from "mjrender/model.ts";
+import type { Meld, Tile } from "mjrender/model.ts";
 import type { RiverEntry } from "mjrender/state.ts";
 import { tileType } from "mjrender/tiles.ts";
 import { HeuristicPolicy } from "../src/ai/heuristic.ts";
@@ -168,10 +168,11 @@ Deno.test("heuristic: never calls 明槓", () => {
   assertEquals(p.decide(obs).t, "pass");
 });
 
-Deno.test("heuristic: refuses a 後付け chi", () => {
-  // 111m 77m 45p 23s 56s 89s — the chi improves the shape but leaves no yaku
-  // that survives every completion: 1m kills 断幺九, three suits kill 混一色,
-  // a 456p chi kills 混全帯幺九, and the chi itself kills 対々和.
+Deno.test("heuristic: refuses a chi with no route to any yaku", () => {
+  // 111m 77m 45p 23s 56s 89s — the chi improves the shape but the prospect
+  // screen finds no yaku left to aim at: no 役牌 melded or paired, three 1m
+  // put 断幺九 out of reach, the concealed part spans m+s against a p meld so
+  // 混一色 is gone, and the chi itself rules out 対々和.
   const hand = tiles("11177m45p235689s");
   const obs = baseObs({
     hand,
@@ -184,6 +185,58 @@ Deno.test("heuristic: refuses a 後付け chi", () => {
   });
   const p = new HeuristicPolicy("cpu", 1);
   assertEquals(p.decide(obs).t, "pass");
+});
+
+Deno.test("heuristic: calls toward a 混一色 build", () => {
+  // 12s 456s 789s 33s 白白 ＋ 一枚の 5m. The old confirmed-yaku filter refused
+  // this chi (a 白 pair with nothing "confirmed" read as バック); the screen
+  // lets it through, and so does the ledger — the crime would be finishing on
+  // a yakuless wait, which this build never does.
+  const all = tiles("12s456s789s33s白白5m3s");
+  const hand = all.slice(0, 13);
+  const called = all[13]; // a third 3s, distinct from the pair in hand
+  const obs = baseObs({
+    hand,
+    drawn: null,
+    shanten: 1, // 456s + 789s + 33s/白白/12s の三ブロック
+    legal: [
+      { t: "pass" },
+      { t: "chi", tiles: [hand[0], hand[1]], called },
+    ],
+  });
+  const p = new HeuristicPolicy("cpu", 1);
+  assertEquals(p.decide(obs).t, "chi");
+});
+
+Deno.test("heuristic: avoids the discard that fixes a yakuless open wait", () => {
+  // An open hand (one chi), two discards that both reach tenpai — one of them
+  // on a wait nothing scores on, which is a Tier A 後付け the moment it lands.
+  const meldTiles = tiles("123m");
+  const meld: Meld = {
+    kind: "chi",
+    who: 0,
+    fromWho: 3,
+    tiles: meldTiles,
+    calledTile: meldTiles[0],
+  };
+  const hand = tiles("456m678p55s78s5m");
+  const [dirty, clean] = [hand[hand.length - 1], hand[0]];
+  const obs = baseObs({
+    hand,
+    drawn: null,
+    melds: [[meld], [], [], []],
+    discardInfo: new Map([
+      [dirty, { shanten: 0, katagari: false, yakuless: true }],
+      [clean, { shanten: 0, katagari: false, yakuless: false }],
+    ]),
+    legal: [
+      { t: "discard", tile: dirty, riichi: false, tsumogiri: false },
+      { t: "discard", tile: clean, riichi: false, tsumogiri: false },
+    ],
+  });
+  const chosen = new HeuristicPolicy("cpu", 1).decide(obs);
+  assertEquals(chosen.t, "discard");
+  if (chosen.t === "discard") assertEquals(chosen.tile, clean);
 });
 
 Deno.test("heuristic: takes a yakuhai pon that gains a shanten", () => {
@@ -224,7 +277,8 @@ Deno.test("heuristic: dojo:false lifts the 禁じ手 filters", () => {
   const kan = new HeuristicPolicy("cpu", 1, { dojo: false }).decide(kanObs);
   assert(kanObs.legal.includes(kan), "whatever it picks must be a legal action");
 
-  // 後付け, where the flag does bite: the very chi refused above is now taken.
+  // The yaku-prospect screen, where the flag does bite: the very chi refused
+  // above is now taken.
   const hand = tiles("11177m45p235689s");
   const obs = baseObs({
     hand,
@@ -250,9 +304,9 @@ Deno.test("heuristic: prefers the clean tenpai over the 片和了り one", () =>
     drawn: hand[hand.length - 1],
     // Both discards reach tenpai; only one of them splits the wait.
     discardInfo: new Map([
-      [hand[hand.length - 1], { shanten: 0, katagari: true }],
-      [a, { shanten: 0, katagari: false }],
-      [b, { shanten: 0, katagari: true }],
+      [hand[hand.length - 1], { shanten: 0, katagari: true, yakuless: false }],
+      [a, { shanten: 0, katagari: false, yakuless: false }],
+      [b, { shanten: 0, katagari: true, yakuless: false }],
     ]),
   });
   const chosen = new HeuristicPolicy("cpu", 1).decide(obs);
@@ -265,7 +319,9 @@ Deno.test("heuristic: gives the hand up when every tenpai is 片和了り and it
   const drawn = hand[hand.length - 1];
   // An open hand: no riichi is on offer, so the split wait has no cure.
   const discardInfo = new Map(
-    hand.map((t) => [t, { shanten: t === drawn ? 1 : 0, katagari: t !== drawn }] as const),
+    hand.map((t) =>
+      [t, { shanten: t === drawn ? 1 : 0, katagari: t !== drawn, yakuless: false }] as const
+    ),
   );
   const obs = baseObs({ hand, drawn, discardInfo });
   const chosen = new HeuristicPolicy("cpu", 1).decide(obs);
@@ -283,7 +339,7 @@ Deno.test("heuristic: riichi cures 片和了り rather than abandoning the hand"
     drawn,
     waits: [tileType(tiles("1p")[0])],
     ukeire: [{ type: tileType(tiles("1p")[0]), live: 3 }],
-    discardInfo: new Map([[keep, { shanten: 0, katagari: true }]]),
+    discardInfo: new Map([[keep, { shanten: 0, katagari: true, yakuless: false }]]),
     legal: [
       { t: "discard", tile: keep, riichi: false, tsumogiri: false },
       { t: "discard", tile: keep, riichi: true, tsumogiri: false },
