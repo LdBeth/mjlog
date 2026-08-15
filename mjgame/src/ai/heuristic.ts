@@ -343,8 +343,9 @@ export class HeuristicPolicy implements SyncPolicy {
     if (obs.rivers[0].length === 0 && isHonor(ty)) cost += this.w.firstHonor;
 
     // 不聴時ドラ切り. Indicator dora only: the aka 5p may be cut before tenpai.
+    // Charged only from 3向聴 out — 2向聴以内 is allowed.
     // 例外: an honor dora already twice in the rivers is spent.
-    if (sh > 0 && ctx.doraTypes.has(ty)) {
+    if (sh > 2 && ctx.doraTypes.has(ty)) {
       if (!(isHonor(ty) && this.visibleCount(obs, ty) >= 2)) cost += this.w.notenDora;
     }
 

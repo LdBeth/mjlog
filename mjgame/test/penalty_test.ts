@@ -129,18 +129,38 @@ Deno.test("明槓: 大明槓 and 加槓 both fire, 暗槓 does not", () => {
   assert(!ids("minkan", fire("on-kan", ctx(t, 1, { t: "ankan", type: 22 }))));
 });
 
-Deno.test("不聴時ドラ切り: fires when not tenpai, exempt at tenpai and for 赤5筒", () => {
-  // A deliberately scattered hand, so the shape stays far from tenpai.
-  const scattered = () => tiles("147m258p369s東南西北中");
-  {
-    const t = makeTable();
-    makeDora(t, 0); // 1m
-    setHand(t, 0, scattered());
-    doDiscard(t, 0, tiles("4m")[0]); // burn the first-discard window
-    setHand(t, 0, scattered());
-    const a = doDiscard(t, 0, tiles("1m")[0]);
-    assert(ids("noten-dora", fire("post-discard", ctx(t, 0, a))));
+/**
+ * Cut a dora 1m out of a hand whose remaining 13 tiles have a known shanten,
+ * and report whether 不聴時ドラ切り charged for it. The first discard is burnt
+ * on an unrelated tile so the opening-honor window is closed either way.
+ */
+function cutDoraFrom(spec: string, o: { kyoku?: number } = {}): boolean {
+  const t = makeTable({ kyoku: o.kyoku ?? 0 });
+  makeDora(t, 0); // 1m
+  const hand = () => [...tiles(spec), ...tiles("1m")];
+  setHand(t, 0, hand());
+  doDiscard(t, 0, tiles(spec)[0]);
+  setHand(t, 0, hand());
+  const a = doDiscard(t, 0, tiles("1m")[0]);
+  return ids("noten-dora", fire("post-discard", ctx(t, 0, a)));
+}
+
+Deno.test("不聴時ドラ切り: fires from 3向聴 out, exempt at 2向聴以内", () => {
+  // Each spec is the 13-tile shape LEFT BEHIND once the dora 1m is cut, labelled
+  // with the shanten it holds. The line is drawn between 3向聴 and 2向聴.
+  const shapes: [number, string][] = [
+    [6, "47m258p369s東南西北中"],
+    [3, "234m78m45p12p9s5s東南"],
+    [2, "234m456m78m12p9s5s東"],
+    [1, "234m456m78m12p1p1p9s"],
+    [0, "234m456m789m123p1p"],
+  ];
+  for (const [sh, spec] of shapes) {
+    assertEquals(cutDoraFrom(spec), sh >= 3, `向聴${sh} (${spec})`);
   }
+});
+
+Deno.test("不聴時ドラ切り: exempt for 赤5筒, spent honor dora, and オーラス", () => {
   {
     // 赤5筒 is explicitly cuttable before tenpai when it is not indicator dora.
     const t = makeTable();
@@ -151,6 +171,33 @@ Deno.test("不聴時ドラ切り: fires when not tenpai, exempt at tenpai and fo
     setHand(t, 0, hand());
     const a = doDiscard(t, 0, aka);
     assert(!ids("noten-dora", fire("post-discard", ctx(t, 0, a))));
+  }
+  {
+    // 例外: an honor dora already twice on the table is spent. The cut itself is
+    // the first copy, so one earlier 中 in another river reaches the threshold —
+    // with none, the same 6向聴 hand is charged.
+    const chun = () => tiles("中中");
+    const cutChun = (prior: boolean): boolean => {
+      const t = makeTable();
+      makeDora(t, 33); // 中
+      if (prior) {
+        setHand(t, 1, [...tiles("147m258p369s東南西北"), chun()[1]]);
+        doDiscard(t, 1, chun()[1]);
+      }
+      const hand = () => [...tiles("147m258p369s東南西北"), chun()[0]];
+      setHand(t, 0, hand());
+      doDiscard(t, 0, tiles("4m")[0]);
+      setHand(t, 0, hand());
+      const a = doDiscard(t, 0, chun()[0]);
+      return ids("noten-dora", fire("post-discard", ctx(t, 0, a)));
+    };
+    assert(cutChun(false), "a live honor dora is still charged");
+    assert(!cutChun(true), "a 中 already once in the rivers is spent");
+  }
+  {
+    // 例外: オーラス conditions can justify it — same hand, last kyoku.
+    assert(cutDoraFrom("47m258p369s東南西北中"), "control: 東1局 charges");
+    assert(!cutDoraFrom("47m258p369s東南西北中", { kyoku: 7 }));
   }
 });
 

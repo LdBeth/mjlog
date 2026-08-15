@@ -130,7 +130,7 @@ const notenDora: DojoRule = {
   check(ctx) {
     const { t, seat, action, cfg } = ctx;
     if (action.t !== "discard") return null;
-    if (shantenAfterDiscard(t, seat) <= 0) return null; // tenpai — allowed
+    if (shantenAfterDiscard(t, seat) <= 2) return null; // 2向聴以内 — allowed
 
     const ty = tileType(action.tile);
     // 赤5筒 may be cut before tenpai; only indicator dora is restricted here.
