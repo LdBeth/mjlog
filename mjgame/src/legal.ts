@@ -204,6 +204,15 @@ function leavesLegalDiscard(t: Table, seat: Seat, action: Action): boolean {
   return t.hands[seat].some((id) => !spent.has(id) && !banned.has(tileType(id)));
 }
 
+/**
+ * Whether `tile` completes `seat`'s hand as a shape — yaku, furiten and the
+ * ron blocks are all somebody else's business. `round.ts` asks the same
+ * question to decide 見逃し furiten, which must be judged on the shape alone.
+ */
+export function completesHand(t: Table, seat: Seat, tile: Tile): boolean {
+  return isComplete(countsFromTiles([...t.hands[seat], tile]), t.melds[seat].length);
+}
+
 export function claimActions(
   t: Table,
   seat: Seat,
@@ -217,8 +226,7 @@ export function claimActions(
   if (t.sanctioned[seat]) return out;
 
   // --- ron ---
-  const withTile = [...t.hands[seat], tile];
-  if (isComplete(countsFromTiles(withTile), t.melds[seat].length)) {
+  if (completesHand(t, seat, tile)) {
     const ty = tileType(tile);
     const blocked = t.ronBlocked[seat].has(ty);
     if (

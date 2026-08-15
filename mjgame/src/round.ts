@@ -16,12 +16,14 @@
 //            none -> abortive checks, exhaustion check, TURN(next seat)
 
 import type { GameEvent, PlayerInfo, Tile } from "mjrender/model.ts";
+import { countsFromTiles, shanten, ukeireTypes } from "mjrender/shanten.ts";
 import { tileType } from "mjrender/tiles.ts";
 import { isYaochu } from "./tiles.ts";
 import type { DojoConfig, RuleConfig } from "./rules.ts";
 import {
   buildMeld,
   claimActions,
+  completesHand,
   kuikaeTypes,
   resolveClaims,
   turnActions,
@@ -259,6 +261,13 @@ export function* runRound(
     t.riichi[seat] = t.board.riichiActive[seat];
     t.kuikaeBan = null;
     t.clearTemporaryFuriten(seat);
+    // 振聴 (permanent flavour) is a property of the 13-tile hand vs its own
+    // river, and a seat's 13-tile hand only ever changes here: draw+discard and
+    // call+discard both end on the seat's own discard, and nobody can offer it
+    // a ron between its kan and the rinshan discard that follows. So refreshing
+    // once per discard keeps the flag continuously correct for `claimActions`,
+    // `observe()` and the TUI.
+    t.refreshPermanentFuriten(seat, currentWaits(t, seat));
     t.turnIndex++;
     deps.onAction?.(t, seat, action, drawnNow);
     rinshanPending = false;
@@ -364,14 +373,36 @@ function* claimPhase(
   for (const s of SEATS) {
     if (s === from) continue;
     const legal = claimActions(t, s, tile, from, scorer, chankan);
-    if (legal.length <= 1) continue; // only "pass" — do not bother the policy
-    const a = yield { k: "claim", seat: s, tile, from, legal };
-    replies.set(s, a);
-    // Declining a ron you could have taken is what makes you temporarily
-    // furiten — and permanently so if you are in riichi.
-    if (a.t !== "ron" && legal.some((x) => x.t === "ron")) t.markPassedRon(s);
+    // A seat whose only option is "pass" is not worth bothering the policy
+    // with, but it still has to be judged for 見逃し below.
+    let a: Action = { t: "pass" };
+    if (legal.length > 1) {
+      a = yield { k: "claim", seat: s, tile, from, legal };
+      replies.set(s, a);
+    }
+    // 見逃し: letting a tile that COMPLETES your hand go by makes you
+    // temporarily furiten — and permanently so if you are in riichi. Whether a
+    // ron was actually offered is beside the point; it may have been suppressed
+    // because the shape is yakuless, because 見せ牌/腰 blocks the tile, or
+    // because the seat is furiten already. This runs for the 槍槓 window too,
+    // which comes through the same loop.
+    if (a.t !== "ron" && completesHand(t, s, tile)) t.markPassedRon(s);
   }
   return resolveClaims(t, from, replies);
+}
+
+/**
+ * The tile types that complete a seat's resting (3n+1) hand, or none when it is
+ * not tenpai — at shanten 0 the ukeire types ARE the winning types. Same test
+ * mjrender's `BoardState.isFuriten` makes (state.ts:212), and the same
+ * open/closed convention `observe()` uses, so the two never disagree.
+ */
+function currentWaits(t: Table, seat: Seat): number[] {
+  const counts = countsFromTiles(t.hands[seat]);
+  const open = t.melds[seat].length;
+  const closed = t.isMenzen(seat);
+  const s = shanten(counts, open, closed);
+  return s <= 0 ? ukeireTypes(counts, open, closed, s) : [];
 }
 
 function winFlags(

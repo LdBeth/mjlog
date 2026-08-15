@@ -306,7 +306,12 @@ function headless(
           opts.weights,
           opts.temp,
         );
-        return writer
+        // Record ONLY neural seats: ppo.py recomputes behavior logp from
+        // --init, so a heuristic seat's "d" lines would be treated as samples
+        // from the neural policy and silently poison every importance ratio.
+        // Heuristic seats still play (and appear in "r"/"m" lines); they just
+        // never emit decisions.
+        return writer && seats[seat] === "n"
           ? new RecordingPolicy(p, writer, (sq) => encodeOracle(ref.t!, sq as Seat))
           : p;
       });
