@@ -1,4 +1,4 @@
-// Feature encoding v3: an Observation → (48 tile planes, 42 scalars).
+// Feature encoding v4: an Observation → (48 tile planes, 42 scalars, token seq).
 //
 // The layout is a FROZEN contract shared with the Python/MLX trainer: the same
 // bytes this module writes into a trajectory are what the trainer reshapes, so
@@ -29,6 +29,16 @@
 // NOTE ON CELL RANGE: v2 planes are strictly 0/1 indicator bits. Three of the
 // v3 groups (p36–p44) are small COUNTS/LEVELS instead — still Int8, still in
 // 0..4 — so a consumer that normalises must not assume bits beyond p35.
+//
+// v4 over v3: the planes and the scalars DO NOT MOVE — byte for byte, cell for
+// cell, `encode` emits exactly what v3 emitted, and the frozen v3 digests are
+// asserted unchanged. What v4 adds is a SECOND, differently-shaped view of the
+// same table: `encodeSeq`, a token stream over the four rivers (see below) that
+// an attention encoder folds into a 64-wide vector `z`, concatenated after the
+// 1674 plane/scalar dims. Rivers reach the planes only as per-type counts, so
+// the ORDER tiles were let go in — the single most-read signal at a real table
+// — was invisible to v3 by construction; that order is what the token stream
+// carries. The version bump exists for the seq alone.
 
 import type { Tile } from "mjrender/model.ts";
 import type { DangerLevel } from "mjrender/danger.ts";
@@ -40,7 +50,7 @@ import type { Seat } from "../types.ts";
 import { SEATS } from "../types.ts";
 
 export const FEATURES = {
-  version: 3,
+  version: 4,
   planes: 48,
   scalars: 42,
   actions: 78,
@@ -54,6 +64,31 @@ export const PLANE_LEN = FEATURES.planes * TYPES;
 
 /** Flattened input width the network takes: planes ++ scalars. */
 export const INPUT_LEN = PLANE_LEN + FEATURES.scalars;
+
+// ---------------------------------------------------------------------------
+// v4 token stream — the shapes `train/V4_SPEC.md` freezes
+// ---------------------------------------------------------------------------
+
+/** How many LEADING entries of each river become tokens. */
+export const SEQ_RIVER_MAX = 24;
+
+/** Bytes in one packed token: `[type, seatRel, idx, flags]`. */
+export const SEQ_TOKEN_BYTES = 4;
+
+/** Hard cap on the token count: 4 seats × 24 entries. */
+export const SEQ_MAX = 4 * SEQ_RIVER_MAX;
+
+/**
+ * Width of one token after the dense expansion every forward does:
+ * onehot34(type) ++ onehot4(seatRel) ++ idx/24 ++ tsumogiri ++ riichiDecl ++
+ * calledAway = 34 + 4 + 1 + 3 = 42, in exactly that order.
+ */
+export const SEQ_DENSE = TYPES + 4 + 1 + 3;
+
+/** Bit positions of the `flags` byte. */
+export const SEQ_FLAG_TSUMOGIRI = 1;
+export const SEQ_FLAG_RIICHI = 2;
+export const SEQ_FLAG_CALLED = 4;
 
 export interface Encoded {
   planes: Int8Array;
@@ -328,6 +363,96 @@ export function encode(obs: Observation): Encoded {
   }
 
   return { planes, scalars: s };
+}
+
+// ---------------------------------------------------------------------------
+// v4: the river token stream
+// ---------------------------------------------------------------------------
+
+/**
+ * The four rivers as one PACKED token stream — the "seq" half of feature v4.
+ *
+ * One token per discard, ALL FOUR seats including our own, `SEQ_TOKEN_BYTES`
+ * Int8 each:
+ *
+ *     [type, seatRel, idx, flags]
+ *
+ * Order is seatRel 0 (self) first, then 1, 2, 3 — the same relative ordering
+ * every plane and scalar uses — and chronological inside each river, which is
+ * the whole point: the planes see a river as a bag of types, and this sees it
+ * as the sequence it actually was. Each river contributes its FIRST
+ * `SEQ_RIVER_MAX` (24) entries, so the stream is at most `SEQ_MAX` (96) tokens
+ * long and the encoder never has to pad. Truncation drops the LATEST discards,
+ * not the earliest — a river that long is deep into 終盤, where the opening
+ * shape is what still reads.
+ *
+ * `idx` is the 0-based position inside that seat's own river (0..23), which is
+ * what tells 第一打 from 十打目 once the tokens are shuffled together by
+ * attention; it is expanded as `idx / 24`, never as a one-hot.
+ *
+ * The three flags are read straight off the `RiverEntry` the board keeps —
+ * nothing here is re-derived:
+ *   bit0 `tsumogiri`     — the entry's own 手出し/ツモ切り mark
+ *   bit1 `riichiDeclare` — the sideways declaration tile (planes 45–47 read the
+ *                          same field, so the two can never disagree)
+ *   bit2 `calledBy !== undefined` — the tile was claimed into someone's meld.
+ *
+ * The called-away bit deserves a word: `BoardState.applyMeld` writes `calledBy`
+ * onto the discarder's last river entry when a chi/pon/daiminkan takes it, so
+ * the mark is already on the entry and does NOT have to be recovered by
+ * matching meld `calledTile` ids against rivers. It matters because a called
+ * tile is a discard that never sat in the river — reading the stream without it
+ * would count a tile as passed-safe that was in fact scooped up immediately.
+ *
+ * Returns a fresh, exactly-sized Int8Array: `4 × L` bytes for `L` tokens, and a
+ * ZERO-length array before anyone has discarded (the `L = 0` case every forward
+ * implementation must special-case as `z = bz`).
+ */
+export function encodeSeq(obs: Observation): Int8Array {
+  const buf = new Int8Array(SEQ_MAX * SEQ_TOKEN_BYTES);
+  let n = 0;
+  for (let r = 0; r < 4; r++) {
+    const river = obs.rivers[r] ?? [];
+    const take = Math.min(river.length, SEQ_RIVER_MAX);
+    for (let i = 0; i < take; i++) {
+      const e = river[i];
+      let flags = 0;
+      if (e.tsumogiri) flags |= SEQ_FLAG_TSUMOGIRI;
+      if (e.riichiDeclare) flags |= SEQ_FLAG_RIICHI;
+      if (e.calledBy !== undefined) flags |= SEQ_FLAG_CALLED;
+      buf[n++] = tileType(e.tile);
+      buf[n++] = r;
+      buf[n++] = i;
+      buf[n++] = flags;
+    }
+  }
+  return buf.slice(0, n);
+}
+
+/**
+ * One packed token expanded to the `SEQ_DENSE` floats the encoder multiplies.
+ * Shared by the TS attention forward and by the tests that pin the layout, so
+ * there is exactly one place the field order lives.
+ *
+ * A field outside its documented range sets NO bit and contributes nothing —
+ * the spec's rule, and the same one `rlnet_attn_encode` follows. `encodeSeq`
+ * cannot produce such a token; a corrupt "seq" replayed from a trajectory file
+ * can, and it must degrade rather than write past its own slot (an unguarded
+ * `out[type] = 1` with type = 40 would land on the flag dims).
+ *
+ * `idx / SEQ_RIVER_MAX` is computed in double and rounded once, by the store
+ * into the Float32Array — which is exactly what the C side spells out.
+ */
+export function expandToken(tokens: Int8Array, i: number, out: Float32Array): void {
+  out.fill(0);
+  const b = i * SEQ_TOKEN_BYTES;
+  const type = tokens[b], seatRel = tokens[b + 1], idx = tokens[b + 2], flags = tokens[b + 3];
+  if (type >= 0 && type < TYPES) out[type] = 1; // onehot34(type)
+  if (seatRel >= 0 && seatRel < 4) out[TYPES + seatRel] = 1; // onehot4(seatRel)
+  if (idx >= 0 && idx < SEQ_RIVER_MAX) out[TYPES + 4] = idx / SEQ_RIVER_MAX;
+  out[TYPES + 5] = flags & SEQ_FLAG_TSUMOGIRI ? 1 : 0;
+  out[TYPES + 6] = flags & SEQ_FLAG_RIICHI ? 1 : 0;
+  out[TYPES + 7] = flags & SEQ_FLAG_CALLED ? 1 : 0;
 }
 
 // ---------------------------------------------------------------------------

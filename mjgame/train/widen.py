@@ -77,11 +77,8 @@ from common import (  # noqa: E402
     AUX_BLOB_NAME,
     BLOB_NAME,
     CRITIC_BLOB_NAME,
-    CRITIC_INPUT,
     CRITIC_MANIFEST_NAME,
-    FEATURE_VERSION,
     HIDDEN1,
-    INPUT_DIM,
     MANIFEST_NAME,
     ORACLE_LEN,
     PLANE_LEN,
@@ -92,11 +89,21 @@ from common import (  # noqa: E402
     V2_INPUT_DIM,
     V2_PLANE_FLOATS,
     V2_SCALAR_FLOATS,
+    V3_CRITIC_INPUT,
+    V3_INPUT_DIM,
     critic_manifest_for,
     load_critic,
     load_weights,
     manifest_for,
 )
+
+# This tool is, and stays, the v2 -> v3 step: v3 -> v4 (the attention river
+# encoder) is `train/widen4.py`, and chaining the two is how a v2 weight set
+# reaches the current engine.  So the target width is pinned to v3 here rather
+# than read from common.INPUT_DIM, which now means v4's 1738.
+FEATURE_VERSION = 3
+INPUT_DIM = V3_INPUT_DIM          # 1674
+CRITIC_INPUT = V3_CRITIC_INPUT    # 1844
 
 # The v2 feature block, spelled out so "is this v2?" is a comparison and not a
 # guess.  36 planes x 34 + 39 scalars = 1263.

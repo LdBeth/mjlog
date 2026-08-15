@@ -7,6 +7,15 @@
 Trains only the policy head; the value head (output 79) is sliced off inside
 `masked_cross_entropy`, so it stays at its random init and contributes no
 gradient.
+
+BC IS A v3-WIDTH TRAINER, deliberately.  Feature v4 hangs a 64-wide attention
+summary of the rivers off the end of the policy input, and that encoder is a
+second parameter tree with its own forward (ppo.py); cloning a heuristic's
+discards does not need it and would only train it against a teacher that never
+saw it.  So this trains the plain 1674-wide MLP over the dense features that a
+v4 trajectory still carries verbatim, and writes a v3 weight set.  Run
+`train/widen4.py` on the result to get the v4 net PPO wants -- the migration is
+function-preserving, so the cloned policy is unchanged by it.
 """
 
 from __future__ import annotations
@@ -22,7 +31,7 @@ import numpy as np
 from common import (
     ACTIONS,
     FEATURE_VERSION,
-    INPUT_DIM,
+    PLANE_SCALAR_DIM,
     PolicyValueNet,
     export_weights,
     load_trajectories,
@@ -89,14 +98,18 @@ def main() -> None:
 
     Xtr, mtr, ytr = traj.X[train_idx], traj.mask[train_idx], traj.action[train_idx]
     Xva, mva, yva = traj.X[val_idx], traj.mask[val_idx], traj.action[val_idx]
-    # The data decides the width; INPUT_DIM only has to agree with it.  The
-    # loader already rejects anything that is not feature v2, so a disagreement
-    # here means the constants drifted, not that the file is stale.
+    # The data decides the width; the constant only has to agree with it.  The
+    # loader already rejects anything that is not the current feature version,
+    # so a disagreement here means the constants drifted, not that the file is
+    # stale.  The comparison is against the DENSE width (planes ++ scalars),
+    # which is what `traj.X` holds in every feature version -- v4's token stream
+    # lives in `traj.seq` and this trainer does not read it.
     input_dim = int(traj.X.shape[1])
-    if input_dim != INPUT_DIM:
+    if input_dim != PLANE_SCALAR_DIM:
         raise SystemExit(
-            f"data is {input_dim} wide but feature v{FEATURE_VERSION} is {INPUT_DIM} "
-            "-- common.py's contract constants and the engine's encoder disagree"
+            f"data is {input_dim} wide but feature v{FEATURE_VERSION}'s planes ++ "
+            f"scalars is {PLANE_SCALAR_DIM} -- common.py's contract constants and "
+            "the engine's encoder disagree"
         )
     print(
         f"train {Xtr.shape[0]} / val {Xva.shape[0]}  "

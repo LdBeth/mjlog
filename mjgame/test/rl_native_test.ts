@@ -11,7 +11,19 @@
 import { assert, assertEquals } from "@std/assert";
 import { FEATURES, INPUT_LEN } from "../src/rl/features.ts";
 import type { LayerSpec, Net } from "../src/rl/net.ts";
-import { closeNet, forward, isNative, loadNative, loadNet, NATIVE_LIB_URL } from "../src/rl/net.ts";
+import {
+  ATTN_FLOATS,
+  attnEncode,
+  closeAttn,
+  closeNet,
+  forward,
+  isNative,
+  loadAttn,
+  loadNative,
+  loadNativeAttn,
+  loadNet,
+  NATIVE_LIB_URL,
+} from "../src/rl/net.ts";
 import type { Rng } from "../src/rng.ts";
 import { sfc32 } from "../src/rng.ts";
 
@@ -339,5 +351,155 @@ Deno.test({
         closeNet(nat);
       }
     });
+  },
+});
+
+// ---------------------------------------------------------------------------
+// 5. feature v4: the river encoder, native vs TS
+// ---------------------------------------------------------------------------
+//
+// `rlnet_attn_*` is OPTIONAL in a way the MLP entry points are not: a dylib
+// built before feature v4 exports the latter and not the former, and net.ts
+// must fall back to the TypeScript encoder rather than refuse to run — so the
+// tests here bracket both the agreement and that fallback.
+
+/** A random `attn.f32` written into `dir`, plus the tensor list it follows. */
+function writeAttnBlob(dir: string, seed: number): string {
+  const sizes: number[] = [
+    64 * 42,
+    64, // W_in, b_in
+    64 * 64,
+    64,
+    64 * 64,
+    64,
+    64 * 64,
+    64, // Wq/bq Wk/bk Wv/bv
+    64 * 64,
+    64, // Wo, bo
+    64, // u
+    64 * 64,
+    64, // Wz, bz
+  ];
+  const total = sizes.reduce((a, b) => a + b, 0);
+  assertEquals(total, ATTN_FLOATS);
+  const rng = sfc32(seed);
+  const out = new Uint8Array(total * 4);
+  const dv = new DataView(out.buffer);
+  // 0.02, the trainer's init scale — big enough for the softmaxes to be
+  // non-degenerate, small enough that a 1e-4 absolute tolerance is meaningful.
+  for (let i = 0; i < total; i++) dv.setFloat32(i * 4, (rng.float() * 2 - 1) * 0.02, true);
+  const path = `${dir}/attn.f32`;
+  Deno.writeFileSync(path, out);
+  return path;
+}
+
+/** Token streams of every interesting length, deterministically generated. */
+function seqCases(rng: Rng): Int8Array[] {
+  const lens = [0, 1, 2, 7, 24, 48, 95, 96];
+  return lens.map((L) => {
+    const a = new Int8Array(L * 4);
+    for (let i = 0; i < L; i++) {
+      a[i * 4] = Math.floor(rng.float() * 34);
+      a[i * 4 + 1] = Math.floor(rng.float() * 4);
+      a[i * 4 + 2] = Math.floor(rng.float() * 24);
+      a[i * 4 + 3] = Math.floor(rng.float() * 8);
+    }
+    return a;
+  });
+}
+
+Deno.test({
+  name: "native: attn の z が native と TS で一致する",
+  ignore: SKIP,
+  fn: () => {
+    const dir = Deno.makeTempDirSync({ prefix: "mjgame_rl_attn_" });
+    try {
+      const path = writeAttnBlob(dir, 0x4a11);
+      const ts = loadAttn(`${dir}/manifest.json`, path);
+      const nat = loadAttn(`${dir}/manifest.json`, path);
+      assert(loadNativeAttn(nat), "native の attn を読み込めませんでした");
+      assertEquals(ts.native, undefined, "TS 側に ctx が付いています");
+
+      for (const tokens of seqCases(sfc32(31))) {
+        const a = attnEncode(ts, tokens);
+        const b = attnEncode(nat, tokens);
+        assertEquals(a.length, 64);
+        assertEquals(b.length, 64);
+        const d = maxAbsDiff(a, b);
+        assert(d < TOL, `L=${tokens.length / 4}: 最大差 ${d}`);
+        // …and the answer is not trivially zero, which would make agreement
+        // meaningless: bz alone is non-degenerate for L = 0 too.
+        assert(Array.from(a).some((v) => Math.abs(v) > 1e-6), `L=${tokens.length / 4}: z が全て 0`);
+      }
+      closeAttn(nat);
+      assertEquals(nat.native, undefined);
+      // After closing, the same object answers on the TS path — identically.
+      const tokens = seqCases(sfc32(5))[3];
+      assertEquals(Array.from(attnEncode(nat, tokens)), Array.from(attnEncode(ts, tokens)));
+    } finally {
+      Deno.removeSync(dir, { recursive: true });
+    }
+  },
+});
+
+Deno.test({
+  name: "native: MJGAME_NATIVE=0 なら attn も TS 経路のまま",
+  ignore: SKIP,
+  fn: () => {
+    const dir = Deno.makeTempDirSync({ prefix: "mjgame_rl_attn_" });
+    try {
+      const path = writeAttnBlob(dir, 0x4a12);
+      withGate("0", () => {
+        const off = loadAttn(`${dir}/manifest.json`, path);
+        assertEquals(loadNativeAttn(off), false);
+        assertEquals(off.native, undefined);
+      });
+      // …and with the gate back on, the same file does attach.
+      withGate(undefined, () => {
+        const on = loadAttn(`${dir}/manifest.json`, path);
+        assert(loadNativeAttn(on));
+        closeAttn(on);
+      });
+    } finally {
+      Deno.removeSync(dir, { recursive: true });
+    }
+  },
+});
+
+Deno.test({
+  name: "native: 壊れた attn.f32 は native も掴まず TS に落ちる",
+  ignore: SKIP,
+  fn: () => {
+    const dir = Deno.makeTempDirSync({ prefix: "mjgame_rl_attn_" });
+    try {
+      // `rlnet_attn_create` validates the file size itself and returns NULL —
+      // the TS side must read that as "no native", not as a fatal error, and
+      // its own loader rejects the file before it ever gets there.
+      const path = `${dir}/attn.f32`;
+      Deno.writeFileSync(path, new Uint8Array(ATTN_FLOATS * 4 - 8));
+      const attn = {
+        wIn: new Float32Array(64 * 42),
+        bIn: new Float32Array(64),
+        wq: new Float32Array(64 * 64),
+        bq: new Float32Array(64),
+        wk: new Float32Array(64 * 64),
+        bk: new Float32Array(64),
+        wv: new Float32Array(64 * 64),
+        bv: new Float32Array(64),
+        wo: new Float32Array(64 * 64),
+        bo: new Float32Array(64),
+        u: new Float32Array(64),
+        wz: new Float32Array(64 * 64),
+        bz: new Float32Array(64),
+        path,
+      };
+      assertEquals(loadNativeAttn(attn), false, "壊れたファイルで native が付きました");
+      // The TS encoder still answers — z = bz = 0 here.
+      assertEquals(Array.from(attnEncode(attn, new Int8Array(0))), new Array(64).fill(0));
+      // A path that does not exist at all behaves the same way.
+      assertEquals(loadNativeAttn({ ...attn, path: `${dir}/nope.f32` }), false);
+    } finally {
+      Deno.removeSync(dir, { recursive: true });
+    }
   },
 });

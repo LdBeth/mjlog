@@ -23,12 +23,21 @@ import type { Encoded } from "../src/rl/features.ts";
 import {
   encode,
   encodeOracle,
+  encodeSeq,
+  expandToken,
   FEATURES,
   flatten,
   INPUT_LEN,
   ORACLE_LEN,
   ORACLE_PLANES,
   PLANE_LEN,
+  SEQ_DENSE,
+  SEQ_FLAG_CALLED,
+  SEQ_FLAG_RIICHI,
+  SEQ_FLAG_TSUMOGIRI,
+  SEQ_MAX,
+  SEQ_RIVER_MAX,
+  SEQ_TOKEN_BYTES,
   TYPES,
 } from "../src/rl/features.ts";
 import { DOJO_HEADLESS, JANKI } from "../src/rules.ts";
@@ -194,7 +203,7 @@ function baseObs(over: Partial<Observation> = {}): Observation {
 // --------------------------------------------------------------------------
 
 Deno.test("features: the advertised dimensions are the frozen ones", () => {
-  assertEquals(FEATURES.version, 3);
+  assertEquals(FEATURES.version, 4);
   assertEquals(FEATURES.planes, 48);
   assertEquals(FEATURES.scalars, 42);
   assertEquals(FEATURES.actions, 78);
@@ -205,6 +214,12 @@ Deno.test("features: the advertised dimensions are the frozen ones", () => {
   // first-layer columns it zero-fills are [1224..1631] and [1671..1673].
   assertEquals(V2_PLANES * TYPES, 1224);
   assertEquals(V2_PLANES * TYPES + V2_SCALARS, 1263);
+  // v4's second half: the token stream's frozen shapes.
+  assertEquals(SEQ_RIVER_MAX, 24);
+  assertEquals(SEQ_TOKEN_BYTES, 4);
+  assertEquals(SEQ_MAX, 96);
+  assertEquals(SEQ_DENSE, 42);
+  assertEquals([SEQ_FLAG_TSUMOGIRI, SEQ_FLAG_RIICHI, SEQ_FLAG_CALLED], [1, 2, 4]);
 });
 
 Deno.test("features: encode returns 1632 plane cells and 42 scalars", () => {
@@ -760,6 +775,228 @@ Deno.test("features: flatten is planes ++ scalars, 1674 wide", () => {
 });
 
 // --------------------------------------------------------------------------
+// v4: the river token stream
+// --------------------------------------------------------------------------
+
+/** The packed stream as `[type, seatRel, idx, flags]` tuples. */
+function tokensOf(seq: Int8Array): number[][] {
+  const out: number[][] = [];
+  for (let i = 0; i < seq.length; i += SEQ_TOKEN_BYTES) out.push([...seq.slice(i, i + 4)]);
+  return out;
+}
+
+/** A river entry per spec, with every mark `encodeSeq` reads addressable. */
+function seqRiver(
+  specs: Array<
+    { ty: number; tsumogiri?: boolean; riichiDeclare?: boolean; calledBy?: number }
+  >,
+): RiverEntry[] {
+  return specs.map((sp, i) => ({
+    // id = type*4 + copy; the copy never reaches the encoder, only the type does.
+    tile: sp.ty * 4 + (i % 4),
+    junme: i + 1,
+    tsumogiri: sp.tsumogiri ?? false,
+    riichiDeclare: sp.riichiDeclare ?? false,
+    ...(sp.calledBy === undefined ? {} : { calledBy: sp.calledBy }),
+  }));
+}
+
+/** `n` plain entries of ascending type, for length/truncation work. */
+function plainRiver(n: number, from = 0): RiverEntry[] {
+  return seqRiver(Array.from({ length: n }, (_, i) => ({ ty: (from + i) % TYPES })));
+}
+
+Deno.test("features: encodeSeq packs 4 int8 per discard, self first, chronological", () => {
+  const seq = encodeSeq(baseObs());
+  // baseObs: our own river is empty, shimocha discarded 6s 6s 7s, kamicha 8s.
+  assertEquals(seq.length, 4 * SEQ_TOKEN_BYTES);
+  assert(seq instanceof Int8Array);
+  assertEquals(tokensOf(seq), [
+    [TY.s6, 1, 0, 0],
+    [TY.s6, 1, 1, 0],
+    [TY.s7, 1, 2, 0],
+    [TY.s8, 3, 0, 0],
+  ]);
+});
+
+Deno.test("features: an empty table encodes to ZERO tokens (the L=0 case)", () => {
+  const seq = encodeSeq(baseObs({ rivers: [[], [], [], []] }));
+  assertEquals(seq.length, 0);
+  assert(seq instanceof Int8Array);
+});
+
+Deno.test("features: seats come out 0,1,2,3 and `idx` restarts per river", () => {
+  const seq = encodeSeq(baseObs({
+    rivers: [plainRiver(2, 0), plainRiver(3, 10), plainRiver(1, 20), plainRiver(2, 30)],
+  }));
+  assertEquals(seq.length / SEQ_TOKEN_BYTES, 8);
+  const tk = tokensOf(seq);
+  // The whole point of the ordering rule: seat blocks in relative order, and
+  // inside each block the river's own 0-based position.
+  assertEquals(tk.map((t) => t[1]), [0, 0, 1, 1, 1, 2, 3, 3]);
+  assertEquals(tk.map((t) => t[2]), [0, 1, 0, 1, 2, 0, 0, 1]);
+  assertEquals(tk.map((t) => t[0]), [0, 1, 10, 11, 12, 20, 30, 31]);
+});
+
+Deno.test("features: relative seats, not absolute ones — one river, four seats", () => {
+  // The Observation is already relative, so the check is that `encodeSeq` reads
+  // the array position and nothing else: the same river at a different index
+  // moves only the seatRel byte.
+  for (let r = 0; r < 4; r++) {
+    const rivers: RiverEntry[][] = [[], [], [], []];
+    rivers[r] = plainRiver(2, 5);
+    const tk = tokensOf(encodeSeq(baseObs({ rivers })));
+    assertEquals(tk, [[5, r, 0, 0], [6, r, 1, 0]], `relative seat ${r}`);
+  }
+});
+
+Deno.test("features: each river is cut to its FIRST 24 entries, stream to 96", () => {
+  const long = encodeSeq(baseObs({ rivers: [plainRiver(30, 0), [], [], []] }));
+  const tk = tokensOf(long);
+  assertEquals(tk.length, SEQ_RIVER_MAX);
+  // Truncation drops the LATEST discards: idx 0..23 survive, 24..29 are gone.
+  assertEquals(tk.map((t) => t[2]), Array.from({ length: 24 }, (_, i) => i));
+  assertEquals(tk[0][0], 0);
+  assertEquals(tk[23][0], 23);
+
+  // Four full rivers is the cap the encoder is sized for, exactly.
+  const full = encodeSeq(baseObs({
+    rivers: [plainRiver(28, 0), plainRiver(24, 0), plainRiver(25, 0), plainRiver(40, 0)],
+  }));
+  assertEquals(full.length / SEQ_TOKEN_BYTES, SEQ_MAX);
+  assertEquals(SEQ_MAX, 4 * SEQ_RIVER_MAX);
+  // …and the cut is per RIVER, so each seat contributes exactly 24.
+  const counts = [0, 0, 0, 0];
+  for (const t of tokensOf(full)) counts[t[1]]++;
+  assertEquals(counts, [24, 24, 24, 24]);
+});
+
+Deno.test("features: the three flag bits are read straight off the RiverEntry", () => {
+  const rivers: RiverEntry[][] = [
+    seqRiver([
+      { ty: 0 },
+      { ty: 1, tsumogiri: true },
+      { ty: 2, riichiDeclare: true },
+      { ty: 3, calledBy: 2 },
+      { ty: 4, tsumogiri: true, riichiDeclare: true, calledBy: 1 },
+    ]),
+    [],
+    [],
+    [],
+  ];
+  const tk = tokensOf(encodeSeq(baseObs({ rivers })));
+  assertEquals(tk.map((t) => t[3]), [
+    0,
+    SEQ_FLAG_TSUMOGIRI,
+    SEQ_FLAG_RIICHI,
+    SEQ_FLAG_CALLED,
+    SEQ_FLAG_TSUMOGIRI | SEQ_FLAG_RIICHI | SEQ_FLAG_CALLED,
+  ]);
+  // `calledBy: 0` is a real seat, not "absent" — a tile the observing seat
+  // called away must still light bit2.
+  const byZero = tokensOf(
+    encodeSeq(baseObs({ rivers: [seqRiver([{ ty: 7, calledBy: 0 }]), [], [], []] })),
+  );
+  assertEquals(byZero[0][3], SEQ_FLAG_CALLED);
+});
+
+Deno.test("features: the riichi flag agrees with planes 45–47, cell for cell", () => {
+  // Two readings of one field (`riichiDeclare`): the plane one-hot and the
+  // token bit. They cannot be allowed to drift.
+  const rivers: RiverEntry[][] = [
+    [],
+    seqRiver([{ ty: 5 }, { ty: 9, riichiDeclare: true }, { ty: 11 }]),
+    [],
+    [],
+  ];
+  const obs = baseObs({ rivers });
+  assertEquals(lit(encode(obs), 45), [9], "p45 = shimocha's declaration tile");
+  const declared = tokensOf(encodeSeq(obs)).filter((t) => t[3] & SEQ_FLAG_RIICHI);
+  assertEquals(declared.length, 1);
+  assertEquals([declared[0][0], declared[0][1], declared[0][2]], [9, 1, 1]);
+});
+
+Deno.test("features: expandToken lays the 42 dims out in the frozen order", () => {
+  const seq = encodeSeq(baseObs({
+    rivers: [
+      seqRiver([{ ty: 33, tsumogiri: true, riichiDeclare: true, calledBy: 3 }]),
+      [],
+      [],
+      seqRiver([{ ty: 0 }, { ty: 1 }]),
+    ],
+  }));
+  const x = new Float32Array(SEQ_DENSE);
+
+  expandToken(seq, 0, x);
+  assertEquals(x.length, 42);
+  assertEquals(x[33], 1, "onehot34(type)");
+  assertEquals(x.slice(0, 33).reduce((a, b) => a + b, 0), 0, "one type bit only");
+  assertEquals([...x.slice(34, 38)], [1, 0, 0, 0], "onehot4(seatRel)");
+  assertEquals(x[38], 0, "idx 0 ⇒ 0/24");
+  assertEquals([...x.slice(39, 42)], [1, 1, 1], "tsumogiri / riichi / called");
+
+  expandToken(seq, 2, x);
+  assertEquals(x[1], 1);
+  assertEquals([...x.slice(34, 38)], [0, 0, 0, 1], "relative seat 3");
+  assertAlmostEquals(x[38], 1 / 24, 1e-7, "idx 1 ⇒ 1/24");
+  assertEquals([...x.slice(39, 42)], [0, 0, 0]);
+
+  // idx is normalised, never one-hot: the last live position is 23/24, not 1.
+  const late = encodeSeq(baseObs({ rivers: [plainRiver(24, 0), [], [], []] }));
+  expandToken(late, 23, x);
+  assertAlmostEquals(x[38], 23 / 24, 1e-7);
+});
+
+Deno.test("features: a corrupt token degrades — no bit set, nothing written past its slot", () => {
+  // `encodeSeq` cannot emit these; a replayed "seq" from a trajectory file can,
+  // and an unguarded one-hot write would land on the FLAG dims (34+8 = 42).
+  const bad = new Int8Array([40, 9, 99, 0, -1, -1, -1, 7]);
+  const x = new Float32Array(SEQ_DENSE);
+  expandToken(bad, 0, x);
+  assertEquals([...x], new Array(SEQ_DENSE).fill(0), "out-of-range type/seat/idx set nothing");
+  expandToken(bad, 1, x);
+  assertEquals([...x.slice(0, 39)], new Array(39).fill(0), "negative fields set nothing");
+  assertEquals([...x.slice(39, 42)], [1, 1, 1], "the flag bits still read");
+});
+
+Deno.test("features: encodeSeq reads the rivers a real round produced", () => {
+  // The hand-built fixtures above say what the encoder does with a river; this
+  // says the rivers it is handed are the ones the table actually built —
+  // including `calledBy`, which only a real call ever sets.
+  let sawCalled = 0, sawTsumogiri = 0, sawRiichi = 0;
+  driveOracle(7, (_t, obs) => {
+    const seq = encodeSeq(obs);
+    assertEquals(seq.length % SEQ_TOKEN_BYTES, 0);
+    assert(seq.length <= SEQ_MAX * SEQ_TOKEN_BYTES, `${seq.length} bytes`);
+    const tk = tokensOf(seq);
+    // Every token is in range, and the seat blocks never go backwards.
+    let prevSeat = 0;
+    const perSeat = [0, 0, 0, 0];
+    for (const [type, seat, idx, flags] of tk) {
+      assert(type >= 0 && type < TYPES, `type ${type}`);
+      assert(seat >= 0 && seat < 4, `seat ${seat}`);
+      assert(idx >= 0 && idx < SEQ_RIVER_MAX, `idx ${idx}`);
+      assert(flags >= 0 && flags <= 7, `flags ${flags}`);
+      assert(seat >= prevSeat, "seat blocks out of order");
+      assertEquals(idx, perSeat[seat], "idx is not the river position");
+      perSeat[seat]++;
+      prevSeat = seat;
+      if (flags & SEQ_FLAG_CALLED) sawCalled++;
+      if (flags & SEQ_FLAG_TSUMOGIRI) sawTsumogiri++;
+      if (flags & SEQ_FLAG_RIICHI) sawRiichi++;
+    }
+
+    // The token count is the truncated river lengths, seat by seat.
+    for (let r = 0; r < 4; r++) {
+      assertEquals(perSeat[r], Math.min((obs.rivers[r] ?? []).length, SEQ_RIVER_MAX));
+    }
+  }, "h");
+  assert(sawCalled > 0, "no called-away tile in the whole hanchan");
+  assert(sawTsumogiri > 0, "no ツモ切り in the whole hanchan");
+  assert(sawRiichi > 0, "no riichi declaration in the whole hanchan");
+});
+
+// --------------------------------------------------------------------------
 // whole-buffer digest
 // --------------------------------------------------------------------------
 
@@ -804,6 +1041,55 @@ Deno.test("features: the v3 encoding of the fixture digests to the frozen values
   const planeBytes = new Uint8Array(e.planes.buffer, e.planes.byteOffset, e.planes.byteLength);
   assertEquals(fnv1a(planeBytes), V3_PLANE_DIGEST, "plane digest");
   assertEquals(fnv1a(floatBytes(e.scalars)), V3_SCALAR_DIGEST, "scalar digest");
+});
+
+/**
+ * What v4 emits for `SEQ_FIXTURES` — the token stream's change detector, same
+ * role and same rules as the plane/scalar digests above: not derived from
+ * anything, REGENERATED DELIBERATELY, and any move means the wire format the
+ * trainer reshapes has changed and `FEATURES.version` must move with it.
+ */
+const SEQ_DIGEST = 1905158105;
+
+/**
+ * A deliberately varied set: an empty river beside populated ones (baseObs), a
+ * claim decision (whose river is the same but whose planes are not — proving
+ * the seq is a function of the rivers alone), an over-long river that has to be
+ * cut, and every flag combination. One digest over all of them concatenated.
+ */
+function seqFixtures(): Observation[] {
+  return [
+    baseObs(),
+    claimObs(),
+    baseObs({ rivers: [[], [], [], []] }),
+    baseObs({
+      rivers: [
+        seqRiver([
+          { ty: 0 },
+          { ty: 4, tsumogiri: true },
+          { ty: 17, riichiDeclare: true },
+          { ty: 33, calledBy: 2 },
+          { ty: 8, tsumogiri: true, riichiDeclare: true, calledBy: 1 },
+        ]),
+        plainRiver(30, 3),
+        seqRiver([{ ty: 27, tsumogiri: true }]),
+        plainRiver(24, 11),
+      ],
+    }),
+  ];
+}
+
+Deno.test("features: the v4 token stream digests to the frozen value", () => {
+  const parts = seqFixtures().map(encodeSeq);
+  const total = parts.reduce((n, p) => n + p.length, 0);
+  const all = new Uint8Array(total);
+  let off = 0;
+  for (const p of parts) {
+    all.set(new Uint8Array(p.buffer, p.byteOffset, p.byteLength), off);
+    off += p.length;
+  }
+  assertEquals(all.length, total);
+  assertEquals(fnv1a(all), SEQ_DIGEST, "seq digest");
 });
 
 /**

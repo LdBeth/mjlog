@@ -2,14 +2,36 @@
 //
 // One file holds many matches. Line kinds (FROZEN contract):
 //
-//   {"k":"d","v":3,"seat":0,"kyoku":0,"honba":0,"junme":3,
+//   {"k":"d","v":4,"seat":0,"kyoku":0,"honba":0,"junme":3,
 //    "planes":"<base64 of the 1632 Int8 bytes>",
 //    "scalars":"<base64 of the 42 little-endian float32 = 168 bytes>",
+//    "seq":"<base64 of the 4×L packed river tokens, L ≤ 96>",
 //    "mask":[legal action indices],"a":<chosen index>,
 //    "o":"<base64 of the 170 oracle Int8 bytes>","sh":[3 opponent shanten]}
-//   {"k":"r","deltas":[4 point deltas, ABSOLUTE seats],"outcome":"agari"|"draw",
+//   {"k":"r","kyoku":0,"honba":0,
+//    "deltas":[4 point deltas, ABSOLUTE seats],"outcome":"agari"|"draw",
 //    "viol":[4 評価点マイナス, ABSOLUTE seats]}
 //   {"k":"m","scores":[4],"net":[4],"violations":[4]}
+//
+// "kyoku"/"honba" on an "r" line NAME the round it reports, carrying exactly the
+// values that round's "d" lines carry. They exist because an "r" line was
+// otherwise anonymous: the writer buffers a match's rounds and flushes them all
+// after that match's decisions, so the only thing joining a decision to its
+// round result was POSITION — count the (kyoku,honba) blocks of the "d" lines
+// and pair the k-th block with the k-th "r" line. Position is not enough.
+// Recording wraps only the seats the driver asked for, so under a mixed
+// population an entire round can pass with no "d" line at all (an opponent wins
+// before any recorded seat acts), and a decision-less round is invisible to
+// that reconstruction — two consecutive ones are not even distinguishable in
+// principle. With the pair on the line the join is direct, and (kyoku,honba) is
+// unique within a match: it is constant through a round and changes at every
+// boundary (honba increments on 連荘 and on a draw, kyoku advances otherwise).
+// Files written before this field existed simply lack it — a loader must read a
+// missing "kyoku"/"honba" as "old data" and fall back to the positional
+// reconstruction, the same compatibility rule "viol" documents for itself just
+// below. That fallback is only sound when every round holds at least one
+// recorded decision, so a loader taking it must say so loudly when the block
+// count and the "r" line count disagree rather than guess an alignment.
 //
 // "viol" on an "r" line is the 評価点マイナス INCURRED IN THAT ROUND, per
 // absolute seat (positive magnitudes, 0 when clean). It exists so credit
@@ -23,6 +45,17 @@
 // "v" is the FEATURE version the planes/scalars were encoded with, so a loader
 // can reject a dataset that predates the current encoder instead of reshaping
 // stale bytes into the wrong network.
+//
+// "seq" is feature v4's river token stream (`encodeSeq` in features.ts): the
+// four rivers as `4 × L` packed Int8 — `[type, seatRel, idx, flags]` per
+// discard, self first then relative seats 1/2/3, chronological, each river cut
+// to its first 24 entries, so L ≤ 96. Unlike "o"/"sh" it is NOT optional and it
+// DID move the version: the planes and scalars are byte-identical to v3, so
+// "v":4 means precisely "this line carries seq", and that is the only thing a
+// loader can check the field's presence against. An EMPTY string is a perfectly
+// valid value — it is what the first decision of a hand encodes, before anyone
+// has discarded — and must be read as L = 0, never as a missing field. The
+// trainer requires v4 and rejects v3 datasets outright, as v3 did to v2.
 //
 // "o" and "sh" are OPTIONAL and appear only when the driver supplied an oracle
 // tap (`RecordingPolicy`'s third constructor argument); a consumer must read
@@ -48,7 +81,7 @@ import type { SyncPolicy } from "../policy.ts";
 import type { RuleConfig } from "../rules.ts";
 import type { Action, PublicEvent, RoundOutcome, Violation } from "../types.ts";
 import { actionIndex, maskIndices } from "./actionspace.ts";
-import { encode, FEATURES } from "./features.ts";
+import { encode, encodeSeq, FEATURES } from "./features.ts";
 
 // ---------------------------------------------------------------------------
 // encoding helpers (no dependencies: btoa plus chunked fromCharCode)
@@ -158,6 +191,7 @@ export class RecordingPolicy implements SyncPolicy {
   decide(obs: Observation): Action {
     const a = this.inner.decide(obs);
     const { planes, scalars } = encode(obs);
+    const seq = encodeSeq(obs);
     const line: Record<string, unknown> = {
       k: "d",
       v: FEATURES.version,
@@ -167,6 +201,7 @@ export class RecordingPolicy implements SyncPolicy {
       junme: obs.junme,
       planes: toBase64(new Uint8Array(planes.buffer, planes.byteOffset, planes.byteLength)),
       scalars: toBase64(f32leBytes(scalars)),
+      seq: toBase64(new Uint8Array(seq.buffer, seq.byteOffset, seq.byteLength)),
       mask: maskIndices(obs.legal),
       a: actionIndex(a, obs.akaIds),
     };
@@ -184,14 +219,27 @@ export class RecordingPolicy implements SyncPolicy {
 // round / match lines
 // ---------------------------------------------------------------------------
 
-/** `viol`: 評価点マイナス incurred in THIS round, per absolute seat (length 4). */
+/** Which round an "r" line reports — the same pair its "d" lines carry. */
+export interface RoundId {
+  kyoku: number;
+  honba: number;
+}
+
+/**
+ * `id`: the round's (kyoku, honba), which is what joins this line to the "d"
+ * lines of the same round — see the header. `viol`: 評価点マイナス incurred in
+ * THIS round, per absolute seat (length 4).
+ */
 export function writeRoundEnd(
   w: TrajectoryWriter,
+  id: RoundId,
   outcome: RoundOutcome,
   viol: number[],
 ): void {
   w.writeLine({
     k: "r",
+    kyoku: id.kyoku,
+    honba: id.honba,
     deltas: [...outcome.deltas],
     outcome: outcome.kind === "agari" ? "agari" : "draw",
     viol: [...viol],
@@ -224,10 +272,17 @@ export function violationPoints(ledger: Violation[]): number[] {
   return out;
 }
 
+/**
+ * `rounds` supplies each "r" line's (kyoku, honba). It is `MatchResult.rounds`
+ * — the engine pushes one `Round` and one outcome per finished round, in the
+ * same breath, so the two arrays are parallel by construction and the identity
+ * needs no separate bookkeeping.
+ */
 export function writeMatchEnd(
   w: TrajectoryWriter,
   result: {
     scores: number[];
+    rounds: RoundId[];
     outcomes: RoundOutcome[];
     ledger: Violation[];
     ledgerCuts: number[];
@@ -242,8 +297,21 @@ export function writeMatchEnd(
       `ledgerCuts/outcomes mismatch: ${cuts.length} cuts for ${result.outcomes.length} rounds`,
     );
   }
+  if (result.rounds.length !== result.outcomes.length) {
+    // Same refusal, same reason: an "r" line labelled with the wrong round is
+    // worse than no label, because the loader would trust it.
+    throw new Error(
+      `rounds/outcomes mismatch: ${result.rounds.length} rounds for ` +
+        `${result.outcomes.length} outcomes`,
+    );
+  }
   result.outcomes.forEach((o, k) => {
-    writeRoundEnd(w, o, violationPoints(result.ledger.slice(cuts[k - 1] ?? 0, cuts[k])));
+    writeRoundEnd(
+      w,
+      { kyoku: result.rounds[k].kyoku, honba: result.rounds[k].honba },
+      o,
+      violationPoints(result.ledger.slice(cuts[k - 1] ?? 0, cuts[k])),
+    );
   });
   w.writeLine({
     k: "m",

@@ -132,9 +132,10 @@ where `v` is the feature version, `planes` is base64 of `int8[1632]` (48 planes 
 named: v2 is 1224/156 bytes, and a line with no `v` at all is v1 (748/132). **Data is never
 migrated** — the planes v3 added were simply never recorded — so a stale dataset must be
 re-recorded; stale *weights* are a different matter, see [Feature layout](#feature-layout-v3)
-below. A _round end_ is `{"k":"r","deltas":[4],
+below. A _round end_ is `{"k":"r","kyoku":n,"honba":n,"deltas":[4],
 "outcome":"agari"|"draw","viol":[4]}`, where the optional `viol` is the 評価点 penalty points
-each absolute seat incurred **during that round** (positive magnitudes). A
+each absolute seat incurred **during that round** (positive magnitudes), and the optional
+`kyoku`/`honba` **name the round**, with the same values that round's `d` lines carry. A
 _match end_ is `{"k":"m","scores":[4],"net":[4],
 "violations":[4]}`, where `net` is the per-seat
 final settlement with uma applied and `violations` the per-seat penalty totals. All `d`/`r` lines of
@@ -146,7 +147,15 @@ are unused by behavior cloning and exist for the RL work to come. Round lines la
 `round_deltas[r,4]`/`round_outcome[r]`/`round_match[r]` plus `round_viol[r,4]` (zero-filled for
 lines with no `viol`), and the flag `has_round_viol` is True only when *every* round line in the
 dataset carried the field — a mixed dataset counts as not having it, since it cannot be timestamped
-consistently.
+consistently. `round_kyoku[r]`/`round_honba[r]` (−1 when absent) and `has_round_id` follow the same
+all-or-nothing rule. With them, `ppo.py`'s `decision_round` joins a decision to its round directly
+on `(match, kyoku, honba)`; without them it falls back to counting `(kyoku,honba)` blocks off the
+`d` lines and pairing them positionally with the `r` lines, which is **only correct when every round
+holds at least one recorded decision**. Mixed-population data breaks that premise — recording wraps
+only the seats asked for, so a round can close before any recorded seat acts — and the fallback
+raises rather than guessing when the block count and the round-line count disagree. A round with no
+decisions is fine under the labelled join: its payout attaches to the last decision at-or-before it,
+or to the episode's first decision when it precedes them all.
 
 A `d` line MAY also carry the **oracle side channel**: `"o"`, base64 of `int8[170]` — five 34-wide
 planes the acting seat cannot see (the three opponents' concealed hands in *relative* seat order

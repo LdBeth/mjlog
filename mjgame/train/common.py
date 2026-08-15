@@ -4,7 +4,8 @@ Everything here implements the frozen contracts shared with the TypeScript
 engine (see README.md).  Nothing in this module may drift from them:
 
   * trajectory JSONL   -- the engine's output, this trainer's input
-  * manifest.json + policy.f32 -- this trainer's output, the engine's input
+  * manifest.json + policy.f32 + attn.f32 -- this trainer's output, the
+    engine's input (attn.f32 only from feature v4 on; see train/V4_SPEC.md)
 """
 
 from __future__ import annotations
@@ -24,14 +25,84 @@ import numpy as np
 # Frozen contract constants
 # ---------------------------------------------------------------------------
 
-FEATURE_VERSION = 3                      # "v" on every "d" line of a trajectory
+FEATURE_VERSION = 4                      # "v" on every "d" line of a trajectory
 PLANES = 48
 TILE_TYPES = 34
 PLANE_LEN = PLANES * TILE_TYPES          # 1632 int8 values
 SCALAR_LEN = 42                          # 42 little-endian float32 values = 168 bytes
-INPUT_DIM = PLANE_LEN + SCALAR_LEN       # 1674
+PLANE_SCALAR_DIM = PLANE_LEN + SCALAR_LEN                 # 1674 -- what a "d" line carries
 ACTIONS = 78                             # policy logits
 OUTPUT_DIM = ACTIONS + 1                 # 79 = 78 logits + 1 value
+
+# ---------------------------------------------------------------------------
+# Feature v4: the attention river encoder (train/V4_SPEC.md is the frozen spec)
+# ---------------------------------------------------------------------------
+#
+# v4 changes NOTHING about the planes (48) and scalars (42): a "d" line still
+# carries exactly the 1674 dense values above, and a v3 digest of them still
+# passes.  What v4 adds is a second, SEQUENTIAL view of the same board -- one
+# token per river entry, all four seats, relative seat order, each river
+# truncated to its first 24 discards -- which a small self-attention encoder
+# folds into a 64-vector z that is CONCATENATED onto the dense features:
+#
+#     policy fc1 input  = [planes+scalars 1674][z 64]            = 1738
+#     critic fc1 input  = [planes+scalars 1674][oracle 170][z 64] = 1908
+#
+# so every v3 column keeps its index and the new capacity is a suffix.  That is
+# what makes `train/widen4.py` a function-preserving migration.
+SEQ_MAX = 96                             # 4 seats x 24 entries, the token cap
+RIVER_MAX = 24                           # per-river truncation; also the idx scale
+TOK_BYTES = 4                            # packed token: [type, seatRel, idx, flags]
+TOK_DENSE = 42                           # onehot34 ++ onehot4 ++ idx/24 ++ 3 flags
+ATTN_D = 64                              # d_model of the encoder, and |z|
+ATTN_HEADS = 4
+ATTN_HEAD_DIM = ATTN_D // ATTN_HEADS     # 16
+ATTN_SCALE = 0.25                        # frozen 1/4 -- which is also 1/sqrt(16)
+
+# Packed-token field bounds.  A value outside them is DEFINED, not rejected: the
+# dense expansion simply sets no one-hot bit for it (V4_SPEC.md, "Out-of-range
+# inputs"), which is what an equality-against-arange one-hot does for free.  The
+# loader counts them anyway -- defined behaviour for a broken recorder is still a
+# broken recorder.
+TOK_TYPE_MAX = TILE_TYPES - 1            # 33
+TOK_SEAT_MAX = 3
+TOK_IDX_MAX = RIVER_MAX - 1              # 23
+TOK_FLAG_MAX = 7                         # bit0 tsumogiri | bit1 riichi | bit2 called
+
+INPUT_DIM = PLANE_SCALAR_DIM + ATTN_D    # 1738 -- policy fc1 width
+V3_INPUT_DIM = PLANE_SCALAR_DIM          # 1674 -- the v3 policy fc1 width
+
+# The encoder's weights ride BESIDE policy.f32 (same directory, same [out][in]
+# row-major + bias little-endian float32 convention); the engine loads them
+# through `rlnet_attn_create`, so unlike aux.f32/critic.f32 this one is NOT
+# trainer-private.
+ATTN_BLOB_NAME = "attn.f32"
+
+# attn.f32, in file order.  This list IS the format: `export_attn` writes it top
+# to bottom and `load_attn` reads it back the same way, so the two can only ever
+# disagree by disagreeing with the spec.
+ATTN_TENSORS = (
+    ("W_in", (ATTN_D, TOK_DENSE)), ("b_in", (ATTN_D,)),
+    ("Wq", (ATTN_D, ATTN_D)), ("bq", (ATTN_D,)),
+    ("Wk", (ATTN_D, ATTN_D)), ("bk", (ATTN_D,)),
+    ("Wv", (ATTN_D, ATTN_D)), ("bv", (ATTN_D,)),
+    ("Wo", (ATTN_D, ATTN_D)), ("bo", (ATTN_D,)),
+    ("u", (ATTN_D,)),
+    ("Wz", (ATTN_D, ATTN_D)), ("bz", (ATTN_D,)),
+)
+
+ATTN_FLOATS = sum(int(np.prod(shape)) for _, shape in ATTN_TENSORS)   # 23616
+ATTN_BYTES = ATTN_FLOATS * 4
+
+# !! SPEC ARITHMETIC.  V4_SPEC.md states "Total floats: 64*42+64 + 4*(64*64+64)
+# + 64 + 64*64+64 = 23,872".  The expression is right and the total is not: it
+# evaluates to 23,616.  23,872 is what the same expression gives with a
+# [64][46] W_in, i.e. the total was computed against a 46-wide dense token that
+# the spec never describes (the enumerated expansion is 34 + 4 + 1 + 3 = 42, and
+# W_in is written [64][42] in the tensor list).  The TENSOR LIST is authoritative
+# here -- it is what is actually serialised -- so this file is 23,616 floats /
+# 94,464 bytes.  The spec's total line needs the correction.
+assert ATTN_FLOATS == 23616, ATTN_FLOATS
 
 # v3 is a strict SUPERSET of v2: the v2 planes are planes 0..35 unchanged and the
 # v2 scalars are scalars 0..38 unchanged, so the v2 input vector is an exact
@@ -85,7 +156,10 @@ HIDDEN2 = 256
 #     representation shaper, not an information leak.
 ORACLE_PLANES = 5
 ORACLE_LEN = ORACLE_PLANES * TILE_TYPES  # 170 int8 values
-CRITIC_INPUT = INPUT_DIM + ORACLE_LEN    # 1844
+# [planes+scalars 1674][oracle 170][z 64] -- z is APPENDED at the end, so every
+# v3 critic column keeps its index (V4_SPEC.md "Network input layout").
+V3_CRITIC_INPUT = PLANE_SCALAR_DIM + ORACLE_LEN           # 1844, the v3 critic width
+CRITIC_INPUT = V3_CRITIC_INPUT + ATTN_D                   # 1908
 V2_CRITIC_INPUT = V2_INPUT_DIM + ORACLE_LEN               # 1433, for widen.py
 
 # Auxiliary shanten heads: one 8-way classifier per opponent.  The label is
@@ -102,14 +176,37 @@ AUX_OUT = AUX_OPP * AUX_CLASSES          # 24 extra fc3 rows during training
 AUX_MISSING = -9
 
 
+def has_attn(input_dim: int) -> bool:
+    """Does an `input_dim`-wide net take the v4 attention suffix?
+
+    Width IS the discriminator: v3 and v4 have the same planes/scalars, so the
+    only thing that separates a 1674-wide policy from a 1738-wide one is the
+    64-column z block on the end (and 1844 vs 1908 on the critic).
+    """
+    return input_dim in (INPUT_DIM, CRITIC_INPUT)
+
+
 def manifest_for(input_dim: int = INPUT_DIM) -> dict:
     """The manifest describing an `input_dim`-wide net of the fixed architecture.
 
     `version` is the FILE format's, which is 1; the feature layout is what the
     `features` block names, and the engine checks that block against its own
     encoder before it will load the blob.
+
+    v4 (input 1738) adds ONE top-level key and NOTHING inside `features`:
+
+        "attn": "attn.f32"      the river encoder's weights, beside policy.f32
+
+    `features` stays {"planes": 48, "scalars": 42} byte-for-byte, because v4 did
+    not touch the planes or the scalars -- the engine's existing check of that
+    block therefore keeps passing unchanged.  The PRESENCE of `attn` is what
+    tells a v3 weight set (no attn, fc1 1674) from a v4 one (attn, fc1 1738),
+    which is exactly how `checkManifest` in src/rl/net.ts reads it: it derives
+    the expected layer-0 width from that key alone.  No separate version field
+    is written, because two discriminators that could disagree are worse than
+    one.
     """
-    return {
+    m = {
         "version": 1,
         "arch": "mlp",
         "features": {"planes": PLANES, "scalars": SCALAR_LEN},
@@ -121,6 +218,9 @@ def manifest_for(input_dim: int = INPUT_DIM) -> dict:
         ],
         "blob": "policy.f32",
     }
+    if has_attn(input_dim):
+        m["attn"] = ATTN_BLOB_NAME
+    return m
 
 
 MANIFEST = manifest_for()
@@ -144,6 +244,12 @@ def critic_manifest_for(input_dim: int = CRITIC_INPUT) -> dict:
     "mlp-critic" so the two can never be mistaken for each other, and the
     input width carried both at top level and in layer 0 (the `features`
     block says what those inputs ARE).
+
+    The v4 critic's trailing 64 z columns are NOT named in `features`: the
+    encoder is the policy's (the critic reads a stop-gradient copy of its
+    output, see ppo.py), the critic never owns a copy of attn.f32, and the
+    width already says whether they are there.  `_check_features` therefore
+    accepts both 1844 and 1908 against the same block.
     """
     return {
         "version": 1,
@@ -178,7 +284,11 @@ BLOB_BYTES = BLOB_FLOATS * 4
 
 
 class PolicyValueNet(nn.Module):
-    """1674 -> 512 -> relu -> 256 -> relu -> 79 (78 action logits + 1 value).
+    """1738 -> 512 -> relu -> 256 -> relu -> 79 (78 action logits + 1 value).
+
+    The 1738 is [planes+scalars 1674][z 64]: this module is the plain MLP and
+    knows nothing about where z came from, which is exactly why a v3 net
+    (1674) still instantiates and still loads.
 
     mlx.nn.Linear stores `weight` as [out, in], which is exactly the row-major
     [out][in] layout the blob contract asks for, so export is a straight dump.
@@ -269,7 +379,7 @@ def widen_for_aux(model: PolicyValueNet, aux=None, scale: float = 0.01, seed=Non
 
 
 class CriticNet(nn.Module):
-    """1844 -> 512 -> relu -> 256 -> relu -> 1: the PRIVILEGED baseline.
+    """1908 -> 512 -> relu -> 256 -> relu -> 1: the PRIVILEGED baseline.
 
     Same shape and same blob layout as the policy trunk, but a different input
     (policy features ++ oracle planes) and a single output, and it is never
@@ -287,7 +397,7 @@ class CriticNet(nn.Module):
         self.fc3 = nn.Linear(HIDDEN2, 1)
 
     def __call__(self, x: mx.array) -> mx.array:
-        """[B, 1844] -> [B]; the trailing width-1 axis is dropped here so every
+        """[B, 1908] -> [B]; the trailing width-1 axis is dropped here so every
         caller regresses against a [B] target and none of them has to guess."""
         x = nn.relu(self.fc1(x))
         x = nn.relu(self.fc2(x))
@@ -296,6 +406,142 @@ class CriticNet(nn.Module):
     @property
     def ordered_layers(self) -> List[nn.Linear]:
         return [self.fc1, self.fc2, self.fc3]
+
+
+# ---------------------------------------------------------------------------
+# The river encoder's parameters
+# ---------------------------------------------------------------------------
+
+
+class AttnEncoder(nn.Module):
+    """The v4 river encoder's WEIGHTS -- a container, not a forward pass.
+
+    Six affine maps and one learned query vector, exactly the tensors
+    `ATTN_TENSORS` names:
+
+        w_in  42 -> 64     the dense token embedding (relu after)
+        wq/wk/wv  64 -> 64 the 4-head attention projections
+        wo    64 -> 64     the per-token output map
+        u     [64]         the pooling query
+        wz    64 -> 64     p -> z
+
+    The FORWARD lives in `ppo.py` (`encode_tokens`), not here, for the same
+    reason `masked_logp` does: this module is the file format's shape and the
+    optimizer's parameter tree, and every consumer that only needs to move the
+    bytes around -- widen4.py, an exporter, a checkpoint diff -- can then use it
+    without pulling in the batching, masking and padding conventions of one
+    particular trainer.
+
+    mlx.nn.Linear stores `weight` as [out, in], which is the blob layout, so
+    export is a straight dump in `ordered_tensors` order.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.w_in = nn.Linear(TOK_DENSE, ATTN_D)
+        self.wq = nn.Linear(ATTN_D, ATTN_D)
+        self.wk = nn.Linear(ATTN_D, ATTN_D)
+        self.wv = nn.Linear(ATTN_D, ATTN_D)
+        self.wo = nn.Linear(ATTN_D, ATTN_D)
+        self.u = mx.zeros((ATTN_D,))
+        self.wz = nn.Linear(ATTN_D, ATTN_D)
+
+    @property
+    def ordered_tensors(self) -> List[mx.array]:
+        """Every parameter, in attn.f32 order."""
+        return [
+            self.w_in.weight, self.w_in.bias,
+            self.wq.weight, self.wq.bias,
+            self.wk.weight, self.wk.bias,
+            self.wv.weight, self.wv.bias,
+            self.wo.weight, self.wo.bias,
+            self.u,
+            self.wz.weight, self.wz.bias,
+        ]
+
+    def set_ordered(self, arrays: Sequence[np.ndarray]) -> "AttnEncoder":
+        """Load from a list in `ATTN_TENSORS` order, checking every shape."""
+        if len(arrays) != len(ATTN_TENSORS):
+            raise ValueError(
+                f"{len(arrays)} tensor(s), expected {len(ATTN_TENSORS)}"
+            )
+        vals = []
+        for (name, shape), a in zip(ATTN_TENSORS, arrays):
+            a = np.ascontiguousarray(a, dtype=np.float32)
+            if a.shape != shape:
+                raise ValueError(f"{name} is {a.shape}, expected {shape}")
+            vals.append(mx.array(a))
+        (
+            self.w_in.weight, self.w_in.bias,
+            self.wq.weight, self.wq.bias,
+            self.wk.weight, self.wk.bias,
+            self.wv.weight, self.wv.bias,
+            self.wo.weight, self.wo.bias,
+            self.u,
+            self.wz.weight, self.wz.bias,
+        ) = vals
+        mx.eval(self.parameters())
+        return self
+
+
+def export_attn(enc: AttnEncoder, outdir: str) -> str:
+    """Write attn.f32 into `outdir`: `ATTN_TENSORS` in order, LE float32, no header."""
+    os.makedirs(outdir, exist_ok=True)
+    chunks: List[np.ndarray] = []
+    for (name, shape), t in zip(ATTN_TENSORS, enc.ordered_tensors):
+        a = np.array(t, copy=True).astype("<f4")
+        if a.shape != shape:
+            raise ValueError(f"attn {name} is {a.shape}, expected {shape}")
+        chunks.append(np.ascontiguousarray(a).reshape(-1))
+    blob = np.concatenate(chunks).astype("<f4")
+    if blob.size != ATTN_FLOATS:
+        raise ValueError(f"attn blob has {blob.size} floats, expected {ATTN_FLOATS}")
+    path = os.path.join(outdir, ATTN_BLOB_NAME)
+    with open(path, "wb") as fh:
+        fh.write(blob.tobytes())
+    return path
+
+
+def load_attn(path: str):
+    """Read attn.f32 back into an `AttnEncoder`, or None if there is none.
+
+    `path` is the directory or the blob itself.  A MISSING file returns None --
+    "this is a v3 weight set, migrate it" is the caller's message to write, with
+    the width of its policy in hand -- while a file that is present and the
+    wrong size raises, because silently re-initialising an encoder would be
+    indistinguishable from resuming one.
+    """
+    blob_path = os.path.join(path, ATTN_BLOB_NAME) if os.path.isdir(path) else path
+    if not os.path.exists(blob_path):
+        return None
+    blob = np.fromfile(blob_path, dtype="<f4")
+    if blob.size != ATTN_FLOATS:
+        raise ValueError(
+            f"{blob_path}: {blob.size} float32 ({blob.size * 4} bytes), expected "
+            f"{ATTN_FLOATS} ({ATTN_BYTES} bytes) = "
+            + " + ".join(f"{n}{list(s)}" for n, s in ATTN_TENSORS)
+        )
+    arrays, off = [], 0
+    for _, shape in ATTN_TENSORS:
+        n = int(np.prod(shape))
+        arrays.append(np.ascontiguousarray(blob[off : off + n].reshape(shape)))
+        off += n
+    assert off == ATTN_FLOATS, f"consumed {off} of {ATTN_FLOATS} floats"
+    return AttnEncoder().set_ordered(arrays)
+
+
+def random_attn(seed=None, std: float = 0.02) -> AttnEncoder:
+    """An encoder with every parameter ~ normal(0, `std`), biases and u included.
+
+    This is the init `train/widen4.py` writes, and the reason it is NOT zeros is
+    the argument in V4_SPEC.md's Migration section: the consumer columns on the
+    other side of z are zero, so if the encoder were zero too the whole path
+    would sit at a saddle with no gradient on either side.
+    """
+    rng = np.random.default_rng(seed)
+    return AttnEncoder().set_ordered(
+        [rng.normal(0.0, std, size=shape).astype(np.float32) for _, shape in ATTN_TENSORS]
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -363,6 +609,11 @@ class Trajectories(NamedTuple):
     oracle: np.ndarray       # [n, 170] float32  privileged planes, 0 when absent
     opp_shanten: np.ndarray  # [n, 3]   int32    opponents' shanten, -9 when absent
     has_oracle: bool         #          True iff EVERY "d" line had BOTH
+    seq: np.ndarray          # [n, 96, 4] int8   packed river tokens, zero-padded
+    seq_len: np.ndarray      # [n]      int32    valid token count, 0..96
+    round_kyoku: np.ndarray  # [r]      int32    the "r" line's own kyoku, -1 if absent
+    round_honba: np.ndarray  # [r]      int32    the "r" line's own honba, -1 if absent
+    has_round_id: bool       #          True iff EVERY "r" line named its round
 
     def __len__(self) -> int:
         return int(self.X.shape[0])
@@ -377,6 +628,9 @@ def _stale_hint(n_planes: int, n_scalar_bytes: int) -> str:
     net with zeroed columns, which is what `train/widen.py` builds, so the hint
     points at it to spare a from-scratch retrain.
     """
+    # v3 is NOT nameable here: its planes and scalars are byte-identical to v4's,
+    # so a v3 line never reaches a size mismatch -- it is caught by its "v" in
+    # `load_trajectories`, which is where the widen4.py hint lives.
     if n_planes == V2_PLANE_LEN or n_scalar_bytes == V2_SCALAR_BYTES:
         return (
             " -- v2 data -- re-record with the v3 engine "
@@ -417,6 +671,43 @@ def _decode_oracle(b64: str) -> np.ndarray:
     return np.frombuffer(raw, dtype=np.int8)
 
 
+def _decode_seq(b64: str):
+    """The "seq" field -> ([n_tok, 4] int8, tokens clamped away, fields out of range).
+
+    The stream is base64 of an Int8Array, four bytes per river entry
+    ([type, seatRel, idx, flags]).  Two of the three checks here are the spec's
+    own out-of-range rules (V4_SPEC.md), which every implementation shares:
+
+      * more than SEQ_MAX tokens is CLAMPED to SEQ_MAX, not rejected;
+      * a type/seatRel/idx outside its range is legal input and simply sets no
+        one-hot bit in the dense expansion.
+
+    So neither raises.  Both are COUNTED instead and reported once per load,
+    because while the forward is defined for them, a recorder that produces them
+    at scale is broken and the number is the only way to notice.  A length that
+    is not a whole number of tokens IS an error: it means the stream is
+    misaligned and every field after the break is garbage.
+    """
+    raw = base64.b64decode(b64)
+    if len(raw) % TOK_BYTES:
+        raise ValueError(
+            f"seq: {len(raw)} bytes is not a whole number of {TOK_BYTES}-byte tokens"
+        )
+    n_tok = len(raw) // TOK_BYTES
+    tok = np.frombuffer(raw, dtype=np.int8).reshape(n_tok, TOK_BYTES)
+    clamped = max(n_tok - SEQ_MAX, 0)
+    if clamped:
+        tok = tok[:SEQ_MAX]
+    oor = 0
+    if tok.size:
+        bounds = np.array(
+            [TOK_TYPE_MAX, TOK_SEAT_MAX, TOK_IDX_MAX, TOK_FLAG_MAX], dtype=np.int16
+        )
+        t16 = tok.astype(np.int16)
+        oor = int(np.count_nonzero(((t16 < 0) | (t16 > bounds)).any(axis=1)))
+    return tok, clamped, oor
+
+
 def _expand_files(pattern: Union[str, Sequence[str]]) -> List[str]:
     pats: Iterable[str] = [pattern] if isinstance(pattern, str) else pattern
     files: List[str] = []
@@ -448,6 +739,16 @@ def load_trajectories(pattern: Union[str, Sequence[str]]) -> Trajectories:
     dataset cannot be timestamped consistently, so it counts as not having the
     field at all and the caller must fall back to the match-level totals.
 
+    An "r" line MAY likewise carry `"kyoku"`/`"honba"` — the round it reports,
+    named with the same pair its "d" lines carry.  They land in `round_kyoku` /
+    `round_honba`, filled with -1 for lines that lack them, and `has_round_id`
+    follows the same all-or-nothing rule: True only when EVERY round line in the
+    dataset named itself, because a half-labelled dataset would need two
+    different joins and neither could check the other.  With it, a consumer
+    joins a decision to its round directly on (match, kyoku, honba); without it
+    the only join available is positional, which cannot see a round that holds
+    no decision at all (see `decision_round` in ppo.py).
+
     A "d" line MAY likewise carry the privileged pair `"o"` (base64 int8[170],
     five oracle planes) and `"sh"` (three opponents' shanten, relative order,
     -1 for a complete hand).  They land in `oracle` / `opp_shanten`, filled with
@@ -457,6 +758,17 @@ def load_trajectories(pattern: Union[str, Sequence[str]]) -> Trajectories:
     oracle-labelled batch would train a critic on two different input
     distributions.  Consumers that do not know about these fields (bc.py) are
     unaffected; the fields are appended, never inserted.
+
+    Feature v4 adds `"seq"` — base64 of the packed river tokens, four int8 per
+    entry — and it is NOT optional: `"v":4` means the field is there.  It lands
+    in `seq` zero-padded to [n, 96, 4] with the true count in `seq_len`, which
+    is the shape the batched encoder wants and is cheap besides (384 bytes a
+    decision against the 6.5 kB of planes).  A v4 line that carries no "seq" at
+    all is read as an EMPTY river and counted, and the count is reported once at
+    the end of the load: an empty river is a real, common state (every decision
+    before the first discard) and JSON has no way to tell "no tokens" from
+    "field omitted", so refusing the whole dataset over it would be a worse
+    failure than saying so out loud.
     """
     files = _expand_files(pattern)
     if not files:
@@ -474,6 +786,11 @@ def load_trajectories(pattern: Union[str, Sequence[str]]) -> Trajectories:
     oracles: List[np.ndarray] = []
     shantens: List[np.ndarray] = []
     oracle_lines = 0       # "d" lines that carried BOTH "o" and "sh"
+    seqs: List[np.ndarray] = []
+    seq_lens: List[int] = []
+    seq_missing = 0        # v4 "d" lines with no "seq" field at all
+    seq_clamped = 0        # tokens dropped by the SEQ_MAX clamp
+    seq_oor = 0            # tokens with a field outside its documented range
 
     nets: List[List[float]] = []
     viols: List[List[float]] = []
@@ -484,6 +801,9 @@ def load_trajectories(pattern: Union[str, Sequence[str]]) -> Trajectories:
     r_match: List[int] = []
     r_viol: List[List[float]] = []
     r_viol_lines = 0       # "r" lines that actually carried "viol"
+    r_kyoku: List[int] = []
+    r_honba: List[int] = []
+    r_id_lines = 0         # "r" lines that carried BOTH "kyoku" and "honba"
 
     match_idx = 0          # index of the match currently being accumulated
     open_decisions = 0     # decisions seen since the last "m" line
@@ -505,16 +825,26 @@ def load_trajectories(pattern: Union[str, Sequence[str]]) -> Trajectories:
                     # a missing field mean 1 rather than "trust it".
                     ver = int(rec.get("v", 1))
                     if ver != FEATURE_VERSION:
-                        extra = (
-                            "  (v2 WEIGHTS can be migrated with train/widen.py; "
-                            "v2 DATA cannot -- the new planes were never recorded)"
-                            if ver == 2
-                            else ""
-                        )
+                        extra = ""
+                        if ver == 3:
+                            extra = (
+                                "  (v3 WEIGHTS can be migrated with "
+                                "train/widen4.py; v3 DATA cannot -- the planes and "
+                                "scalars are identical, but the river token stream "
+                                "'seq' was never recorded, and it is an input the "
+                                "encoder cannot invent)"
+                            )
+                        elif ver == 2:
+                            extra = (
+                                "  (v2 WEIGHTS can be migrated with train/widen.py "
+                                "then train/widen4.py; v2 DATA cannot -- the new "
+                                "planes were never recorded)"
+                            )
                         raise ValueError(
                             f"{path}:{lineno}: v{ver} data -- re-record with the current "
                             f"engine (this trainer reads feature v{FEATURE_VERSION}: "
-                            f"{PLANE_LEN} plane bytes + {SCALAR_LEN * 4} scalar bytes)"
+                            f"{PLANE_LEN} plane bytes + {SCALAR_LEN * 4} scalar bytes "
+                            f"+ up to {SEQ_MAX} river tokens)"
                             f"{extra}"
                         )
                     planes = _decode_planes(rec["planes"]).astype(np.float32)
@@ -542,6 +872,22 @@ def load_trajectories(pattern: Union[str, Sequence[str]]) -> Trajectories:
                     honbas.append(int(rec.get("honba", 0)))
                     junmes.append(int(rec.get("junme", 0)))
 
+                    sq = rec.get("seq")
+                    if sq is None:
+                        seq_missing += 1
+                        tok = np.zeros((0, TOK_BYTES), dtype=np.int8)
+                    else:
+                        try:
+                            tok, n_clamp, n_oor = _decode_seq(sq)
+                        except ValueError as e:
+                            raise ValueError(f"{path}:{lineno}: {e}") from e
+                        seq_clamped += n_clamp
+                        seq_oor += n_oor
+                    padded = np.zeros((SEQ_MAX, TOK_BYTES), dtype=np.int8)
+                    padded[: tok.shape[0]] = tok
+                    seqs.append(padded)
+                    seq_lens.append(int(tok.shape[0]))
+
                     ob = rec.get("o")
                     sh = rec.get("sh")
                     if ob is None:
@@ -568,6 +914,14 @@ def load_trajectories(pattern: Union[str, Sequence[str]]) -> Trajectories:
                     r_deltas.append([float(v) for v in rec["deltas"]])
                     r_outcome.append(str(rec["outcome"]))
                     r_match.append(match_idx)
+                    rk, rh = rec.get("kyoku"), rec.get("honba")
+                    if rk is None or rh is None:
+                        r_kyoku.append(-1)
+                        r_honba.append(-1)
+                    else:
+                        r_kyoku.append(int(rk))
+                        r_honba.append(int(rh))
+                        r_id_lines += 1
                     rv = rec.get("viol")
                     if rv is None:
                         r_viol.append([0.0] * 4)
@@ -604,6 +958,24 @@ def load_trajectories(pattern: Union[str, Sequence[str]]) -> Trajectories:
     if not feats:
         raise ValueError("no decision records found")
 
+    if seq_missing:
+        print(
+            f"warning: {seq_missing} of {len(feats)} v{FEATURE_VERSION} decision "
+            "line(s) carried no 'seq' field; read as an EMPTY river.  The contract "
+            "says a v4 line carries 'seq' (possibly the empty string) -- if this is "
+            "not just the pre-first-discard decisions, the recorder is dropping the "
+            "token stream and the encoder is being trained on nothing.",
+            file=sys.stderr,
+        )
+    if seq_clamped or seq_oor:
+        print(
+            f"warning: river tokens: {seq_clamped} dropped by the {SEQ_MAX}-token "
+            f"clamp, {seq_oor} with a field outside its range (read as 'no one-hot "
+            "bit', per V4_SPEC.md).  Both are DEFINED behaviour, and both mean the "
+            "recorder is emitting something the encoder cannot use.",
+            file=sys.stderr,
+        )
+
     return Trajectories(
         X=np.stack(feats).astype(np.float32),
         mask=np.stack(masks),
@@ -625,6 +997,11 @@ def load_trajectories(pattern: Union[str, Sequence[str]]) -> Trajectories:
         oracle=np.stack(oracles).astype(np.float32),
         opp_shanten=np.stack(shantens).astype(np.int32),
         has_oracle=oracle_lines == len(feats),
+        seq=np.stack(seqs).astype(np.int8),
+        seq_len=np.asarray(seq_lens, dtype=np.int32),
+        round_kyoku=np.asarray(r_kyoku, dtype=np.int32),
+        round_honba=np.asarray(r_honba, dtype=np.int32),
+        has_round_id=bool(r_deltas) and r_id_lines == len(r_deltas),
     )
 
 
@@ -647,6 +1024,11 @@ def _check_features(mpath: str, feats, input_dim: int, oracle: bool = False) -> 
     Rejecting a net that is too narrow FOR THE DATA AT HAND is the caller's job
     (bc.py / ppo.py compare against the loaded trajectories and name widen.py);
     doing it here would make the migration tool unable to open its own input.
+
+    v4 widens the tolerance by exactly one alternative: the declared features
+    may account for the width either directly (a v3 net) or with the encoder's
+    64-wide z block appended (a v4 net).  Both are well-formed nets and
+    `train/widen4.py` has to be able to open the first to write the second.
     """
     if not isinstance(feats, dict):
         raise ValueError(f"{mpath}: features is {feats!r}, expected an object")
@@ -666,12 +1048,13 @@ def _check_features(mpath: str, feats, input_dim: int, oracle: bool = False) -> 
     width = vals["planes"] * TILE_TYPES + vals["scalars"]
     if oracle:
         width += vals["oracle_planes"] * TILE_TYPES
-    if width != input_dim:
+    if input_dim not in (width, width + ATTN_D):
         parts = f"{vals['planes']}x{TILE_TYPES} + {vals['scalars']}"
         if oracle:
             parts += f" + {vals['oracle_planes']}x{TILE_TYPES}"
         raise ValueError(
-            f"{mpath}: features says {parts} = {width} inputs but layer 0 takes "
+            f"{mpath}: features says {parts} = {width} inputs ({width + ATTN_D} "
+            f"with the v{FEATURE_VERSION} attention block) but layer 0 takes "
             f"{input_dim} -- the manifest disagrees with itself"
         )
 
@@ -714,7 +1097,13 @@ def load_weights(path: str) -> PolicyValueNet:
         raise ValueError(f"{mpath}: first layer has no usable 'in': {e}") from e
 
     want = manifest_for(input_dim)
-    for key in ("version", "arch", "actions", "blob"):
+    # "attn" is checked only for a v4-width net, and there it is REQUIRED: the
+    # engine's loader derives the expected fc1 width from that key's presence
+    # alone, so a 1738-wide manifest without it is one the engine would refuse.
+    keys = ("version", "arch", "actions", "blob")
+    if has_attn(input_dim):
+        keys += ("attn",)
+    for key in keys:
         if manifest.get(key) != want[key]:
             raise ValueError(
                 f"{mpath}: {key} is {manifest.get(key)!r}, expected {want[key]!r}"
@@ -772,6 +1161,12 @@ def export_weights(model: PolicyValueNet, outdir: str) -> str:
     The sliced-off rows go to `aux.f32` beside it, which is trainer-private and
     exists purely so a later run can resume the heads instead of re-learning
     them from a random init.
+
+    The v4 manifest NAMES attn.f32 but this function does not write it: the
+    encoder is a separate parameter tree with its own optimizer story, so
+    `export_attn(enc, outdir)` is a separate call the trainer makes beside this
+    one.  A directory holding a 1738-wide policy.f32 and no attn.f32 is
+    therefore a bug, and both loaders say so.
     """
     os.makedirs(outdir, exist_ok=True)
 

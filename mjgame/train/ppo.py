@@ -67,7 +67,7 @@ outright, since value-only steps still move the policy through the trunk.
 
 THE ORACLE CRITIC.  When the trajectories carry the privileged "o"/"sh" fields
 (see common.py), the baseline moves OUT of the policy net entirely and into a
-separate 1433-wide critic that sees the policy's features PLUS the opponents'
+separate 1908-wide critic that sees the policy's features PLUS the opponents'
 hands, the hidden remainder and the ura indicators.  This is asymmetric
 actor-critic: only the baseline peeks, and it is used only to subtract, so the
 policy stays exactly as blind as it will be at inference time while the
@@ -97,6 +97,40 @@ off, so the blob the engine loads is unchanged; they persist in aux.f32.
 
 Without the oracle fields, everything above is skipped and the ORIGINAL shared
 value-head path runs verbatim -- same losses, same prints, same weights out.
+
+THE RIVER ENCODER (feature v4, train/V4_SPEC.md).  Every decision line now
+carries "seq": one token per river entry, all four seats, relative seat order,
+each river truncated to its first 24 discards.  A 4-head self-attention encoder
+(42 -> 64, learned-query pooling, 64 out) folds that stream into a z the two
+nets read as extra input columns:
+
+    policy fc1 input = [planes+scalars 1674][z 64]             = 1738
+    critic fc1 input = [planes+scalars 1674][oracle 170][z 64]  = 1908
+
+THE ENCODER BELONGS TO THE POLICY OPTIMIZER, AND ONLY TO IT.  The policy and
+the encoder are updated together as one parameter tree (one Adam, one
+value_and_grad over the pair), so z is shaped by the surrogate that actually
+needs it.  The critic reads STOP-GRADIENT(z): it gets the representation, it
+never gets to write it.
+
+That is a training-side decision and it is deliberate.  The aux-coef incident
+is the precedent -- an auxiliary loss on a shared trunk, left with a free hand,
+annexes capacity from the objective that matters and the symptom shows up
+somewhere else entirely -- and the critic is the strongest annexer available
+here: it is the only loss in this trainer with a privileged input (the
+opponents' actual hands) and a target it can drive to near-zero.  Give it
+gradient into the encoder and the encoder learns the features that make ORACLE
+regression easy, which is precisely the information the policy will not have at
+inference time.  The critic does not need it either: it already sees the truth
+the encoder is trying to infer.  So the flow of value is one-way, z is a
+POLICY-side summary that the baseline is merely allowed to condition on, and
+the critic's own loss remains unable to move a single policy-side parameter --
+the same guarantee the separate-optimizer split already gave for the MLP.
+
+MEMORY.  The attention scores are [B, 4, L, L] with L up to 96, so a 4096
+minibatch materialises ~600 MB for that tensor alone (plus its backward).  If
+the machine starts swapping, halve --batch; nothing about the update depends on
+the batch size except the noise in it.
 """
 
 from __future__ import annotations
@@ -111,18 +145,32 @@ import numpy as np
 
 from common import (
     ACTIONS,
+    ATTN_BLOB_NAME,
+    ATTN_D,
+    ATTN_HEAD_DIM,
+    ATTN_HEADS,
+    ATTN_SCALE,
     AUX_CLASSES,
     AUX_MISSING,
     AUX_OPP,
     CRITIC_BLOB_NAME,
+    CRITIC_INPUT,
     CRITIC_MANIFEST_NAME,
     FEATURE_VERSION,
     INPUT_DIM,
     ORACLE_LEN,
+    PLANE_SCALAR_DIM,
+    RIVER_MAX,
+    SEQ_MAX,
+    TILE_TYPES,
+    TOK_DENSE,
+    AttnEncoder,
     CriticNet,
     PolicyValueNet,
+    export_attn,
     export_critic,
     export_weights,
+    load_attn,
     load_aux,
     load_critic,
     load_trajectories,
@@ -134,6 +182,139 @@ from common import (
 
 # Value-head units: V predicts G / RETURN_SCALE.  Frozen across iterations.
 RETURN_SCALE = 20.0
+
+# Additive mask for softmax over padded positions.  FINITE on purpose: -inf
+# would make a row of all-pad keys (an empty river inside a non-empty batch)
+# softmax to NaN, and a NaN cannot be selected away afterwards -- `mx.where`
+# would still propagate it through the discarded branch's gradient.  At -1e9 the
+# same row softmaxes to a harmless uniform over garbage, exp(-1e9 - max) is
+# exactly 0.0 in float32 so masked keys contribute EXACTLY nothing, and the L=0
+# case is then fixed up by an honest select.
+MASK_NEG = -1e9
+
+
+# ---------------------------------------------------------------------------
+# The river encoder's forward (V4_SPEC.md "Encoder forward" -- the frozen one)
+# ---------------------------------------------------------------------------
+
+
+def token_dense(tok: mx.array) -> mx.array:
+    """Packed [B, L, 4] int -> dense [B, L, 42], the spec's expansion exactly.
+
+        concat(onehot34(type), onehot4(seatRel), idx/24, tsumogiri, riichiDecl,
+               calledAway)
+
+    The one-hots are equality against an arange, which gives the spec's
+    out-of-range rule for free: a `type` of 34 or -1 matches nothing and sets no
+    bit, rather than wrapping onto a real tile.  `idx/24` is a float32 divide of
+    an exactly-representable small integer, which is bit-identical to the
+    spec's "double, rounded once" over the whole int8 range (checked: all 256
+    values agree in both numpy and mlx).
+    """
+    ttype = tok[..., 0]
+    srel = tok[..., 1]
+    idx = tok[..., 2]
+    flags = tok[..., 3]
+    oh_type = (ttype[..., None] == mx.arange(TILE_TYPES)).astype(mx.float32)
+    oh_seat = (srel[..., None] == mx.arange(4)).astype(mx.float32)
+    pos = (idx.astype(mx.float32) / float(RIVER_MAX))[..., None]
+    bits = mx.stack(
+        [((flags // (1 << b)) % 2).astype(mx.float32) for b in range(3)], axis=-1
+    )
+    return mx.concatenate([oh_type, oh_seat, pos, bits], axis=-1)
+
+
+def encode_tokens(enc: AttnEncoder, tok: mx.array, lens: mx.array) -> mx.array:
+    """[B, L, 4] packed tokens + [B] lengths -> z [B, 64].
+
+    The spec is written for one sequence at a time; this is that, batched, and
+    the batching is the only thing that needs an argument.  `tok` is padded to
+    the batch's LONGEST river, and every pad position is removed three times
+    over, because each removal covers a different way it could leak:
+
+      * as an input   -- the dense row is zeroed, so a pad token never even
+                         reaches W_in with the all-zeros token's one-hots;
+      * as a KEY      -- masked out of the attention softmax, so no real token
+                         attends to it;
+      * as a QUERY    -- masked out of the pooling softmax, so its (finite,
+                         garbage) m never reaches p.
+
+    Masked positions get weight exp(-1e9 - max) = 0.0 exactly, and adding exact
+    zeros to a float sum cannot change it, so a padded batch and a batch of one
+    compute the same z to within matmul reduction order (asserted at 1e-6 in the
+    padding test).
+
+    L = 0 for a whole sample -- every decision before the first discard of the
+    hand -- is the spec's special case: p = 0, so z = bz.  It is applied as a
+    select over the batch rather than a branch, so a mixed batch is one graph.
+    """
+    B, L = int(tok.shape[0]), int(tok.shape[1])
+    bz = enc.wz.bias
+    if L == 0:
+        return mx.broadcast_to(bz, (B, ATTN_D))
+
+    valid = mx.arange(L)[None, :] < lens.reshape(-1, 1)            # [B, L] bool
+    x = token_dense(tok) * valid[..., None].astype(mx.float32)     # [B, L, 42]
+
+    h = nn.relu(enc.w_in(x))                                       # [B, L, 64]
+
+    def split_heads(t: mx.array) -> mx.array:
+        # Contiguous 16-column slices of the 64, per the spec's head split.
+        return t.reshape(B, L, ATTN_HEADS, ATTN_HEAD_DIM).transpose(0, 2, 1, 3)
+
+    q = split_heads(enc.wq(h))                                     # [B, H, L, 16]
+    k = split_heads(enc.wk(h))
+    v = split_heads(enc.wv(h))
+
+    scores = (q @ k.transpose(0, 1, 3, 2)) * ATTN_SCALE            # [B, H, L, L]
+    scores = mx.where(valid[:, None, None, :], scores, MASK_NEG)
+    attn = mx.softmax(scores, axis=-1)
+    o = (attn @ v).transpose(0, 2, 1, 3).reshape(B, L, ATTN_D)     # concat heads
+    m = enc.wo(o)                                                  # [B, L, 64]
+
+    pool = mx.where(valid, (m * enc.u).sum(axis=-1), MASK_NEG)     # [B, L]
+    alpha = mx.softmax(pool, axis=-1)
+    p = (alpha[..., None] * m).sum(axis=1)                         # [B, 64]
+
+    z = enc.wz(p)
+    empty = (lens.reshape(-1, 1) == 0)
+    return mx.where(empty, mx.broadcast_to(bz, (B, ATTN_D)), z)
+
+
+def seq_batch(SEQ: np.ndarray, LEN: np.ndarray, sel):
+    """One minibatch of tokens, trimmed to ITS longest river.
+
+    `SEQ` is stored [n, 96, 4] so a minibatch is a plain gather, but almost no
+    batch actually needs 96 columns and the attention cost is quadratic in them,
+    so the padding is cut back to the batch maximum before anything is built.
+    """
+    lens = LEN[sel]
+    lmax = int(lens.max()) if lens.size else 0
+    return (
+        mx.array(SEQ[sel][:, :lmax].astype(np.int32)),
+        mx.array(lens.astype(np.int32)),
+    )
+
+
+class Actor(nn.Module):
+    """The policy net and its river encoder as ONE parameter tree.
+
+    They are updated by one optimizer from one loss, so they are one module:
+    `nn.value_and_grad(actor, ...)` then returns gradients for both, and there
+    is no way to accidentally step one without the other.  The critic is NOT in
+    here -- it has its own optimizer and its own loss, and only ever sees a
+    stop-gradient copy of this encoder's output.
+    """
+
+    def __init__(self, net: PolicyValueNet, enc: AttnEncoder) -> None:
+        super().__init__()
+        self.net = net
+        self.enc = enc
+
+    def __call__(self, x: mx.array, tok: mx.array, lens: mx.array):
+        """(network output, z) for a minibatch of dense features ++ tokens."""
+        z = encode_tokens(self.enc, tok, lens)
+        return self.net(mx.concatenate([x, z], axis=1)), z
 
 
 # ---------------------------------------------------------------------------
@@ -194,14 +375,27 @@ def aux_ce_acc(aux_logits: mx.array, labels: mx.array, valid: mx.array):
     return l_aux, acc
 
 
-def xo_batch(X, O, sel) -> mx.array:
-    """[X ++ oracle] for one minibatch, assembled on the fly.
+def xo_batch(X, O, sel, z: mx.array) -> mx.array:
+    """[X ++ oracle ++ z] for one minibatch, assembled on the fly.
 
-    Materialising the full 1433-wide matrix would double the trainer's peak
+    Materialising the full 1908-wide matrix would double the trainer's peak
     memory over a big collection batch for no benefit -- the critic only ever
     sees it a minibatch at a time.
+
+    `z` is passed in ALREADY DETACHED (see `detached_z`).  The critic's own
+    `value_and_grad` could not reach the encoder in any case, since it
+    differentiates the critic's parameters alone; the stop-gradient is stated
+    here as well because "the critic does not write the encoder" is a design
+    claim, not an accident of which module the optimizer was handed.
     """
-    return mx.concatenate([mx.array(X[sel]), mx.array(O[sel])], axis=1)
+    return mx.concatenate([mx.array(X[sel]), mx.array(O[sel]), z], axis=1)
+
+
+def detached_z(enc: AttnEncoder, tok: mx.array, lens: mx.array) -> mx.array:
+    """The encoder's output as a CONSTANT: evaluated, cut off from any tape."""
+    z = mx.stop_gradient(encode_tokens(enc, tok, lens))
+    mx.eval(z)
+    return z
 
 
 # ---------------------------------------------------------------------------
@@ -215,15 +409,30 @@ def decision_round(traj):
     `traj.rnd` is NOT it.  The recorder buffers a match's round results and
     writes every "r" line at match end, after all of that match's "d" lines, so
     the loader's running round counter is frozen at the match's FIRST round for
-    every decision in it.  What actually separates rounds inside a match is
-    (kyoku, honba), which is constant through a round, changes at every round
-    boundary (honba increments on renchan, kyoku advances and honba resets
-    otherwise) and so never repeats non-consecutively within a match.  Counting
-    those blocks off the match's first round recovers the true index.
+    every decision in it.  The join has to be rebuilt, and there are two ways to
+    do it depending on what the dataset carries.
 
-    The block count is checked against the match's "r" line count, which is the
-    assertion that this reconstruction is right.
+    CURRENT DATA.  Every "r" line names its own round with the same
+    (kyoku, honba) its "d" lines carry, so the join is a direct lookup on
+    (match, kyoku, honba) -- see `_round_index_by_id`.  This is the only correct
+    way when the population is MIXED: recording wraps just the neural seats, so
+    a round can end with no "d" line at all (an opponent wins before any
+    recorded seat acts), and such a round is invisible to any positional scheme.
+
+    OLD DATA (no "kyoku"/"honba" on the "r" lines).  All that is left is
+    position: (kyoku, honba) is constant through a round, changes at every round
+    boundary (honba increments on renchan, kyoku advances and honba resets
+    otherwise) and so never repeats non-consecutively within a match, so
+    counting those blocks off the match's first round recovers the index --
+    PROVIDED every round contains at least one decision.  The block count is
+    checked against the match's "r" line count, which is both the assertion that
+    the reconstruction is right and the detector for the decision-less round it
+    cannot handle.  There is deliberately no attempt to patch that case here:
+    consecutive decision-less rounds are ambiguous in principle, and guessing
+    would misalign credit silently.  Re-record with the current engine.
     """
+    if traj.has_round_id:
+        return _round_index_by_id(traj)
     n = len(traj)
     m, ky, hb = traj.match, traj.kyoku, traj.honba
     new_blk = np.ones(n, dtype=bool)
@@ -253,9 +462,80 @@ def decision_round(traj):
             f"round reconstruction disagrees with the 'r' lines for "
             f"{bad.size} match(es) (first: match {int(bad[0])}, "
             f"{int(n_blocks[bad[0]])} (kyoku,honba) block(s) vs "
-            f"{int(n_rlines[bad[0]])} round line(s))"
+            f"{int(n_rlines[bad[0]])} round line(s)) -- if the data was "
+            f"collected with a MIXED population, this is the decision-less "
+            f"round that positional reconstruction cannot see; re-record with "
+            f"an engine that writes 'kyoku'/'honba' on the 'r' lines"
         )
     return idx
+
+
+def _round_index_by_id(traj):
+    """`decision_round` for data whose "r" lines name their own round.
+
+    A round is identified by (match, kyoku, honba), which the "r" line and its
+    "d" lines both carry verbatim, so the mapping is a lookup and needs no
+    inference at all.  Two things are still checked, because a bad label is
+    worse than no label:
+
+      * the pairs must be UNIQUE within a match, or the identifier does not
+        identify (the engine guarantees this -- honba increments on renchan and
+        on a draw, kyoku advances otherwise -- so a duplicate means the recorder
+        is broken);
+      * every decision's pair must appear among its match's "r" lines, i.e. the
+        decision pairs are a SUBSET of the round pairs.  The reverse is NOT
+        required: a round with no decision in it is normal under a mixed
+        population, and its reward is attached by `gae_returns` to the last
+        decision at-or-before it (see there for the leading-hole rule).
+    """
+    m_r = traj.round_match.astype(np.int64)
+    ky_r = traj.round_kyoku.astype(np.int64)
+    hb_r = traj.round_honba.astype(np.int64)
+    m_d = traj.match.astype(np.int64)
+    ky_d = traj.kyoku.astype(np.int64)
+    hb_d = traj.honba.astype(np.int64)
+
+    if m_r.size == 0:
+        raise ValueError("no 'r' lines at all -- no round can be attached")
+
+    # A single int64 key per (match, kyoku, honba).  All three are non-negative
+    # and small; the radices come from the data so the packing cannot collide.
+    nk = int(max(ky_r.max(), ky_d.max(initial=0))) + 1
+    nh = int(max(hb_r.max(), hb_d.max(initial=0))) + 1
+    if min(ky_r.min(), hb_r.min()) < 0:
+        raise ValueError("an 'r' line carries a negative kyoku/honba")
+
+    def pack(m, k, h):
+        return (m * nk + k) * nh + h
+
+    rkey = pack(m_r, ky_r, hb_r)
+    dkey = pack(m_d, ky_d, hb_d)
+
+    order = np.argsort(rkey, kind="stable")
+    skey = rkey[order]
+    dup = np.flatnonzero(skey[1:] == skey[:-1])
+    if dup.size:
+        i = int(order[dup[0]])
+        raise ValueError(
+            f"'r' lines repeat a (kyoku,honba) inside one match "
+            f"({dup.size} duplicate(s); first: match {int(m_r[i])}, kyoku "
+            f"{int(ky_r[i])} honba {int(hb_r[i])}) -- the round labels do not "
+            f"identify a round, so no join is possible"
+        )
+
+    pos = np.clip(np.searchsorted(skey, dkey), 0, skey.size - 1)
+    hit = skey[pos] == dkey
+    if not np.all(hit):
+        miss = np.flatnonzero(~hit)
+        i = int(miss[0])
+        bad_m = np.unique(m_d[miss])
+        raise ValueError(
+            f"decision (kyoku,honba) is not among the 'r' lines for "
+            f"{bad_m.size} match(es) (first: match {int(m_d[i])}, a decision "
+            f"at kyoku {int(ky_d[i])} honba {int(hb_d[i])} with no matching "
+            f"round line) -- the decisions must be a SUBSET of the rounds"
+        )
+    return order[pos].astype(np.int64)
 
 
 def round_rewards(traj, viol_lambda: float):
@@ -335,15 +615,31 @@ def gae_returns(traj, keep, i_rnd, R, U, V_old, starts, ends, gamma, lam):
     so the diagnostic print keeps meaning the same thing it always did.
 
     REWARD ATTRIBUTION.  Each (match, seat) episode is a sequence of decisions
-    whose round indices are non-decreasing.  Round k's reward goes to the last
+    whose round indices are non-decreasing.  The loop walks EVERY round of the
+    match, `starts[m]..ends[m]`, not just the rounds this episode has decisions
+    in, so no round's payout can be dropped.  Round k's reward goes to the last
     decision that seat made at or before the END of round k, i.e. the last one
     with round <= k; a round in which the seat never acted therefore pays out at
-    its previous decision rather than vanishing.  Rewards with no decision
-    at-or-before them (a seat whose first decision is in a later round — not
-    something mahjong produces, but cheap to be right about) attach to the first
-    decision, and the terminal U rides on the last.  The per-episode total is
-    then asserted against the episode's own return, which is what catches an
-    attribution bug before it silently becomes a bad gradient.
+    its previous decision rather than vanishing.
+
+    Rewards with no decision at-or-before them attach to the seat's FIRST
+    decision instead (`max(p, 0)`), and the terminal U rides on the last.  That
+    case is not hypothetical any more.  With a mixed population the recorder
+    wraps only the neural seats, so a whole round — including the match's FIRST
+    round, and any run of consecutive rounds — can close before a recorded seat
+    ever acts.  Those rounds' payouts are then LUMPED onto the first recorded
+    decision of the episode, which is the deliberate choice: the points are
+    real, they belong to this hanchan's return, and the earliest decision is the
+    earliest state from which the agent could have influenced anything.  Pushing
+    them into U instead would move them to the LAST decision, i.e. discount them
+    as if they were earned at the end, and dropping them would break the
+    identity `sum_k R + U == net` that the assertion below checks.  Under
+    gamma = 1 the placement is exactly neutral in the return; under gamma < 1 it
+    is the least-wrong of the three.
+
+    The per-episode total is then asserted against the episode's own return,
+    which is what catches an attribution bug before it silently becomes a bad
+    gradient.
 
     GAE.  delta_t = r_t + gamma * V(s_{t+1}) - V(s_t) with V(terminal) = 0, and
     A_t = sum_l (gamma*lambda)^l delta_{t+l} by a reversed scan.  At gamma = 1,
@@ -415,25 +711,34 @@ def gae_returns(traj, keep, i_rnd, R, U, V_old, starts, ends, gamma, lam):
 # ---------------------------------------------------------------------------
 
 
-def behaviour_pass(model: PolicyValueNet, X, mask, action, batch: int):
-    """(old_logp, V_old) from the frozen collection policy, as numpy."""
+def behaviour_pass(actor: Actor, X, SEQ, LEN, mask, action, batch: int):
+    """(old_logp, V_old) from the frozen collection policy, as numpy.
+
+    The collection policy is the MLP *and* the encoder that produced the z it
+    was conditioned on, so both come from `--init`: recomputing the behaviour
+    log-probs with a different encoder would poison every importance ratio in
+    exactly the way the module docstring warns about for the weights.
+    """
     n = X.shape[0]
     lp = np.empty(n, dtype=np.float32)
     vv = np.empty(n, dtype=np.float32)
     for i in range(0, n, batch):
-        xb = mx.array(X[i : i + batch])
-        mb = mx.array(mask[i : i + batch])
-        ab = mx.array(action[i : i + batch].astype(np.int32))
-        logits, v = split_head(model(xb))
+        sel = slice(i, i + batch)
+        xb = mx.array(X[sel])
+        mb = mx.array(mask[sel])
+        ab = mx.array(action[sel].astype(np.int32))
+        tok, lens = seq_batch(SEQ, LEN, sel)
+        out, _ = actor(xb, tok, lens)
+        logits, v = split_head(out)
         picked = gather(masked_logp(logits, mb), ab)
         mx.eval(picked, v)
-        lp[i : i + batch] = np.array(picked)
-        vv[i : i + batch] = np.array(v)
+        lp[sel] = np.array(picked)
+        vv[sel] = np.array(v)
     return lp, vv
 
 
-def critic_pass(critic: CriticNet, X, O, batch: int) -> np.ndarray:
-    """V_old from the FROZEN --critic-init net over [X ++ oracle], as numpy.
+def critic_pass(critic: CriticNet, enc: AttnEncoder, X, O, SEQ, LEN, batch: int):
+    """V_old from the FROZEN --critic-init net over [X ++ oracle ++ z], as numpy.
 
     A fresh critic makes this noise, exactly as the value head was noise on
     iteration 1 of the shared-head path; advantage normalisation below is what
@@ -443,7 +748,8 @@ def critic_pass(critic: CriticNet, X, O, batch: int) -> np.ndarray:
     vv = np.empty(n, dtype=np.float32)
     for i in range(0, n, batch):
         sel = slice(i, i + batch)
-        v = critic(xo_batch(X, O, sel))
+        tok, lens = seq_batch(SEQ, LEN, sel)
+        v = critic(xo_batch(X, O, sel, detached_z(enc, tok, lens)))
         mx.eval(v)
         vv[sel] = np.array(v)
     return vv
@@ -520,25 +826,50 @@ def main() -> None:
         f"{traj.round_deltas.shape[0]} round(s) in {time.time() - t0:.1f}s"
     )
 
-    input_dim = int(traj.X.shape[1])
-    if input_dim != INPUT_DIM:
+    dense_dim = int(traj.X.shape[1])
+    if dense_dim != PLANE_SCALAR_DIM:
         raise SystemExit(
-            f"data is {input_dim} wide but feature v{FEATURE_VERSION} is {INPUT_DIM} "
-            "-- common.py's contract constants and the engine's encoder disagree"
+            f"data is {dense_dim} wide but feature v{FEATURE_VERSION}'s planes ++ "
+            f"scalars is {PLANE_SCALAR_DIM} -- common.py's contract constants and "
+            "the engine's encoder disagree"
         )
 
     model = load_weights(args.init)
-    if model.input_dim != input_dim:
+    if model.input_dim != INPUT_DIM:
         raise SystemExit(
-            f"--init net takes {model.input_dim} inputs but the data is {input_dim} "
-            f"wide (feature v{FEATURE_VERSION}).\n"
+            f"--init net takes {model.input_dim} inputs but feature "
+            f"v{FEATURE_VERSION} is {dense_dim} dense ++ {ATTN_D} from the river "
+            f"encoder = {INPUT_DIM}.\n"
             f"  {args.init} は旧特徴量の重みです / that weight set predates the "
             f"current feature layout.\n"
             f"  Migrate it, function-preserving, with:\n"
-            f"      python train/widen.py --in {args.init} --out <v{FEATURE_VERSION}-dir>\n"
+            f"      python train/widen4.py --in {args.init} --out <v{FEATURE_VERSION}-dir>\n"
             f"  (the loaders keep reading historical weight sets on purpose, so "
             f"this check -- not load_weights -- is what stops the mismatch)"
         )
+
+    # The encoder that produced the z the rollouts were conditioned on.  It is
+    # not optional and it is not initialisable here: a fresh encoder would make
+    # every recomputed behaviour log-prob a log-prob of a policy that never
+    # played, and the importance ratios would be silently meaningless.
+    enc = load_attn(args.init)
+    if enc is None:
+        raise SystemExit(
+            f"--init {args.init} has a v{FEATURE_VERSION} policy ({INPUT_DIM} "
+            f"inputs) but no {ATTN_BLOB_NAME}.\n"
+            f"  The 64 z columns are fed by an encoder that has to be the one the "
+            f"rollouts used; starting a fresh one here would poison every "
+            f"importance ratio.\n"
+            f"  `python train/widen4.py --in <v3-dir> --out {args.init}` writes both."
+        )
+    actor = Actor(model, enc)
+    tok_pct = 100.0 * float((traj.seq_len > 0).mean())
+    print(
+        f"encoder: {ATTN_BLOB_NAME} from {args.init} "
+        f"({TOK_DENSE}->{ATTN_D}, {ATTN_HEADS} heads x {ATTN_HEAD_DIM}); "
+        f"rivers {traj.seq_len.mean():.1f} tokens mean, {int(traj.seq_len.max())} max "
+        f"of {SEQ_MAX}, {tok_pct:.1f}% of decisions non-empty"
+    )
 
     # ---- baseline selection -------------------------------------------------
     # The oracle path needs the privileged fields on EVERY decision line; a
@@ -557,22 +888,22 @@ def main() -> None:
         )
         critic = load_critic(critic_dir)
         if critic is None:
-            critic = CriticNet(input_dim + ORACLE_LEN)
+            critic = CriticNet(CRITIC_INPUT)
             mx.eval(critic.parameters())
             print(
                 f"critic: no {CRITIC_MANIFEST_NAME} in {critic_dir} -- fresh init "
-                f"({input_dim + ORACLE_LEN} inputs); V_old is noise this iteration"
+                f"({CRITIC_INPUT} inputs); V_old is noise this iteration"
             )
         else:
             print(f"critic: loaded from {critic_dir} ({critic.input_dim} inputs)")
-        if critic.input_dim != input_dim + ORACLE_LEN:
+        if critic.input_dim != CRITIC_INPUT:
             raise SystemExit(
                 f"critic takes {critic.input_dim} inputs but the data gives "
-                f"{input_dim} + {ORACLE_LEN} = {input_dim + ORACLE_LEN}.\n"
+                f"{dense_dim} + {ORACLE_LEN} + {ATTN_D} = {CRITIC_INPUT}.\n"
                 f"  {critic_dir} の critic は旧特徴量です / that critic predates the "
                 f"current feature layout.\n"
-                f"  `python train/widen.py --in {critic_dir} --out <v{FEATURE_VERSION}-dir>` "
-                f"migrates policy, aux and critic together;\n"
+                f"  `python train/widen4.py --in {critic_dir} --out <v{FEATURE_VERSION}-dir>` "
+                f"migrates policy, aux, critic and the encoder together;\n"
                 f"  or delete {CRITIC_MANIFEST_NAME}/{CRITIC_BLOB_NAME} to start the "
                 f"critic from a fresh init."
             )
@@ -593,6 +924,14 @@ def main() -> None:
             "behaviour).  Credit assignment is smeared over the whole hanchan; "
             "re-record with the current engine to timestamp it per round."
         )
+    if not traj.has_round_id:
+        print(
+            "warning: the 'r' lines do not name their round ('kyoku'/'honba') -- "
+            "falling back to POSITIONAL round reconstruction, which is only "
+            "correct if every round contains at least one recorded decision.  "
+            "Mixed-population data (recording wraps the neural seats only) can "
+            "violate that; re-record with the current engine."
+        )
     R, U, r_starts, r_ends = round_rewards(traj, args.viol_lambda)
 
     i_rnd = decision_round(traj)
@@ -601,6 +940,7 @@ def main() -> None:
     if dropped:
         print(f"warning: dropping {dropped} decision(s) whose round never closed")
     X, mask, action = traj.X[keep], traj.mask[keep], traj.action[keep]
+    SEQ, LEN = traj.seq[keep], traj.seq_len[keep]
     n = X.shape[0]
     if n == 0:
         raise SystemExit("no usable decisions after return attribution")
@@ -623,9 +963,9 @@ def main() -> None:
     # by the shared-head path -- under the oracle critic V_old comes from the
     # frozen critic instead, and the policy's own value head is never read.
     tb = time.time()
-    old_logp_np, V_old = behaviour_pass(model, X, mask, action, args.batch)
+    old_logp_np, V_old = behaviour_pass(actor, X, SEQ, LEN, mask, action, args.batch)
     if use_oracle:
-        V_old = critic_pass(critic, X, O, args.batch)
+        V_old = critic_pass(critic, enc, X, O, SEQ, LEN, args.batch)
 
     # Everything the losses see is in value-head units (reward / RETURN_SCALE),
     # which is what V_old already predicts; `G` comes back in raw uma points for
@@ -676,8 +1016,9 @@ def main() -> None:
 
     # `pi_coef` gates the policy terms (surrogate + entropy): 1.0 normally, 0.0
     # once the KL budget is spent, which turns the step into a pure value fit.
-    def loss_fn(m, xb, mb, ab, oldb, adv, gb, pi_coef):
-        logits, v = split_head(m(xb))
+    def loss_fn(m, xb, tokb, lenb, mb, ab, oldb, adv, gb, pi_coef):
+        out, _ = m(xb, tokb, lenb)
+        logits, v = split_head(out)
         lp_all = masked_logp(logits, mb)
         lp = gather(lp_all, ab)
         ratio = mx.exp(lp - oldb)
@@ -692,14 +1033,19 @@ def main() -> None:
         clipfrac = (mx.abs(ratio - 1.0) > args.clip).astype(mx.float32).mean()
         return total, (l_pi, l_v, ent, kl, clipfrac)
 
-    def policy_loss_fn(m, xb, mb, ab, oldb, adv, lab, valid):
+    def policy_loss_fn(m, xb, tokb, lenb, mb, ab, oldb, adv, lab, valid):
         """Oracle path: surrogate + entropy + auxiliary shanten, NO value term.
 
         The baseline lives in the critic, so nothing here reads output 78 and
         no gradient reaches it -- the policy's own value head is vestigial from
         this point on and drifts only as the shared trunk moves under it.
+
+        This is also the ONLY loss the river encoder ever sees: `m` is the
+        `Actor`, so the gradient of the surrogate, the entropy bonus and the
+        auxiliary heads flows back through z into W_in/Wq/Wk/Wv/Wo/u/Wz, and
+        nothing else does.
         """
-        out = m(xb)
+        out, _ = m(xb, tokb, lenb)
         lp_all = masked_logp(out, mb)
         lp = gather(lp_all, ab)
         ratio = mx.exp(lp - oldb)
@@ -718,7 +1064,8 @@ def main() -> None:
         """Plain MSE against the same TD(lambda) targets, on the critic alone."""
         return mx.square(c(xob) - gb).mean()
 
-    grad_fn = nn.value_and_grad(model, policy_loss_fn if use_oracle else loss_fn)
+    # `actor`, not `model`: the encoder trains with the policy, on this optimizer.
+    grad_fn = nn.value_and_grad(actor, policy_loss_fn if use_oracle else loss_fn)
     cgrad_fn = nn.value_and_grad(critic, critic_loss_fn) if use_oracle else None
 
     frozen = False
@@ -738,12 +1085,16 @@ def main() -> None:
             oldb = mx.array(old_logp_np[sel])
             adv = mx.array(A[sel])
             gb = mx.array(Gv[sel])
+            tokb, lenb = seq_batch(SEQ, LEN, sel)
 
             if use_oracle:
                 # The critic trains every minibatch, on its own optimizer and
                 # its own parameters: it cannot move the policy at all this
-                # iteration, only the advantages of the next one.
-                l_v, cgrads = cgrad_fn(critic, xo_batch(X, O, sel), gb)
+                # iteration, only the advantages of the next one.  Its z is a
+                # detached snapshot of the encoder as the policy has it RIGHT
+                # NOW -- read, never written.
+                zc = detached_z(actor.enc, tokb, lenb)
+                l_v, cgrads = cgrad_fn(critic, xo_batch(X, O, sel, zc), gb)
                 copt.update(critic, cgrads)
                 mx.eval(critic.parameters(), copt.state, l_v)
                 crit_acc += bs * float(l_v)
@@ -752,25 +1103,27 @@ def main() -> None:
                 valid = mx.array(aux_valid[sel])
                 if frozen:
                     # Frozen means the POLICY PARAMETERS STOP MOVING -- which
-                    # takes the aux heads with it, since their gradient flows
-                    # through the same trunk.  Forward only, for the stats; the
-                    # critic above keeps training either way.
+                    # takes the aux heads and the encoder with it, since their
+                    # gradient flows through the same trunk.  Forward only, for
+                    # the stats; the critic above keeps training either way.
                     total, aux = policy_loss_fn(
-                        model, xb, mb, ab, oldb, adv, lab, valid
+                        actor, xb, tokb, lenb, mb, ab, oldb, adv, lab, valid
                     )
                     mx.eval(total, *aux)
                 else:
                     (total, aux), grads = grad_fn(
-                        model, xb, mb, ab, oldb, adv, lab, valid
+                        actor, xb, tokb, lenb, mb, ab, oldb, adv, lab, valid
                     )
-                    opt.update(model, grads)
-                    mx.eval(model.parameters(), opt.state, total, *aux)
+                    opt.update(actor, grads)
+                    mx.eval(actor.parameters(), opt.state, total, *aux)
                 kl_batch = float(aux[4])
             else:
                 pi_coef = mx.array(0.0 if frozen else 1.0)
-                (total, aux), grads = grad_fn(model, xb, mb, ab, oldb, adv, gb, pi_coef)
-                opt.update(model, grads)
-                mx.eval(model.parameters(), opt.state, total, *aux)
+                (total, aux), grads = grad_fn(
+                    actor, xb, tokb, lenb, mb, ab, oldb, adv, gb, pi_coef
+                )
+                opt.update(actor, grads)
+                mx.eval(actor.parameters(), opt.state, total, *aux)
                 kl_batch = float(aux[3])
 
             acc += bs * np.array([float(total)] + [float(a) for a in aux])
@@ -822,14 +1175,16 @@ def main() -> None:
             break
 
     export_weights(model, args.out)
+    export_attn(actor.enc, args.out)
     if use_oracle:
         export_critic(critic, args.out)
         print(
             f"wrote weights to {args.out} (policy.f32 sliced back to "
-            f"{ACTIONS + 1} outputs; aux.f32 + critic.json/critic.f32 beside it)"
+            f"{ACTIONS + 1} outputs; {ATTN_BLOB_NAME} + aux.f32 + "
+            f"critic.json/critic.f32 beside it)"
         )
     else:
-        print(f"wrote weights to {args.out}")
+        print(f"wrote weights to {args.out} (policy.f32 + {ATTN_BLOB_NAME})")
 
 
 if __name__ == "__main__":

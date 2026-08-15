@@ -9,7 +9,9 @@ import { RandomPolicy } from "../src/ai/random.ts";
 import { runMatchSync } from "../src/match.ts";
 import type { MatchResult } from "../src/match.ts";
 import { makeDojoHooks } from "../src/main.ts";
-import { encodeOracle, FEATURES, ORACLE_LEN, PLANE_LEN } from "../src/rl/features.ts";
+import { encodeOracle, encodeSeq, FEATURES, ORACLE_LEN, PLANE_LEN } from "../src/rl/features.ts";
+import type { Observation } from "../src/observe.ts";
+import type { SyncPolicy } from "../src/policy.ts";
 import { ACTIONS } from "../src/rl/actionspace.ts";
 import {
   f32leBytes,
@@ -25,10 +27,10 @@ import { DOJO_HEADLESS, JANKI } from "../src/rules.ts";
 import { sfc32 } from "../src/rng.ts";
 import { scorer } from "../src/score.ts";
 import type { Table } from "../src/table.ts";
-import type { RoundOutcome, Seat, Violation } from "../src/types.ts";
+import type { Action, RoundOutcome, Seat, Violation } from "../src/types.ts";
 import { SEATS } from "../src/types.ts";
 
-const SCALAR_BYTES = 42 * 4; // 168: the frozen scalar block (feature v3)
+const SCALAR_BYTES = 42 * 4; // 168: the frozen scalar block (unchanged from v3)
 
 interface Recorded {
   result: MatchResult;
@@ -133,15 +135,30 @@ Deno.test("record: 1半荘の JSONL が契約どおりに書かれる", async (t
         const where = `d line ${i + 1}`;
         assertEquals(fromBase64(d.planes as string).length, PLANE_LEN, `${where}: planes`);
         assertEquals(fromBase64(d.scalars as string).length, SCALAR_BYTES, `${where}: scalars`);
-        // The two numbers the header comment promises, spelled out: feature v3
-        // is 48 × 34 Int8 planes and 42 little-endian float32 scalars.
+        // The two numbers the header comment promises, spelled out: the v4
+        // planes/scalars are v3's — 48 × 34 Int8 and 42 little-endian float32.
         assertEquals(PLANE_LEN, 1632);
         assertEquals(fromBase64(d.planes as string).length, 1632, `${where}: 1632 plane bytes`);
         assertEquals(fromBase64(d.scalars as string).length, 168, `${where}: 168 scalar bytes`);
         // The trainer refuses a line whose feature version it does not know, so
         // every line must carry it — a missing "v" means "v1" over there.
-        assertEquals(d.v, 3, `${where}: feature version`);
+        assertEquals(d.v, 4, `${where}: feature version`);
         assertEquals(d.v, FEATURES.version, `${where}: version tracks the encoder`);
+
+        // "seq": 4 packed int8 per discard, at most 96 tokens. The empty string
+        // is legal and means L = 0 — the first decision of a hand has one.
+        assert(typeof d.seq === "string", `${where}: no seq field`);
+        const seq = fromBase64(d.seq as string);
+        assertEquals(seq.length % 4, 0, `${where}: seq is not whole tokens`);
+        assert(seq.length <= 4 * 96, `${where}: ${seq.length / 4} tokens`);
+        for (let j = 0; j < seq.length; j += 4) {
+          // Read back as SIGNED bytes, the way the trainer's int8 view will.
+          const [type, rel, idx, flags] = [...seq.slice(j, j + 4)].map((b) => (b << 24) >> 24);
+          assert(type >= 0 && type < 34, `${where}: token type ${type}`);
+          assert(rel >= 0 && rel < 4, `${where}: token seatRel ${rel}`);
+          assert(idx >= 0 && idx < 24, `${where}: token idx ${idx}`);
+          assert(flags >= 0 && flags <= 7, `${where}: token flags ${flags}`);
+        }
 
         const mask = d.mask as number[];
         assert(Array.isArray(mask) && mask.length > 0, `${where}: empty mask`);
@@ -171,6 +188,23 @@ Deno.test("record: 1半荘の JSONL が契約どおりに書かれる", async (t
         assertEquals(r.deltas, o.deltas);
         assertEquals(r.outcome, o.kind === "agari" ? "agari" : "draw");
       });
+    });
+
+    await t.step("r 行: kyoku/honba でその局を名乗る", () => {
+      const rs = lines.filter((l) => l.k === "r");
+      assertEquals(rs.length, result.rounds.length);
+      rs.forEach((r, i) => {
+        assertEquals(r.kyoku, result.rounds[i].kyoku, `r line ${i + 1}: kyoku`);
+        assertEquals(r.honba, result.rounds[i].honba, `r line ${i + 1}: honba`);
+      });
+      // The pair is what a loader joins on, so it must identify the round: no
+      // two "r" lines of one match may carry the same one.
+      const seen = new Set(rs.map((r) => `${r.kyoku}/${r.honba}`));
+      assertEquals(seen.size, rs.length, "(kyoku,honba) repeats inside one match");
+      // …and it must be the SAME pair the d lines of that round carry, which is
+      // the whole point: the join is d ↔ r, not d ↔ position.
+      const dPairs = new Set(lines.filter((l) => l.k === "d").map((d) => `${d.kyoku}/${d.honba}`));
+      for (const p of dPairs) assert(seen.has(p), `d lines sit in round ${p}, which has no r line`);
     });
 
     await t.step("r 行: viol はその局で科された罰符だけを持つ", () => {
@@ -275,6 +309,53 @@ function fakeOutcome(): RoundOutcome {
   };
 }
 
+Deno.test("record: 一席だけ記録しても r 行は全局を名乗る", () => {
+  // The mixed-population shape (`--seats=nhhh`): only the neural seat is
+  // wrapped, so the "d" lines cover a SUBSET of the rounds while the "r" lines
+  // must still cover all of them. That asymmetry is exactly what positional
+  // reconstruction could not survive, and the labels are what fix it.
+  const path = Deno.makeTempFileSync({ prefix: "mjgame_mixed_", suffix: ".jsonl" });
+  try {
+    const writer = new TrajectoryWriter(path);
+    const policies = SEATS.map((s) => {
+      const inner = new RandomPolicy(`R${s}`, 966 * 4 + s);
+      return s === 0 ? new RecordingPolicy(inner, writer) : inner;
+    });
+    const result = runMatchSync(policies, {
+      seed: 966,
+      cfg: JANKI,
+      dojo: DOJO_HEADLESS,
+      scorer,
+      ...makeDojoHooks(DOJO_HEADLESS),
+    });
+    writeMatchEnd(writer, result, JANKI);
+    writer.close();
+
+    const lines = Deno.readTextFileSync(path).split("\n").filter((l) => l !== "")
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+    const rs = lines.filter((l) => l.k === "r");
+    const ds = lines.filter((l) => l.k === "d");
+    assertEquals(rs.length, result.rounds.length, "one r line per round played");
+    assert(ds.length > 0, "the wrapped seat recorded nothing");
+    // Every d line belongs to a seat the driver wrapped…
+    for (const d of ds) assertEquals(d.seat, 0, "an unwrapped seat was recorded");
+    // …and every d line's round is named by an r line.
+    const rPairs = new Set(rs.map((r) => `${r.kyoku}/${r.honba}`));
+    assertEquals(rPairs.size, rs.length, "(kyoku,honba) repeats inside one match");
+    for (const d of ds) {
+      assert(
+        rPairs.has(`${d.kyoku}/${d.honba}`),
+        `d line in unlabelled round ${d.kyoku}/${d.honba}`,
+      );
+    }
+    // 連荘/流局 push honba past 0 on this seed, so the join really does need
+    // both halves of the pair — kyoku alone would not be unique.
+    assert(rs.some((r) => (r.honba as number) > 0), "fixture seed never leaves 0本場");
+  } finally {
+    Deno.removeSync(path);
+  }
+});
+
 Deno.test("record: 罰符は発生した局の r 行にだけ載る", () => {
   const path = Deno.makeTempFileSync({ prefix: "mjgame_viol_", suffix: ".jsonl" });
   try {
@@ -288,6 +369,14 @@ Deno.test("record: 罰符は発生した局の r 行にだけ載る", () => {
     const writer = new TrajectoryWriter(path);
     writeMatchEnd(writer, {
       scores: [30000, 30000, 30000, 30000],
+      // 東1 → 東1-1本場 (連荘) → 東2 → 東2-1本場: honba is not always 0, and the
+      // (kyoku,honba) pair is what has to come back off the line.
+      rounds: [
+        { kyoku: 0, honba: 0 },
+        { kyoku: 0, honba: 1 },
+        { kyoku: 1, honba: 0 },
+        { kyoku: 1, honba: 1 },
+      ],
       outcomes: [fakeOutcome(), fakeOutcome(), fakeOutcome(), fakeOutcome()],
       ledger,
       ledgerCuts: [1, 1, 3, 3],
@@ -298,6 +387,7 @@ Deno.test("record: 罰符は発生した局の r 行にだけ載る", () => {
       .map((l) => JSON.parse(l) as Record<string, unknown>);
     const rs = lines.filter((l) => l.k === "r");
     assertEquals(rs.length, 4);
+    assertEquals(rs.map((r) => [r.kyoku, r.honba]), [[0, 0], [0, 1], [1, 0], [1, 1]]);
     assertEquals(rs[0].viol, [0, 5, 0, 0]);
     assertEquals(rs[1].viol, [0, 0, 0, 0]);
     assertEquals(rs[2].viol, [0, 3, 0, 7]);
@@ -316,12 +406,38 @@ Deno.test("record: ledgerCuts が outcomes と合わなければ書かずに落�
       () =>
         writeMatchEnd(writer, {
           scores: [30000, 30000, 30000, 30000],
+          rounds: [{ kyoku: 0, honba: 0 }, { kyoku: 1, honba: 0 }],
           outcomes: [fakeOutcome(), fakeOutcome()],
           ledger: [],
           ledgerCuts: [0], // one cut, two rounds
         }, JANKI),
       Error,
       "ledgerCuts/outcomes mismatch",
+    );
+    assertEquals(writer.stats(), { d: 0, r: 0, m: 0 });
+  } finally {
+    writer.close();
+    Deno.removeSync(path);
+  }
+});
+
+Deno.test("record: rounds が outcomes と合わなければ書かずに落ちる", () => {
+  const path = Deno.makeTempFileSync({ prefix: "mjgame_rid_", suffix: ".jsonl" });
+  const writer = new TrajectoryWriter(path);
+  try {
+    // An "r" line labelled with the wrong round is worse than an unlabelled
+    // one, because the loader trusts the label — so refuse the whole match.
+    assertThrows(
+      () =>
+        writeMatchEnd(writer, {
+          scores: [30000, 30000, 30000, 30000],
+          rounds: [{ kyoku: 0, honba: 0 }], // one round, two outcomes
+          outcomes: [fakeOutcome(), fakeOutcome()],
+          ledger: [],
+          ledgerCuts: [0, 0],
+        }, JANKI),
+      Error,
+      "rounds/outcomes mismatch",
     );
     assertEquals(writer.stats(), { d: 0, r: 0, m: 0 });
   } finally {
@@ -427,9 +543,9 @@ Deno.test("record: オラクル情報は全 d 行に o/sh として乗る", () =
         assert(Number.isInteger(v) && v >= -1 && v <= 8, `${where}: shanten ${v}`);
       }
       // The oracle block does not move the version on its own — "v" is the
-      // POLICY encoder's, and it says v3 because of the per-opponent planes.
+      // POLICY encoder's, and it says v4 because of the river token stream.
       assertEquals(d.v, FEATURES.version, `${where}: feature version`);
-      assertEquals(d.v, 3, `${where}: feature version`);
+      assertEquals(d.v, 4, `${where}: feature version`);
       assertEquals(fromBase64(d.planes as string).length, PLANE_LEN, `${where}: planes`);
     }
     assert(sawKnownOpponent, "no decision saw three fully concealed opponents");
@@ -483,6 +599,77 @@ Deno.test("record: toBase64/fromBase64 が往復する", () => {
   for (let i = 0; i < 256; i++) all[i] = i;
   assertEquals(fromBase64(toBase64(all)), all);
   assertEquals(toBase64(new Uint8Array([0x4d, 0x61, 0x6e])), "TWFu"); // the canonical vector
+});
+
+/**
+ * Every "seq" a real hanchan wrote, decoded and matched against `encodeSeq` run
+ * on the very Observation that produced the line.
+ *
+ * The wrapper is a SPY, not a re-encode after the fact: an Observation mutates
+ * as the round goes on (the rivers it exposes are the board's own arrays), so
+ * the only honest comparison is the one taken at decision time — which is also
+ * the only way to catch a writer that encoded a stale or a shared buffer.
+ */
+Deno.test("record: d 行の seq は決断時の encodeSeq のバイト列そのもの", () => {
+  const path = Deno.makeTempFileSync({ prefix: "mjgame_seq_", suffix: ".jsonl" });
+  try {
+    const writer = new TrajectoryWriter(path);
+    const seen: Int8Array[] = [];
+    const policies = SEATS.map((s) => {
+      const inner = new RandomPolicy(`R${s}`, 966 * 4 + s);
+      const spy: SyncPolicy = {
+        name: inner.name,
+        reset(seed: number) {
+          inner.reset(seed);
+        },
+        decide(obs: Observation): Action {
+          const a = inner.decide(obs);
+          // AFTER the inner decision, exactly where RecordingPolicy encodes.
+          seen.push(encodeSeq(obs));
+          return a;
+        },
+      };
+      return new RecordingPolicy(spy, writer);
+    });
+    const result = runMatchSync(policies, {
+      seed: 966,
+      cfg: JANKI,
+      dojo: DOJO_HEADLESS,
+      scorer,
+      ...makeDojoHooks(DOJO_HEADLESS),
+    });
+    writeMatchEnd(writer, result, JANKI);
+    writer.close();
+
+    const ds = Deno.readTextFileSync(path).split("\n").filter((l) => l !== "")
+      .map((l) => JSON.parse(l) as Record<string, unknown>).filter((l) => l.k === "d");
+    assertEquals(ds.length, seen.length, "one d line per decision");
+    assert(ds.length > 0, "nothing was recorded");
+
+    let empty = 0;
+    ds.forEach((d, i) => {
+      const want = seen[i];
+      const got = fromBase64(d.seq as string);
+      assertEquals(got.length, want.length, `d line ${i + 1}: seq byte count`);
+      // Compare as SIGNED bytes — base64 round-trips unsigned, and the trainer
+      // reads the block back as int8.
+      assertEquals(
+        Array.from(new Int8Array(got.buffer, got.byteOffset, got.byteLength)),
+        Array.from(want),
+        `d line ${i + 1}: seq bytes`,
+      );
+      if (want.length === 0) empty++;
+    });
+    // The L = 0 case is not hypothetical: it is every 親's first decision.
+    assert(empty > 0, "no decision was made before anyone discarded");
+    assert(empty < ds.length, "every seq was empty — the rivers never reached the encoder");
+    // …and the field survives an empty stream as an empty STRING, not a hole.
+    const first = ds.find((d) => (d.seq as string) === "");
+    assert(first !== undefined, 'an empty seq was not written as ""');
+    assertEquals(fromBase64("").length, 0);
+  } finally {
+    Deno.removeSync(path);
+  }
 });
 
 Deno.test("record: f32leBytes はリトルエンディアン", () => {

@@ -14,9 +14,9 @@ import type { Rng } from "../rng.ts";
 import { sfc32 } from "../rng.ts";
 import type { Action } from "../types.ts";
 import { actionIndex, ACTIONS, resolve } from "./actionspace.ts";
-import { encode, flatten } from "./features.ts";
+import { encode, encodeSeq, flatten } from "./features.ts";
 import type { Net } from "./net.ts";
-import { forward, loadNet } from "./net.ts";
+import { forward, loadNet, seqInput } from "./net.ts";
 
 export interface PolicyOptions {
   /** 0 (default) = argmax; >0 = softmax sampling, larger being flatter. */
@@ -89,7 +89,12 @@ export class NeuralPolicy implements SyncPolicy {
   }
 
   decide(obs: Observation): Action {
-    const logits = forward(this.net, flatten(encode(obs)));
+    // A v4 net also reads the river token stream; `seqInput` returns `flat`
+    // untouched for a v3 one, so an old snapshot still plays and benches
+    // through exactly this line. The seq is only built when it will be read.
+    const flat = flatten(encode(obs));
+    const input = this.net.attn ? seqInput(this.net, flat, encodeSeq(obs)) : flat;
+    const logits = forward(this.net, input);
 
     // Legality is enforced by the mask, not by the network: an illegal slot is
     // driven to −∞ so it can never win the argmax however confident it was.

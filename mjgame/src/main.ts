@@ -49,6 +49,13 @@ interface Args {
   temp: number;
   /** When set, self-play writes a trajectory JSONL here. */
   record: string;
+  /**
+   * Record EVERY seat, not just the "n" ones. Behavior-cloning data only: a
+   * dataset with non-neural decisions violates ppo.py's on-policy assumption
+   * (behavior logp is recomputed from --init) and would poison every
+   * importance ratio — bc.py is the sole intended consumer.
+   */
+  recordAll: boolean;
   help: boolean;
 }
 
@@ -94,6 +101,7 @@ function parseArgs(argv: string[]): Args {
     weights: DEFAULT_WEIGHTS,
     temp: 0,
     record: "",
+    recordAll: false,
     help: false,
   };
   for (const arg of argv) {
@@ -113,7 +121,8 @@ function parseArgs(argv: string[]): Args {
       const v = Number(arg.slice(7));
       if (!Number.isFinite(v) || v < 0) die(`--temp は 0 以上の実数: ${arg.slice(7)}`);
       a.temp = v;
-    } else if (arg.startsWith("--record=")) a.record = arg.slice(9);
+    } else if (arg === "--record-all") a.recordAll = true;
+    else if (arg.startsWith("--record=")) a.record = arg.slice(9);
     else if (arg.startsWith("--seats=")) {
       const v = arg.slice(8);
       if (!/^[hrn]{1,4}$/.test(v)) die(`--seats は h, r, n を4文字まで: ${v}`);
@@ -168,6 +177,8 @@ const USAGE = `mjgame — 雀鬼流ルールの4人麻雀 (人間1 + CPU3)
                       "d" 行には非対称critic用のオラクル情報 (他家3人の手牌・
                       残り山・裏ドラ = "o"、他家の向聴数 = "sh") も必ず入る。
                       1判断あたり向聴計算が3回増える分だけ遅くなる (推論側は不使用)
+  --record-all        n席以外の判断も記録する (BC教師データ用)。ppo.py には
+                      渡せない — 挙動方策が --init と一致する前提が壊れる
   --no-intro          開始演出と配牌アニメを飛ばす
   --help, -h          このヘルプ
 `;
@@ -278,6 +289,8 @@ interface HeadlessOptions {
   temp?: number;
   /** Trajectory JSONL to record into; one writer for the whole run. */
   record?: string;
+  /** Record every seat (BC teacher data), not just the "n" ones. */
+  recordAll?: boolean;
 }
 
 function headless(
@@ -310,8 +323,9 @@ function headless(
         // --init, so a heuristic seat's "d" lines would be treated as samples
         // from the neural policy and silently poison every importance ratio.
         // Heuristic seats still play (and appear in "r"/"m" lines); they just
-        // never emit decisions.
-        return writer && seats[seat] === "n"
+        // never emit decisions. `recordAll` overrides for BC teacher datasets,
+        // whose consumer (bc.py) never computes a ratio.
+        return writer && (opts.recordAll || seats[seat] === "n")
           ? new RecordingPolicy(p, writer, (sq) => encodeOracle(ref.t!, sq as Seat))
           : p;
       });
@@ -341,6 +355,7 @@ function cmdSelfplay(a: Args): void {
     weights: a.weights,
     temp: a.temp,
     record: a.record || undefined,
+    recordAll: a.recordAll,
   });
   const place = SEATS.map(() => [0, 0, 0, 0]);
   const total = [0, 0, 0, 0];
