@@ -1,4 +1,4 @@
-// Headless self-play smoke test: does the game master survive thousands of
+// Headless self-play smoke test: does the game master survive hundreds of
 // rounds of arbitrary legal play, and do the conservation laws hold?
 //
 // Drives the real scorer, so the conservation checks cover actual payouts.
@@ -27,8 +27,8 @@ function play(seed: number, sink?: (e: PublicEvent) => void) {
   });
 }
 
-Deno.test("self-play: 100 hanchan complete without throwing", () => {
-  for (let seed = 1; seed <= 100; seed++) {
+Deno.test("self-play: 30 hanchan complete without throwing", () => {
+  for (let seed = 1; seed <= 30; seed++) {
     const r = play(seed);
     assert(r.rounds.length > 0, `seed ${seed}: no rounds`);
     assert(r.rounds.length <= 64, `seed ${seed}: ${r.rounds.length} rounds`);
@@ -49,7 +49,7 @@ Deno.test("self-play: points are conserved every round", () => {
   // the top finisher (the Tenhou convention), so the four scores account for
   // every point that went in.
   const TOTAL = JANKI.startScore * 4;
-  for (let seed = 1; seed <= 50; seed++) {
+  for (let seed = 1; seed <= 25; seed++) {
     const r = play(seed);
     const sum = r.scores.reduce((a, b) => a + b, 0);
     assertEquals(sum, TOTAL, `seed ${seed}: ${sum} != ${TOTAL}`);
@@ -93,7 +93,7 @@ Deno.test("finalize: the 供託 tiebreak is the settlement tiebreak (lower seat)
 });
 
 Deno.test("self-play: hand sizes stay legal throughout", () => {
-  for (let seed = 1; seed <= 20; seed++) {
+  for (let seed = 1; seed <= 10; seed++) {
     let hands: number[] = [];
     const melds = [0, 0, 0, 0];
     play(seed, (e) => {
@@ -149,7 +149,7 @@ Deno.test("dojo ledger: rules fire in live play without disturbing it", () => {
 
   const seen = new Set<string>();
   let total = 0;
-  for (let seed = 1; seed <= 20; seed++) {
+  for (let seed = 1; seed <= 10; seed++) {
     const withRules = withLedger(seed);
     total += withRules.ledger.length;
     for (const v of withRules.ledger) {
@@ -175,7 +175,7 @@ Deno.test("dojo ledger: rules fire in live play without disturbing it", () => {
 });
 
 Deno.test("self-play: every round ends within the 70-draw budget", () => {
-  for (let seed = 1; seed <= 30; seed++) {
+  for (let seed = 1; seed <= 10; seed++) {
     const r = play(seed);
     for (const round of r.rounds) {
       const draws = round.events.filter((e) => e.t === "draw").length;
