@@ -261,9 +261,13 @@ export function seatPanel(ctx: Ctx, rel: number, w: number): Line[] {
   const name = ctx.names[abs] ?? `P${abs}`;
   const riichi = o.riichi[rel];
 
+  // The static name suffix (AI西) keeps its birth wind while the deal rotates,
+  // so the dealer gets an explicit 親 mark.
+  const oya = abs === o.kyoku % 4;
   const head: Line = [
     sp(REL_LABEL[rel] + " ", SGR.bold),
     sp(`P${abs} `, DIM),
+    sp(oya ? "親 " : "   ", "1;33"),
     sp(truncate(name, 10) + "  "),
     sp(String(o.scores[rel]), scoreSgr(o.scores[rel])),
     sp(`  ${ranks[rel]}位  `, DIM),
@@ -308,6 +312,7 @@ export function ownPanel(ctx: Ctx, w: number): Line[] {
     sp("自分 ", SGR.bold),
     sp(`P${abs} `, DIM),
     sp(`${winds[o.seatWind - 27] ?? "?"}家 `),
+    sp(o.seatWind === 27 ? "親 " : "   ", "1;33"),
     sp(String(o.scores[0]), scoreSgr(o.scores[0])),
     sp(`  ${ranks[0]}位   `, DIM),
     sp("副露 ", DIM),

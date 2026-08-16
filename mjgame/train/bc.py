@@ -71,6 +71,16 @@ def main() -> None:
     ap.add_argument("--val", type=float, default=0.05, help="validation fraction")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument(
+        "--call-weight",
+        type=float,
+        default=1.0,
+        metavar="W",
+        help="loss weight on decisions where the teacher CALLED (pon/chi/"
+        "daiminkan, actions 68-72). Calls are ~4%% of a teacher dataset and "
+        "chi especially clones badly at weight 1 (the clone learns 'when in "
+        "doubt, pass'); >1 counters the imbalance. 1 = plain mean CE",
+    )
+    ap.add_argument(
         "--save-every",
         type=int,
         default=0,
@@ -98,6 +108,15 @@ def main() -> None:
 
     Xtr, mtr, ytr = traj.X[train_idx], traj.mask[train_idx], traj.action[train_idx]
     Xva, mva, yva = traj.X[val_idx], traj.mask[val_idx], traj.action[val_idx]
+    # Per-sample loss weights: teacher calls get --call-weight, all else 1.
+    is_call = (traj.action >= 68) & (traj.action <= 72)
+    wall = np.where(is_call, np.float32(args.call_weight), np.float32(1.0))
+    wtr = wall[train_idx]
+    if args.call_weight != 1.0:
+        print(
+            f"call-weight {args.call_weight}: {int(is_call.sum())} call decisions "
+            f"({is_call.mean() * 100:.1f}%) carry {args.call_weight}x loss"
+        )
     # The data decides the width; the constant only has to agree with it.  The
     # loader already rejects anything that is not the current feature version,
     # so a disagreement here means the constants drifted, not that the file is
@@ -120,8 +139,8 @@ def main() -> None:
     mx.eval(model.parameters())
     opt = optim.Adam(learning_rate=args.lr)
 
-    def loss_fn(m, xb, mb, yb):
-        return masked_cross_entropy(m(xb), mb, yb)
+    def loss_fn(m, xb, mb, yb, wb):
+        return masked_cross_entropy(m(xb), mb, yb, wb)
 
     grad_fn = nn.value_and_grad(model, loss_fn)
 
@@ -135,7 +154,8 @@ def main() -> None:
             xb = mx.array(Xtr[sel])
             mb = mx.array(mtr[sel])
             yb = mx.array(ytr[sel].astype(np.int32))
-            loss, grads = grad_fn(model, xb, mb, yb)
+            wb = mx.array(wtr[sel])
+            loss, grads = grad_fn(model, xb, mb, yb, wb)
             opt.update(model, grads)
             mx.eval(model.parameters(), opt.state, loss)
             bs = len(sel)

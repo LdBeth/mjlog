@@ -549,13 +549,24 @@ def random_attn(seed=None, std: float = 0.02) -> AttnEncoder:
 # ---------------------------------------------------------------------------
 
 
-def masked_cross_entropy(logits: mx.array, mask: mx.array, target: mx.array) -> mx.array:
+def masked_cross_entropy(
+    logits: mx.array,
+    mask: mx.array,
+    target: mx.array,
+    weight: mx.array | None = None,
+) -> mx.array:
     """Mean cross-entropy over the legal-action support.
 
     `logits` may be [B, 78] or the raw [B, 79] network output (the value head
     is sliced off and therefore never contributes a gradient).  `mask` is a
     boolean [B, 78]; illegal entries are set to -inf before the log-softmax so
     they carry zero probability and zero gradient.  `target` is int [B].
+
+    `weight`, when given, is a per-sample [B] importance factor and the result
+    is the weighted mean sum(w*ce)/sum(w).  BC uses it to counter class
+    imbalance (call decisions are ~4% of a teacher dataset, so plain mean CE
+    buys accuracy on discards and resolves claim-window near-ties toward
+    pass); omitting it is the old behavior everywhere else.
     """
     if logits.shape[-1] == OUTPUT_DIM:
         logits = logits[..., :ACTIONS]
@@ -563,7 +574,10 @@ def masked_cross_entropy(logits: mx.array, mask: mx.array, target: mx.array) -> 
     masked = mx.where(mask, logits, neg_inf)
     logp = masked - mx.logsumexp(masked, axis=-1, keepdims=True)
     picked = mx.take_along_axis(logp, target.reshape(-1, 1).astype(mx.int32), axis=-1)
-    return -picked.mean()
+    if weight is None:
+        return -picked.mean()
+    w = weight.reshape(-1)
+    return -(picked.reshape(-1) * w).sum() / w.sum()
 
 
 def masked_argmax(logits: mx.array, mask: mx.array) -> mx.array:

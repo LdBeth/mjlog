@@ -9,8 +9,9 @@ import type { RiverEntry } from "mjrender/state.ts";
 import { tileType } from "mjrender/tiles.ts";
 import { HeuristicPolicy } from "../src/ai/heuristic.ts";
 import type { Observation } from "../src/observe.ts";
+import type { ActionPreview } from "../src/penalty/preview.ts";
 import { JANKI } from "../src/rules.ts";
-import type { Action } from "../src/types.ts";
+import type { Action, Violation } from "../src/types.ts";
 import { tiles } from "./helpers.ts";
 
 /** One discard action per tile in hand, riichi never offered. */
@@ -393,4 +394,251 @@ Deno.test("heuristic: tedashi stops once ドラ切り has been ponned off us", (
   const chosen = new HeuristicPolicy("cpu", 1).decide(locked);
   assertEquals(chosen.t, "discard");
   if (chosen.t === "discard") assertEquals(chosen.tile, keeper);
+});
+
+// --------------------------------------------------------------------------
+// The compliance filter. These Observations carry a `preview` — the referee,
+// asked hypothetically — which is what every real driver supplies and no
+// hand-built Observation above does. That asymmetry is the point: without a
+// preview the policy keeps the older priced behaviour every test above pins,
+// and with one it stops CHOOSING the charged action at all.
+// --------------------------------------------------------------------------
+
+/** One Tier A entry, enough for the policy to see the action is charged. */
+function charge(rule: string): Violation[] {
+  return [{
+    rule,
+    label: rule,
+    seat: 0,
+    kyoku: 0,
+    junme: 0,
+    points: 3,
+    tier: "A",
+    confidence: 1,
+    detail: "stub",
+  }];
+}
+
+/**
+ * A referee stub. Each hook says whether it would charge; anything unset stays
+ * silent, so a test states exactly the one veto it is about.
+ */
+function stubPreview(o: {
+  discard?: (a: Extract<Action, { t: "discard" }>) => string | null;
+  call?: (a: Action) => string | null;
+  kan?: (a: Action) => string | null;
+  skipKan?: boolean;
+}): ActionPreview {
+  const vs = (id: string | null | undefined) => (id ? charge(id) : []);
+  return {
+    discard: (a) => vs(o.discard?.(a)),
+    call: (a) => vs(o.call?.(a)),
+    kan: (a) => vs(o.kan?.(a)),
+    skipKan: () => (o.skipKan ? charge("riichi-kan-skip") : []),
+  };
+}
+
+Deno.test("filter: a discard the referee would charge is not chosen", () => {
+  const hand = tiles("123456789m1122p東");
+  const free = hand[hand.length - 1]; // the lone 東 — what an unfiltered policy cuts
+  const obs = baseObs({
+    hand,
+    preview: stubPreview({ discard: (a) => (a.tile === free ? "first-honor" : null) }),
+  });
+  const a = new HeuristicPolicy("cpu", 1).decide(obs);
+  assertEquals(a.t, "discard");
+  assert(a.t === "discard");
+  assert(a.tile !== free, "the charged tile must be out of the choice set entirely");
+});
+
+Deno.test("filter: when every discard is charged the prices decide again", () => {
+  // The fallthrough. Something has to be thrown, so the filter stands aside and
+  // `dojoCost` ranks the damage — which here is the same tile the unfiltered
+  // policy picks, because nothing else has changed.
+  const hand = tiles("123456789m1122p東");
+  const free = hand[hand.length - 1];
+  const obs = baseObs({ hand, preview: stubPreview({ discard: () => "noten-dora" }) });
+  const a = new HeuristicPolicy("cpu", 1).decide(obs);
+  assertEquals(a.t, "discard");
+  assert(a.t === "discard");
+  assertEquals(a.tile, free);
+});
+
+Deno.test("filter: a riichi declaration the referee would charge is declined", () => {
+  const hand = tiles("123456789m1122p東");
+  const keep = hand[9];
+  const build = (preview?: ActionPreview) =>
+    baseObs({
+      hand,
+      drawn: hand[hand.length - 1],
+      waits: [tileType(tiles("1p")[0])],
+      ukeire: [{ type: tileType(tiles("1p")[0]), live: 3 }],
+      discardInfo: new Map([[keep, { shanten: 0, katagari: true, yakuless: false }]]),
+      legal: [
+        { t: "discard", tile: keep, riichi: false, tsumogiri: false },
+        { t: "discard", tile: keep, riichi: true, tsumogiri: false },
+      ],
+      preview,
+    });
+  // Control: with no referee to ask, the split wait is cured by declaring.
+  const cure = new HeuristicPolicy("cpu", 1).decide(build());
+  assert(cure.t === "discard" && cure.riichi, "control: 片和了り is cured by riichi");
+
+  // The declaration is 地獄単騎 — a 禁じ手 outranks the cure.
+  const banned = stubPreview({ discard: (a) => (a.riichi ? "jigoku-tanki" : null) });
+  const chosen = new HeuristicPolicy("cpu", 1).decide(build(banned));
+  assert(chosen.t === "discard" && !chosen.riichi, "a charged declaration is not made");
+});
+
+Deno.test("filter: a call the referee would charge is not taken", () => {
+  const hand = tiles("11199m22p4578s白白");
+  const called = tiles("白白白")[2];
+  const legal: Action[] = [
+    { t: "pass" },
+    { t: "pon", tiles: [hand[11], hand[12]], called },
+  ];
+  const obs = baseObs({
+    hand,
+    drawn: null,
+    shanten: 2,
+    legal,
+    preview: stubPreview({ call: () => "hadaka-tanki" }),
+  });
+  assertEquals(new HeuristicPolicy("cpu", 1).decide(obs).t, "pass");
+});
+
+Deno.test("filter: 立直後カン見送り forces the kan the policy would have skipped", () => {
+  // `chooseKan` declines this one on its own terms (the concealed four are not
+  // all in hand, so it cannot prove the wait survives). Declining is the
+  // violation here, so the referee's verdict on the OMISSION overrides.
+  const hand = tiles("111m456p78p111s99s");
+  const drawn = hand[0];
+  const legal: Action[] = [
+    { t: "discard", tile: drawn, riichi: false, tsumogiri: true },
+    { t: "ankan", type: 0 },
+  ];
+  const shared = { hand, drawn, shanten: 0, riichi: [true, false, false, false], legal };
+  assertEquals(
+    new HeuristicPolicy("cpu", 1).decide(baseObs(shared)).t,
+    "discard",
+    "control: with nobody asking, the kan is passed up",
+  );
+  const obs = baseObs({ ...shared, preview: stubPreview({ skipKan: true }) });
+  assertEquals(new HeuristicPolicy("cpu", 1).decide(obs).t, "ankan");
+});
+
+Deno.test("filter: it is off with dojo:false, prices and all", () => {
+  const hand = tiles("123456789m1122p東");
+  const free = hand[hand.length - 1];
+  const obs = baseObs({
+    hand,
+    preview: stubPreview({ discard: (a) => (a.tile === free ? "first-honor" : null) }),
+  });
+  const a = new HeuristicPolicy("cpu", 1, { dojo: false }).decide(obs);
+  assert(a.t === "discard" && a.tile === free, "an unleashed policy ignores the referee");
+});
+
+// --------------------------------------------------------------------------
+// 片和了り / 後付け are vetoed too, though no preview can see them: they are
+// charged at WIN time (declining a win is 見逃し, so there is no action to
+// veto there) while the only prevention is the discard that builds the wait.
+// Left as prices they lose — a shanten step is 1000 and the katagari price is
+// 1500, so a two-step gap already buys the violation, and the C7 planner's
+// planKeep malus (5000) buys it outright.
+// --------------------------------------------------------------------------
+
+/** All-but-one tile flagged, with the flagged one the only route to tenpai. */
+function splitWaitObs(flag: "katagari" | "yakuless", over: Partial<Observation> = {}) {
+  const hand = tiles("123456789m1122p東");
+  const split = hand[9]; // a 1p: cutting it reaches the split tenpai
+  const discardInfo = new Map(
+    hand.map((t) =>
+      [t, {
+        shanten: t === split ? 0 : 2,
+        katagari: flag === "katagari" && t === split,
+        yakuless: flag === "yakuless" && t === split,
+      }] as const
+    ),
+  );
+  return { split, obs: baseObs({ hand, discardInfo, preview: stubPreview({}), ...over }) };
+}
+
+Deno.test("filter: a 片和了り discard is vetoed, not merely outbid", () => {
+  const { split, obs } = splitWaitObs("katagari");
+  // Control: the price alone loses. Tenpai vs 2向聴 is worth 2000 and 片和了り
+  // costs 1500, so an unrefereed policy takes the split wait.
+  const priced = new HeuristicPolicy("cpu", 1).decide(baseObs({ ...obs, preview: undefined }));
+  assert(priced.t === "discard" && priced.tile === split, "control: the price is outbid");
+
+  const chosen = new HeuristicPolicy("cpu", 1).decide(obs);
+  assert(chosen.t === "discard" && chosen.tile !== split, "the split wait is out of the set");
+});
+
+Deno.test("filter: a 後付け discard is vetoed for an open hand", () => {
+  const meld: Meld[] = [{
+    kind: "pon",
+    who: 0,
+    fromWho: 1,
+    tiles: tiles("白白白"),
+    calledTile: tiles("白白白")[0],
+  }];
+  const open = { melds: [meld, [], [], []] as Meld[][] };
+  const { split, obs } = splitWaitObs("yakuless", open);
+  const chosen = new HeuristicPolicy("cpu", 1).decide(obs);
+  assert(chosen.t === "discard" && chosen.tile !== split, "a yakuless open tenpai is refused");
+
+  // 門前 is exempt: the same shape can still be cured by declaring riichi, so
+  // the rule cannot fire and the veto must not either.
+  const closed = splitWaitObs("yakuless");
+  const kept = new HeuristicPolicy("cpu", 1).decide(closed.obs);
+  assert(kept.t === "discard" && kept.tile === closed.split, "門前 keeps the tenpai");
+});
+
+Deno.test("filter: when every tenpai is 片和了り the prices decide again", () => {
+  // The fallthrough contract, shared with the previewable rules: something has
+  // to be thrown, so the veto stands aside and `dojoCost` ranks the damage —
+  // which is exactly what the unrefereed policy already does.
+  const hand = tiles("123456789m1122p東");
+  const drawn = hand[hand.length - 1];
+  const discardInfo = new Map(
+    hand.map((t) => [t, { shanten: 0, katagari: true, yakuless: false }] as const),
+  );
+  const build = (preview?: ActionPreview) => baseObs({ hand, drawn, discardInfo, preview });
+  const a = new HeuristicPolicy("cpu", 1).decide(build(stubPreview({})));
+  const b = new HeuristicPolicy("cpu", 1).decide(build());
+  assert(a.t === "discard" && b.t === "discard");
+  assertEquals(a.tile, b.tile, "an empty candidate set falls back to the priced ranking");
+});
+
+Deno.test("filter: the 片和了り veto lifts when riichi is on offer", () => {
+  const hand = tiles("123456789m1122p東");
+  const keep = hand[9]; // a 1p — the split tenpai
+  const alt = hand[hand.length - 1]; // the 東 — 1向聴, but clean
+  const build = (canRiichi: boolean) =>
+    baseObs({
+      hand,
+      drawn: alt,
+      waits: [tileType(tiles("1p")[0])],
+      ukeire: [{ type: tileType(tiles("1p")[0]), live: 3 }],
+      discardInfo: new Map([
+        [keep, { shanten: 0, katagari: true, yakuless: false }],
+        [alt, { shanten: 1, katagari: false, yakuless: false }],
+      ]),
+      legal: [
+        { t: "discard", tile: keep, riichi: false, tsumogiri: false },
+        ...(canRiichi
+          ? [{ t: "discard", tile: keep, riichi: true, tsumogiri: false } as Action]
+          : []),
+        { t: "discard", tile: alt, riichi: false, tsumogiri: true },
+      ],
+      preview: stubPreview({}),
+    });
+  // 立直 is itself a yaku: it makes every wait scoring, so the shape stops being
+  // split and there is nothing to veto — the same clause `dojoCost` prices on.
+  const cure = new HeuristicPolicy("cpu", 1).decide(build(true));
+  assert(cure.t === "discard" && cure.tile === keep && cure.riichi, "riichi cures it instead");
+
+  // With no declaration available the exemption lapses and the veto bites.
+  const folded = new HeuristicPolicy("cpu", 1).decide(build(false));
+  assert(folded.t === "discard" && folded.tile === alt, "no cure ⇒ the split wait is refused");
 });

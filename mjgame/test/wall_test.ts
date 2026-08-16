@@ -123,3 +123,53 @@ Deno.test("Wall dora/ura indicators come from interleaved dead-wall slots", () =
   assertEquals(w.doraIndicators(), [w.tiles[5], w.tiles[7]]);
   assertEquals(w.uraIndicators(), [w.tiles[4], w.tiles[6]]);
 });
+
+Deno.test("Wall.peekLive follows the LIVE sequence and a kan does not consume it", () => {
+  const w = Wall.shuffled(sfc32(11));
+  w.deal(0);
+  w.revealIndicator();
+
+  // The next six live draws, read before any of them are taken.
+  const peeked = [0, 1, 2, 3, 4, 5].map((k) => w.peekLive(k));
+  assertEquals(peeked.filter((t) => t !== null).length, 6);
+
+  assertEquals(w.draw(), peeked[0]);
+  assertEquals(w.draw(), peeked[1]);
+  // Peeks are relative to what is left: after two draws, peek 0 is the third.
+  assertEquals(w.peekLive(0), peeked[2]);
+
+  // A kan draws from the dead wall (RINSHAN_ORD), so it must not advance the
+  // live sequence — only shorten what is left of the round.
+  const before = w.remaining;
+  const rinshan = w.drawRinshan();
+  assertEquals(rinshan, w.tiles[1], "first rinshan is dead-wall slot 1");
+  assertEquals(peeked.includes(rinshan), false, "rinshan is not a live-wall tile");
+  assertEquals(w.remaining, before - 1);
+  assertEquals(w.peekLive(0), peeked[2], "the kan did not eat a live tile");
+
+  assertEquals(w.draw(), peeked[2]);
+  assertEquals(w.draw(), peeked[3]);
+});
+
+Deno.test("Wall.peekLive is null past the end of the round", () => {
+  const w = Wall.shuffled(sfc32(12));
+  w.deal(0);
+  w.revealIndicator();
+  assertEquals(w.remaining, 70);
+  assertEquals(w.peekLive(69) !== null, true);
+  assertEquals(w.peekLive(70), null, "one past the last drawable tile");
+  assertEquals(w.peekLive(-1), null);
+
+  for (let i = 0; i < 70; i++) w.draw();
+  assertEquals(w.peekLive(0), null, "exhausted wall peeks at nothing");
+});
+
+Deno.test("Wall.peekNextIndicator is what the next reveal turns up", () => {
+  const w = Wall.shuffled(sfc32(13));
+  w.deal(0);
+  for (let k = 0; k < 5; k++) {
+    const peek = w.peekNextIndicator();
+    assertEquals(peek, w.revealIndicator(), `indicator ${k}`);
+  }
+  assertEquals(w.peekNextIndicator(), null, "no sixth indicator");
+});

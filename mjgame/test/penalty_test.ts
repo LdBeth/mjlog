@@ -6,6 +6,7 @@ import type { Tile } from "mjrender/model.ts";
 import type { Meld } from "mjrender/model.ts";
 import type { WinOracle } from "../src/legal.ts";
 import { ANY_WIN } from "../src/legal.ts";
+import { buildMeld } from "../src/legal.ts";
 import { runHook } from "../src/penalty/rules.ts";
 import type { Hook, RuleCtx } from "../src/penalty/mod.ts";
 import { DOJO_DEFAULT, JANKI } from "../src/rules.ts";
@@ -127,6 +128,41 @@ Deno.test("明槓: 大明槓 and 加槓 both fire, 暗槓 does not", () => {
   assert(ids("minkan", fire("on-kan", ctx(t, 1, { t: "kakan", tile: called }))));
   setHand(t, 1, tiles("5555s123m456p12s"));
   assert(!ids("minkan", fire("on-kan", ctx(t, 1, { t: "ankan", type: 22 }))));
+});
+
+/**
+ * Declare an ankan the way `round.ts` does — meld on the table first, hook
+ * after — and report whether 暗槓条件違反 charged for it. `spec` is the 14-tile
+ * hand including all four copies of `type`; the fourth copy is the draw.
+ */
+function ankanCharged(spec: string, type: number, riichi: boolean): boolean {
+  const t = makeTable();
+  const hand = tiles(spec);
+  setHand(t, 0, hand);
+  const drawn = hand.filter((id) => Math.floor(id / 4) === type)[3];
+  if (riichi) t.riichi[0] = true;
+  const action: Action = { t: "ankan", type };
+  const meld = buildMeld(0, 0, action, t);
+  t.emit({ t: "call", meld }, { e: "call", meld });
+  return ids("ankan-form", fire("on-kan", ctx(t, 0, action, drawn)));
+}
+
+Deno.test("暗槓条件違反: a wait-preserving ankan is clean, in riichi and out", () => {
+  // 111m is a plain concealed triplet; the 3p6p9p wait lives entirely in
+  // 456p78p and does not notice the kan. Regression: the hook fires AFTER the
+  // meld is on the table, and the predicate used to add the kan a second time —
+  // judging 10 tiles against two melds' worth of slots — so it answered
+  // "the wait changed" for every ankan ever declared.
+  assert(!ankanCharged("1111m456p78p111s99s", 0, true));
+  assert(!ankanCharged("1111m456p78p111s99s", 0, false));
+});
+
+Deno.test("暗槓条件違反: an ankan that shifts the wait is charged, in riichi and out", () => {
+  // 11123m456m789m99p waits 1m/4m/7m (111m + 23m) AND 9p (11m pair + 123m,
+  // shanpon-style on the 99p). Kanning the 1m destroys the second reading, so
+  // the 9p half of the wait vanishes — テンパイが変わるカン.
+  assert(ankanCharged("111123m456m789m99p", 0, true));
+  assert(ankanCharged("111123m456m789m99p", 0, false));
 });
 
 /**

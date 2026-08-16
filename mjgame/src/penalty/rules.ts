@@ -203,7 +203,13 @@ const ankanForm: DojoRule = {
     const before = analyze(t, seat, drawn, oracle);
     if (!before.tenpai && !t.riichi[seat]) out.push({ detail: "聴牌していない状態での暗槓" });
     if (isOkurikan(action.type, drawn)) out.push({ detail: "送りカン" });
-    if (wouldChangeWait(t, seat, action.type, drawn)) {
+    // This hook fires after `round.ts` has emitted the meld, so the kan is
+    // normally already among `t.melds[seat]` — but the same rule is reachable
+    // from a pre-commit caller, so ask the table rather than assume.
+    const laid = t.melds[seat].some(
+      (m) => m.kind === "ankan" && tileType(m.tiles[0]) === action.type,
+    );
+    if (wouldChangeWait(t, seat, action.type, laid)) {
       out.push({ detail: "テンパイが変わるカン" });
     }
     return out.length ? out : null;
@@ -233,7 +239,8 @@ const riichiKanSkip: DojoRule = {
     const ty = tileType(drawn);
     const counts = countsFromTiles([...t.hands[seat], drawn]);
     if (counts[ty] < 4) return null;
-    if (wouldChangeWait(t, seat, ty, drawn)) return null;
+    // Nothing has been melded — this is the discard that passed the kan up.
+    if (wouldChangeWait(t, seat, ty)) return null;
     return [{ detail: "立直中にカンできる牌をツモってカンしなかった" }];
   },
 };

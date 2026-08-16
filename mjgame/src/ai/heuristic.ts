@@ -2,6 +2,20 @@
 // mjrender's danger assessor and a dojo-aware filter on which actions it will
 // even consider.
 //
+// THE COMPLIANCE FILTER. `finalStandings` ranks one ledger entry below every
+// clean seat regardless of score, so a 禁じ手 is not an expensive move — it is a
+// losing one, and pricing it (which is all `dojoCost` can do) only decides how
+// expensive the loss was. So when the referee's own predicates are reachable
+// (`Observation.preview`, wired by every real driver) this policy asks them
+// first and DROPS every action that would be ledgered, choosing by score only
+// among what is left. `dojoCost` stays for the fallthrough: when literally every
+// candidate is charged, something has to be picked, and the prices are how.
+//
+// The filter lives where a subclass cannot reach around it: the discard
+// candidate set is narrowed inside `chooseDiscard` (private) before scoring, and
+// the call/kan hooks (protected, and overridden by the C7 planner) only PROPOSE
+// — `decide` vetoes what they return.
+//
 // The shape of the decision — score every legal action, take the argmax — is
 // the same shape a learned policy will use, so replacing this with a network
 // changes `score`, not the plumbing. Every magic number lives in one weights
@@ -16,10 +30,12 @@ import { countsFromTiles, shanten, ukeireTypes } from "mjrender/shanten.ts";
 import { doraFromIndicatorType, rankOfType, suitOfType, tileType } from "mjrender/tiles.ts";
 import { isHonor, isYaochu } from "../tiles.ts";
 import type { Observation } from "../observe.ts";
+import type { ActionPreview } from "../penalty/preview.ts";
+import { pickLesserEvil, violationPoints } from "../penalty/preview.ts";
 import type { SyncPolicy } from "../policy.ts";
 import type { Rng } from "../rng.ts";
 import { sfc32 } from "../rng.ts";
-import type { Action } from "../types.ts";
+import type { Action, Violation } from "../types.ts";
 
 export interface HeuristicWeights {
   /** Per shanten step. Deliberately dominates every other efficiency term. */
@@ -88,20 +104,26 @@ export interface HeuristicOptions {
   /** 喰いタン. Only affects whether an open tanyao counts as a confirmed yaku. */
   kuitan?: boolean;
   /**
-   * Obey the dojo 禁じ手 the CPU can see for itself (no 明槓, no first-turn
-   * honor discard, no 不聴時ドラ切り, no 地獄単騎/引っかけ riichi, no call with
-   * no route to a yaku, and no discard that leaves an open hand waiting on
-   * nothing that scores). This is an approximation of `penalty/rules.ts`, not a
-   * use of it: the ledger judges committed actions, and a policy has to decide
-   * beforehand.
+   * Obey the dojo 禁じ手. With a referee preview on the Observation this is
+   * literal — every action the ledger would charge for is dropped from the
+   * choice set by `penalty/preview.ts`, which runs the ledger's OWN predicates
+   * rather than an imitation of them. Without one (a hand-built Observation, a
+   * driver that passed no `DojoConfig`) it degrades to the older behaviour: the
+   * rules the policy can see for itself, priced by `dojoCost`.
    */
   dojo?: boolean;
   /** Probability of taking a uniformly random legal action instead. */
   epsilon?: number;
 }
 
-/** Everything derived once per decision and shared by the per-action scorers. */
-interface Ctx {
+/**
+ * Everything derived once per decision and shared by the per-action scorers.
+ *
+ * Exported because the subclass hooks below (`riskOf`, `drawBonus`, `keepBonus`)
+ * take it: a policy that reads hidden information overrides those, and cannot
+ * name their parameter type otherwise.
+ */
+export interface Ctx {
   obs: Observation;
   open: number;
   closed: boolean;
@@ -117,7 +139,7 @@ interface Ctx {
 export class HeuristicPolicy implements SyncPolicy {
   readonly name: string;
   readonly sync = true;
-  private w: HeuristicWeights;
+  protected w: HeuristicWeights;
   private kuitan: boolean;
   private dojo: boolean;
   private epsilon: number;
@@ -157,16 +179,64 @@ export class HeuristicPolicy implements SyncPolicy {
 
     const ctx = this.context(obs);
 
+    // The veto sits HERE, not inside the hooks: `chooseKan` and `chooseCall` are
+    // protected and a subclass (the C7 planner) overrides them, so a filter
+    // applied inside them would be one the plan could talk its way out of.
     const kan = this.chooseKan(ctx, legal);
-    if (kan) return kan;
+    if (kan && this.compliant(ctx, kan)) return kan;
+
+    // 立直後カン見送り is the one rule that fires on an OMISSION: while in
+    // riichi, passing up a kan that leaves the wait alone is itself the foul.
+    const forced = this.mandatoryKan(ctx, legal);
+    if (forced) return forced;
 
     const call = this.chooseCall(ctx, legal);
-    if (call) return call;
+    if (call && this.compliant(ctx, call)) return call;
 
     const discard = this.chooseDiscard(ctx, legal);
     if (discard) return discard;
 
     return legal.find((a) => a.t === "pass") ?? legal[0];
+  }
+
+  // ------------------------------------------------------- compliance filter
+
+  /** The referee's hypothetical judgement, when the driver wired one up. */
+  private referee(ctx: Ctx): ActionPreview | undefined {
+    return this.dojo ? ctx.obs.preview : undefined;
+  }
+
+  /** Would the ledger stay silent on this call/kan? True when it cannot be asked. */
+  private compliant(ctx: Ctx, a: Action): boolean {
+    const pv = this.referee(ctx);
+    if (!pv) return true;
+    if (a.t === "pon" || a.t === "chi") return pv.call(a).length === 0;
+    if (a.t === "daiminkan") {
+      return pv.call(a).length === 0 && pv.kan(a, ctx.obs.drawn).length === 0;
+    }
+    if (a.t === "ankan" || a.t === "kakan") return pv.kan(a, ctx.obs.drawn).length === 0;
+    return true;
+  }
+
+  /**
+   * The kan the dojo requires. Declining is charged (立直後カン見送り), so the
+   * only question is whether accepting is charged too — and if both are, the
+   * cheaper option wins with the tie going to declining, which is `pickLesserEvil`
+   * called with the decline first.
+   */
+  private mandatoryKan(ctx: Ctx, legal: Action[]): Action | null {
+    const pv = this.referee(ctx);
+    if (!pv || !ctx.obs.riichi[0] || ctx.obs.drawn === null) return null;
+    const skip = pv.skipKan(ctx.obs.drawn);
+    if (skip.length === 0) return null;
+    let best: { a: Action; vs: Violation[] } | null = null;
+    for (const a of legal) {
+      if (a.t !== "ankan") continue;
+      const vs = pv.kan(a, ctx.obs.drawn);
+      if (!best || violationPoints(vs) < violationPoints(best.vs)) best = { a, vs };
+    }
+    if (!best) return null;
+    return pickLesserEvil(skip, best.vs) === "b" ? best.a : null;
   }
 
   // ---------------------------------------------------------------- context
@@ -192,12 +262,17 @@ export class HeuristicPolicy implements SyncPolicy {
    * Push/fold. `push` is how much this hand is worth carrying forward, `pressure`
    * is how loud the table is. Folding is not all-or-nothing — it re-weights the
    * discard score rather than switching to a different algorithm.
+   *
+   * Protected, not because the base policy shares it, but because a subclass
+   * that runs work BEFORE `decide` (the C7 planner, which must not re-plan while
+   * the hand is being abandoned) has no other way to ask. Pure: calling it twice
+   * in a decision costs time and changes nothing.
    */
-  private shouldFold(obs: Observation): boolean {
+  protected shouldFold(obs: Observation): boolean {
     // Committed: after riichi the only legal discard is the drawn tile anyway.
     if (obs.riichi[0]) return false;
 
-    const pressure = this.pressure(obs);
+    const pressure = this.pressureOf(obs);
     if (pressure === 0) return false;
 
     let push = obs.shanten <= 0 ? 1.0 : obs.shanten === 1 ? 0.45 : obs.shanten === 2 ? 0.15 : 0;
@@ -207,19 +282,35 @@ export class HeuristicPolicy implements SyncPolicy {
     // A dealer has more to lose by folding (連荘) — nudge, don't override.
     if (obs.seatWind === 27) push += 0.08;
 
-    // 持ち点8000未満になる打ち方禁止. The ledger charges for *being* short, and
-    // by then it is too late to play differently — so the buffer, not the
-    // breach, is what the policy watches. A deal-in runs ~6000, so a stack
-    // inside that of the line is one bad discard away from the violation.
-    const buffer = obs.scores[0] - 8000;
-    if (buffer < 6000) push *= 0.35;
-    else if (buffer < 12000) push *= 0.7;
+    push *= this.bufferScale(obs);
 
     return push < 0.5 * pressure;
   }
 
-  /** Threat volume: a declared riichi counts full, a loud open hand counts half. */
-  private pressure(obs: Observation): number {
+  /**
+   * 持ち点8000未満になる打ち方禁止. The ledger charges for *being* short, and by
+   * then it is too late to play differently — so the buffer, not the breach, is
+   * what the policy watches: a stack within one deal-in of the line is one bad
+   * discard away from the violation.
+   *
+   * HOOK. `expectedLoss` is what a deal-in is assumed to cost; the base policy
+   * has no way to know, so it guesses. A subclass that can price the table
+   * overrides this, computes the figure and calls `super` with it.
+   */
+  protected bufferScale(obs: Observation, expectedLoss = 6000): number {
+    const buffer = obs.scores[0] - 8000;
+    if (buffer < expectedLoss) return 0.35;
+    if (buffer < 2 * expectedLoss) return 0.7;
+    return 1;
+  }
+
+  /**
+   * Threat volume: a declared riichi counts full, a loud open hand counts half.
+   *
+   * HOOK. Both figures are guesses standing in for "how likely is that seat to
+   * be tenpai, and for how much" — exactly what an estimator replaces.
+   */
+  protected pressureOf(obs: Observation): number {
     let p = 0;
     for (let s = 1; s < 4; s++) if (obs.riichi[s]) p += 1;
     // Danger entries carry the furo threats the assessor decided were real.
@@ -247,7 +338,13 @@ export class HeuristicPolicy implements SyncPolicy {
       else byTile.set(d.tile, [d]);
     }
 
-    const candidates = [...byTile.keys()];
+    // THE FILTER. Ask the referee about every candidate before scoring any of
+    // them, and if some subset is clean, that subset IS the choice set — no
+    // score, from this class or a subclass hook, can nominate a tile outside it.
+    // An empty result means every discard is charged, and the priced fallthrough
+    // below (`dojoCost`) decides which charge to take.
+    const clean = this.compliantDiscards(ctx, byTile);
+    const candidates = [...byTile.keys()].filter((t) => clean === null || clean.has(t));
     const shantenAfter = new Map<Tile, number>();
     let best = Infinity;
     for (const tile of candidates) {
@@ -272,7 +369,7 @@ export class HeuristicPolicy implements SyncPolicy {
     const group = byTile.get(bestTile)!;
     const plain = group.find((d) => !d.riichi);
     const riichi = group.find((d) => d.riichi);
-    if (riichi && !this.riichiBanned(ctx, bestTile)) {
+    if (riichi && !this.riichiBanned(ctx, bestTile) && this.riichiClean(ctx, riichi)) {
       // A split wait must not be left damaten. Riichi is the cure and the
       // dojo's own prescription (役なしなら即リーチ), so it overrides the
       // ordinary "is this worth declaring" judgement — but never a 禁じ手.
@@ -282,7 +379,53 @@ export class HeuristicPolicy implements SyncPolicy {
     return plain ?? group[0];
   }
 
-  private handWithout(ctx: Ctx, tile: Tile): Tile[] {
+  /**
+   * The discards the ledger would let pass, or null when the question cannot be
+   * asked (no preview wired, or the dojo leash is off) — and null again when the
+   * answer is "none of them", which is the fallthrough the prices exist for.
+   *
+   * Each tile is judged by the plain discard: the riichi variant carries extra
+   * rules (地獄単騎, 即引っかけ …) and is settled separately, once the tile is
+   * chosen, by `riichiClean`.
+   *
+   * 片和了り and 後付け are vetoed here too, even though the preview cannot see
+   * them. They are the only two ledger rules whose CHARGE lands at win time —
+   * unpreviewable by construction, since declining the win would be 見逃し — but
+   * whose only PREVENTION is a discard, right here. Leaving them to `dojoCost`
+   * makes them a price, and a price loses: the C7 planner's `planKeep` malus
+   * (5000) simply outbids both. So they are vetoes like everything else, and the
+   * prices stay for the fallthrough, where ranking damage is all that is left.
+   */
+  private compliantDiscards(
+    ctx: Ctx,
+    byTile: Map<Tile, Extract<Action, { t: "discard" }>[]>,
+  ): Set<Tile> | null {
+    const pv = this.referee(ctx);
+    if (!pv) return null;
+    const ok = new Set<Tile>();
+    for (const [tile, group] of byTile) {
+      const a = group.find((d) => !d.riichi) ?? group[0];
+      if (pv.discard(a, ctx.obs.drawn).length !== 0) continue;
+      const info = ctx.obs.discardInfo.get(tile);
+      // 片和了り, but only when riichi is not on offer: declaring is itself a
+      // yaku, so it makes every wait scoring and the shape stops being split.
+      if (!ctx.canRiichi && info?.katagari) continue;
+      // 後付け: only an open hand is stuck with a yakuless tenpai; a closed one
+      // can still cure the same shape by declaring.
+      if (!ctx.closed && info?.yakuless) continue;
+      ok.add(tile);
+    }
+    return ok.size > 0 ? ok : null;
+  }
+
+  /** Would declaring on this discard stay off the ledger? */
+  private riichiClean(ctx: Ctx, a: Extract<Action, { t: "discard" }>): boolean {
+    const pv = this.referee(ctx);
+    return !pv || pv.discard(a, ctx.obs.drawn).length === 0;
+  }
+
+  /** The 13-tile shape left behind by this discard. Protected: the hooks want it. */
+  protected handWithout(ctx: Ctx, tile: Tile): Tile[] {
     const rest = [...ctx.obs.hand];
     rest.splice(rest.lastIndexOf(tile), 1);
     return rest;
@@ -324,15 +467,60 @@ export class HeuristicPolicy implements SyncPolicy {
       if (counts[ty] === 1 && isHonor(ty)) eff -= this.w.isolatedHonor * Math.min(obs.junme, 12);
     }
 
-    const level = obs.danger.get(tileType(tile))?.level ?? "安全";
-    const risk = this.w.danger[level];
-
     // The dojo cost is deliberately outside `ctx.eff`: folding must not make a
-    // 禁じ手 cheap. The ledger charges the same either way.
-    return ctx.eff * eff - ctx.def * risk - this.dojoCost(ctx, tile, sh);
+    // 禁じ手 cheap. The ledger charges the same either way. The two bonus hooks
+    // sit outside it too, and outside `ctx.eff`/`ctx.def`: they are already in
+    // score units and already know whether the policy is folding.
+    return ctx.eff * eff - ctx.def * this.riskOf(ctx, tile) +
+      this.drawBonus(ctx, tile) - this.keepBonus(ctx, tile) -
+      this.dojoCost(ctx, tile, sh);
   }
 
-  /** What the ledger would charge for this discard, in score units. */
+  /**
+   * What letting this tile go costs defensively, in score units, BEFORE the
+   * fold multiplier.
+   *
+   * HOOK. The base policy reads mjrender's four danger levels off the
+   * observation; a policy holding a per-tile deal-in probability and a payment
+   * to go with it computes the product instead. Whatever the source, "安全"
+   * must stay free — that level means provably safe (genbutsu), and no estimate
+   * outranks a proof.
+   */
+  protected riskOf(ctx: Ctx, tile: Tile): number {
+    const level = ctx.obs.danger.get(tileType(tile))?.level ?? "安全";
+    return this.w.danger[level];
+  }
+
+  /**
+   * A bonus ADDED to this discard's score. Zero here: the base policy has no
+   * one-turn lookahead. Overridden by a policy that knows what is coming off
+   * the wall — the discard whose kept shape accepts the incoming tile, the one
+   * that keeps a copy of a dora about to be flipped.
+   */
+  protected drawBonus(_ctx: Ctx, _tile: Tile): number {
+    return 0;
+  }
+
+  /**
+   * A malus SUBTRACTED from this discard's score: a reason to hold the tile
+   * back this turn rather than spend it. Zero here. Overridden by a policy that
+   * can see a tile is about to become genbutsu anyway, and would rather spend a
+   * less useful safe tile first.
+   */
+  protected keepBonus(_ctx: Ctx, _tile: Tile): number {
+    return 0;
+  }
+
+  /**
+   * What the ledger would charge for this discard, in score units.
+   *
+   * With the compliance filter live this is mostly moot for the rules it shares
+   * with the preview — a charged discard never reaches the score loop unless
+   * EVERY discard is charged, and then these prices are exactly what ranks the
+   * damage. The two win-time rules are different: 片和了り and 後付け fire when a
+   * hand is CASHED, which a policy cannot decline without going furiten, so the
+   * only prevention is here, at the discard that builds the wait.
+   */
   private dojoCost(ctx: Ctx, tile: Tile, sh: number): number {
     if (!this.dojo) return 0;
     const { obs } = ctx;
@@ -442,7 +630,15 @@ export class HeuristicPolicy implements SyncPolicy {
 
   // ------------------------------------------------------------------ calls
 
-  private chooseCall(ctx: Ctx, legal: Action[]): Action | null {
+  /**
+   * Which pon/chi to take, if any: the one that buys a shanten step, subject to
+   * the open hand still having a route to a yaku.
+   *
+   * HOOK (protected only for that reason — the base behaviour is unchanged): a
+   * policy with a locked-on target overrides this to accept only the calls its
+   * plan asked for, and to decline the rest even when they are faster.
+   */
+  protected chooseCall(ctx: Ctx, legal: Action[]): Action | null {
     const calls = legal.filter((a) => a.t === "pon" || a.t === "chi");
     if (calls.length === 0) return null;
     if (ctx.folding) return null;
@@ -543,7 +739,8 @@ export class HeuristicPolicy implements SyncPolicy {
 
   // -------------------------------------------------------------------- kan
 
-  private chooseKan(ctx: Ctx, legal: Action[]): Action | null {
+  /** HOOK, same reasoning as `chooseCall`; no subclass overrides it yet. */
+  protected chooseKan(ctx: Ctx, legal: Action[]): Action | null {
     const { obs } = ctx;
 
     const ankan = legal.find((a) => a.t === "ankan");

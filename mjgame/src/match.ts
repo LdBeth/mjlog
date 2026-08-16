@@ -252,6 +252,7 @@ export function runMatchSync(policies: SyncPolicy[], opts: MatchOptions): MatchR
         req.k === "turn" ? req.drawn : null,
         opts.scorer,
         req.k === "claim" ? req.tile : null,
+        opts.dojo,
       );
       reply = policies[req.seat].decide(obs);
     }
@@ -287,6 +288,7 @@ export async function runMatch(policies: Policy[], opts: MatchOptions): Promise<
         req.k === "turn" ? req.drawn : null,
         opts.scorer,
         req.k === "claim" ? req.tile : null,
+        opts.dojo,
       );
       reply = await policies[req.seat].decide(obs);
     }

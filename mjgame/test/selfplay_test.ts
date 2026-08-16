@@ -4,6 +4,7 @@
 // Drives the real scorer, so the conservation checks cover actual payouts.
 
 import { assert, assertEquals } from "@std/assert";
+import { HeuristicPolicy } from "../src/ai/heuristic.ts";
 import { RandomPolicy } from "../src/ai/random.ts";
 import { dojoHooks } from "../src/dojo.ts";
 import type { MatchResult } from "../src/match.ts";
@@ -182,4 +183,42 @@ Deno.test("self-play: every round ends within the 70-draw budget", () => {
       assert(draws <= 70, `seed ${seed} kyoku ${round.kyoku}: ${draws} draws`);
     }
   }
+});
+
+/**
+ * The rules a compliance-filtered seat can still be charged for. Everything
+ * else in `RULES` is previewable, and a policy that can preview a violation and
+ * still commits it has a bug — this is the test that says so over real play
+ * rather than over a fixture. See `penalty/preview.ts` for why each of these
+ * cannot be vetoed: 持ち点8000点未満 fires on payments, 片和了り/後付け fire on
+ * taking a win (declining is 見逃し), and 立直後カン見送り is the horn of a
+ * dilemma the ledger creates for itself (`ankan-form` charges the kan too).
+ */
+const UNAVOIDABLE = new Set(["under-8000", "katagari", "atozuke", "riichi-kan-skip"]);
+
+Deno.test("dojo filter: heuristic seats file no avoidable violation in 20 hanchan", () => {
+  const seen = new Map<string, number>();
+  for (let seed = 1; seed <= 20; seed++) {
+    const r = runMatchSync(
+      SEATS.map((s) => new HeuristicPolicy(`H${s}`, seed * 4 + s)),
+      {
+        seed,
+        cfg: JANKI,
+        dojo: DOJO_HEADLESS,
+        scorer,
+        ...dojoHooks({ dojo: DOJO_HEADLESS, oracle: scorer }),
+      },
+    );
+    for (const v of r.ledger) seen.set(v.rule, (seen.get(v.rule) ?? 0) + 1);
+    const stray = r.ledger.filter((v) => !UNAVOIDABLE.has(v.rule));
+    assertEquals(
+      stray.map((v) => `P${v.seat} ${v.rule}: ${v.detail}`),
+      [],
+      `seed ${seed}: an avoidable 禁じ手 reached the ledger`,
+    );
+  }
+  // The filter must be doing work, not merely finding nothing to do: the same
+  // 20 hanchan under the pre-filter policy filed 第一打字牌切り, 不聴時ドラ切り,
+  // 裸単騎, ドラ切り後の手出し, 暗槓条件違反, 即引っかけ and 役満関連牌切り.
+  assert(seen.size > 0, "the ledger cannot be empty — 持ち点8000点未満 always fires");
 });

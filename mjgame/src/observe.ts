@@ -15,6 +15,9 @@ import { Table } from "./table.ts";
 import type { WinOracle } from "./legal.ts";
 import { ANY_WIN } from "./legal.ts";
 import { analyze } from "./hand.ts";
+import type { ActionPreview } from "./penalty/preview.ts";
+import { makePreview } from "./penalty/preview.ts";
+import type { DojoConfig } from "./rules.ts";
 import type { Action, Seat } from "./types.ts";
 import { relSeat, SEATS } from "./types.ts";
 
@@ -94,6 +97,18 @@ export interface Observation {
   /** Per candidate discard *type*, computed lazily-ish on construction. */
   danger: Map<number, DangerAssessment>;
 
+  /**
+   * The dojo referee, asked hypothetically: "would this action be ledgered?".
+   * See `penalty/preview.ts` — it runs the real `DojoRule.check` predicates
+   * against a hypothetical table, so a policy can DECLINE a 禁じ手 instead of
+   * merely pricing it.
+   *
+   * Present only when the driver supplied a `DojoConfig` (both match drivers
+   * do; hand-built Observations in tests do not), and valid only for the
+   * decision this Observation was built for — it reads the live Table.
+   */
+  preview?: ActionPreview;
+
   violations: number[]; // relative counts
   legal: Action[];
 }
@@ -146,6 +161,7 @@ export function observe(
   drawn: Tile | null,
   oracle: WinOracle = ANY_WIN,
   claimTile: Tile | null = null,
+  dojo?: DojoConfig,
 ): Observation {
   const rel = <T>(pick: (s: Seat) => T): T[] => SEATS.map((s) => pick(((seat + s) % 4) as Seat));
 
@@ -210,6 +226,10 @@ export function observe(
     danger,
     violations: vio,
     legal,
+    // Only when the driver said which rules are in force: a preview judged by a
+    // different DojoConfig than the round is played under would steer the policy
+    // away from moves nobody is charging for (and towards ones somebody is).
+    preview: dojo?.enabled ? makePreview(t, seat, dojo, oracle) : undefined,
   };
 }
 

@@ -307,6 +307,24 @@ export const scorer: Scorer = {
   },
 };
 
+/**
+ * What `fromWho` would pay if `who` ronned `tile` RIGHT NOW: the win's points
+ * plus the 本場 surcharge, or null when that is not a valid win (no yaku, hand
+ * not complete). 供託 is excluded on purpose — the riichi sticks are on the
+ * table already and cost the discarder nothing.
+ *
+ * A hypothetical: nothing is applied to the Table, and the caller may hand in a
+ * `tile` that is not actually in play (an oracle probing "would this type deal
+ * in" uses `type * 4`, the same aka-blind approximation as `hand.ts`). The
+ * legality gate's own flag set is reused, so 海底/河底 and 立直/一発 are priced
+ * exactly as the round would price them.
+ */
+export function ronValue(t: Table, who: Seat, fromWho: Seat, tile: Tile): number | null {
+  const info = scorer.scoreWin(t, who, fromWho, tile, gateFlags(t, who, false));
+  if (!info) return null;
+  return info.points + t.round.honba * 300;
+}
+
 /** The ura indicators actually in play for this win (see `buildContext`). */
 function uraIndicatorsOf(t: Table, flags: WinFlags): Tile[] {
   if (!flags.riichi || !t.cfg.uradora) return [];

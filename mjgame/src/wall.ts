@@ -126,6 +126,32 @@ export class Wall {
     return this.tiles[5 + 2 * this.indicators++];
   }
 
+  /**
+   * The tile the (k+1)-th FUTURE live draw would return, without taking it:
+   * `peekLive(0)` is what the very next `draw()` yields. Null once `k` runs past
+   * what the round still has to give.
+   *
+   * LIVE ONLY — rinshan draws come out of the dead wall (`RINSHAN_ORD`), so a
+   * kan does not move this sequence along; it only shortens it (`remaining`
+   * counts live and rinshan draws together). Callers that want "the tile seat X
+   * draws next" must do their own turn arithmetic on top, and own the
+   * assumption that no call intervenes.
+   *
+   * A pure read: no state changes, so an oracle may call it freely.
+   */
+  peekLive(k: number): Tile | null {
+    if (k < 0 || k >= this.remaining) return null;
+    const idx = 135 - this.liveTaken - k;
+    if (idx < 14 + this.kans) return null;
+    return this.tiles[idx];
+  }
+
+  /** What the next `revealIndicator()` would turn up, or null after the 5th. */
+  peekNextIndicator(): Tile | null {
+    if (this.indicators >= 5) return null;
+    return this.tiles[5 + 2 * this.indicators];
+  }
+
   /** Indicators revealed so far, in order. */
   doraIndicators(): Tile[] {
     const out: Tile[] = [];
