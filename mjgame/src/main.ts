@@ -2,8 +2,23 @@
 
 import { RandomPolicy } from "./ai/random.ts";
 import { HeuristicPolicy } from "./ai/heuristic.ts";
-import { AugmentedHeuristic, noisyReads, oracleReads, parseChannels } from "./ai/augmented.ts";
-import type { OracleChannel } from "./ai/augmented.ts";
+import type { HeuristicWeights } from "./ai/heuristic.ts";
+import {
+  AugmentedHeuristic,
+  calibrationReads,
+  curriculumReads,
+  noisyReads,
+  oracleReads,
+  parseChannels,
+} from "./ai/augmented.ts";
+import type { AugmentedWeights, OracleChannel } from "./ai/augmented.ts";
+import { CalibrationWriter } from "./ai/calibration.ts";
+import type { CalibRecord } from "./ai/calibration.ts";
+import { computedReads, mergeComputed } from "./ai/computed.ts";
+import type { ComputedTraceRef, ComputedWeights } from "./ai/computed.ts";
+import { parseConsumerParams } from "./ai/consumer.ts";
+import type { ConsumerParams } from "./ai/consumer.ts";
+import { DEFAULT_STANDINGS_WEIGHTS } from "./ai/standings.ts";
 import { NeuralPolicy } from "./rl/policy.ts";
 import { RecordingPolicy, TrajectoryWriter, writeMatchEnd } from "./rl/record.ts";
 import { encodeOracle } from "./rl/features.ts";
@@ -39,19 +54,37 @@ interface Args {
   timerBank: number;
   noIntro: boolean;
   /**
-   * CPU kinds, "h" heuristic, "r" random, "n" neural or "o" oracle-augmented.
+   * CPU kinds, "h" heuristic, "r" random, "n" neural, "o" oracle-augmented or
+   * "k" 計算 (the combinatorial reader).
    * selfplay/bench read one char per absolute seat (seat 0 first). play deals
    * the first three chars to the CPU seats in seat order, skipping wherever the
    * human landed — so "nhhh" always yields exactly one neural CPU regardless of
-   * the human's seat. "o" is headless-only: it reads the live Table.
+   * the human's seat. "o" is headless-only: it reads the live Table. "k" is not
+   * — it reads nothing the player at the table cannot count for themselves.
    */
   seats: string;
+  /** Engage the C7 planner on the "k" seats (`--plan`). */
+  plan: boolean;
+  /**
+   * Engage 順位効用 on seat 0 of the test arm (`--standings`). Seat 0 only, and
+   * in `paired` the A arm only: the layer is measured the way every other
+   * candidate is, against a baseline that never received it.
+   */
+  standings: boolean;
   /** Hidden-information channels an "o" seat is allowed to see. */
   oracle: Set<OracleChannel>;
   /** `--oracle` as typed, for the report line. */
   oracleSpec: string;
   /** Per-decision probability that an "o" seat loses each information group. */
   noise: number;
+  /**
+   * `--curriculum=E`: seat 0 of the test arm reads the ORACLE, with each
+   * information group dropped per decision at rate E and answered by the 計算
+   * reader instead of by nothing.
+   * `undefined` = off, and off is the only state in which nothing changes.
+   * E=1 is bit-identical to the plain "k" seat; E=0 to a pure oracle seat.
+   */
+  curriculum?: number;
   /** Manifest for the "n" seats. */
   weights: string;
   /** Softmax temperature for the "n" seats; 0 keeps them deterministic. */
@@ -65,6 +98,38 @@ interface Args {
    * importance ratio — bc.py is the sole intended consumer.
    */
   recordAll: boolean;
+  /** `--ktune` as typed (report line), and the vector it loaded. */
+  ktunePath: string;
+  ktune?: KTune;
+  /**
+   * `--ktune-b`: the CONTROL arm's 感性 vector (M10d). The scalar-space mirror
+   * of `--consumer-b` — with it the B arm stops being plain hhhh and becomes the
+   * same seat layout as A, carrying a DIFFERENT `--ktune` file. `paired` only.
+   */
+  ktuneBPath: string;
+  ktuneB?: KTune;
+  /**
+   * `--consumer` as typed (report line), and the curve set it loaded. M9: the
+   * learned consumer of the evidence vector, on seat 0 of the test arm only —
+   * the same discipline `--standings` follows, and for the same reason.
+   */
+  consumerPath: string;
+  consumer?: ConsumerParams;
+  /**
+   * `--consumer-b`: the CONTROL arm's curve set, which turns `paired` from an
+   * absolute measurement into a candidate-vs-incumbent one. `paired` only.
+   */
+  consumerBPath: string;
+  consumerB?: ConsumerParams;
+  /**
+   * `--calibrate=PATH`: seat 0 (a "k" seat) writes one calibration record per
+   * decision to PATH — the 計算 model's predictions paired with the engine's
+   * truth. The seat plays EXACTLY as it would without the flag; see
+   * `calibrationReads`. `paired` records the A arm only.
+   */
+  calibrate: string;
+  /** `paired --json`: one line of machine-readable stats instead of tables. */
+  json: boolean;
   help: boolean;
 }
 
@@ -73,6 +138,76 @@ const DEFAULT_WEIGHTS = "weights/manifest.json";
 
 /** The ablation's standing default: the three defensive channels. */
 const DEFAULT_ORACLE = "C1,C2,C3";
+
+/**
+ * What `--calibrate` asks the oracle for, fixed and independent of `--oracle`:
+ * the ron mask (C1), tenpai (C2) and the payment (C3) — the three truths the
+ * 計算 model makes a claim about. Tying it to the user's channel set would let a
+ * `--oracle=none` run write records with no truth in them.
+ */
+const CALIBRATION_CHANNELS = parseChannels("C1,C2,C3")!;
+
+/**
+ * A tuned 感性 vector: the three weight objects a "k" seat is built from, each
+ * section a PARTIAL merged over its own defaults by the constructor that
+ * receives it.
+ *
+ * Deliberately un-validated. `scripts/tune.ts` writes these files and
+ * `ComputedWeights` grows fields as the reader learns to count more; a key
+ * whitelist here would have to be edited in lockstep with that, and would
+ * reject a forward-compatible file by silently dropping the very term under
+ * test. Unknown keys are simply spread onto the defaults and ignored by
+ * whatever does not read them.
+ */
+export interface KTune {
+  heuristic?: Partial<HeuristicWeights>;
+  augment?: Partial<AugmentedWeights>;
+  computed?: Partial<ComputedWeights>;
+}
+
+/**
+ * Read a `--ktune` file. Unreadable or malformed is fatal, never silent.
+ * `flag` names the option in the diagnostics, so `--ktune-b` reports itself.
+ */
+export function loadKtune(path: string, flag = "--ktune"): KTune {
+  let text: string;
+  try {
+    text = Deno.readTextFileSync(path);
+  } catch (e) {
+    return die(`${flag} のファイルが読めません: ${path}\n${e instanceof Error ? e.message : e}`);
+  }
+  let json: unknown;
+  try {
+    json = JSON.parse(text);
+  } catch (e) {
+    return die(`${flag} のJSONが壊れています: ${path}\n${e instanceof Error ? e.message : e}`);
+  }
+  if (typeof json !== "object" || json === null || Array.isArray(json)) {
+    die(`${flag} はオブジェクト {heuristic, augment, computed} である必要があります: ${path}`);
+  }
+  // Sections only — the contents pass through verbatim.
+  const k = json as KTune;
+  return { heuristic: k.heuristic, augment: k.augment, computed: k.computed };
+}
+
+/**
+ * Read a `--consumer` file. Unreadable, malformed or incomplete is fatal: a
+ * silently-defaulted consumer would measure the hand-written score and call it
+ * the fitted one.
+ */
+export function loadConsumer(path: string): ConsumerParams {
+  let text: string;
+  try {
+    text = Deno.readTextFileSync(path);
+  } catch (e) {
+    return die(`--consumer のファイルが読めません: ${path}\n${e instanceof Error ? e.message : e}`);
+  }
+  try {
+    return parseConsumerParams(JSON.parse(text));
+  } catch (e) {
+    return die(`--consumer のJSONが不正です: ${path}\n${e instanceof Error ? e.message : e}`);
+  }
+}
 
 /** What an "o" seat needs: the live-Table tap and the channels it may read. */
 export interface OracleWiring {
@@ -93,8 +228,84 @@ function makePolicy(
   weights = DEFAULT_WEIGHTS,
   temp = 0,
   oracle?: OracleWiring,
+  plan = false,
+  ktune?: KTune,
+  standings = false,
+  consumer?: ConsumerParams,
+  curriculum?: number,
+  calibrate?: (rec: CalibRecord) => void,
 ): SyncPolicy {
+  // 順位効用 (`--standings`). Only the heuristic family has a push/fold gate to
+  // scale, so only "h" and "k" can carry it; the caller has already decided WHICH
+  // seat is allowed to (see `headless`), because a layer applied to every seat at
+  // once would move both sides of a paired measurement.
+  const rank = standings ? { standings: DEFAULT_STANDINGS_WEIGHTS } : undefined;
   if (kind === "r") return new RandomPolicy(name, seed);
+  if (kind === "k") {
+    // 計算. The same consumption terms as an "o" seat, fed by exact counting
+    // over the Observation instead of by the engine's hidden state — so unlike
+    // "o" this seat needs no tap on the Table and is legal in `play` too.
+    // `--oracle` / `--noise` configure `oracleReads` and do not reach it.
+    //
+    // `--ktune` reaches THIS seat and only this seat: the outcome tuner grades a
+    // candidate 感性 vector against an untouched baseline, so anything the
+    // vector could also move on the other side of the comparison would make the
+    // measurement circular. A file that names `planner` outranks `--plan`,
+    // because a vector is a complete description of a seat.
+    //
+    // M10a: with `calibrate` on, the provider also fills a trace out-param on
+    // every call. The trace is written to a file and never read by the policy,
+    // so the seat below is the same seat either way — that is what the paired
+    // self-diff test in `test/calibration_test.ts` pins.
+    const traceRef: ComputedTraceRef = { t: null };
+    const computed = computedReads(
+      { planner: plan, ...ktune?.computed },
+      calibrate ? traceRef : undefined,
+    );
+    // M9c curriculum. Still the 計算 seat — the reader is what changes: each
+    // information group is answered by the oracle with probability 1−E and by
+    // the counting reader with probability E, per decision. E=1 returns
+    // `computed` itself, so the seat this trains for and the seat it is finally
+    // graded as are the same object. Headless only, like every oracle path: no
+    // `oracle` wiring (i.e. `play`) means the curriculum is silently impossible,
+    // and `parseArgs` refuses the flag there rather than letting it be ignored.
+    if (calibrate && !oracle) {
+      die("--calibrate は selfplay / paired 専用です (真値を読む Table の tap が要ります)");
+    }
+    const reads = calibrate
+      ? calibrationReads(
+        computed,
+        traceRef,
+        // The recorder's own channel set, deliberately NOT `--oracle`: the three
+        // truths the model makes claims about (tenpai, the ron mask, the
+        // payment), whatever an "o" seat elsewhere in the run was allowed.
+        oracleReads(oracle!.get, scorer, CALIBRATION_CHANNELS),
+        calibrate,
+      )
+      : curriculum !== undefined && oracle
+      ? curriculumReads(
+        oracleReads(oracle.get, scorer, oracle.channels),
+        computed,
+        curriculum,
+      )
+      : computed;
+    return new AugmentedHeuristic(
+      name,
+      seed,
+      reads,
+      {
+        // 順位効用 is merged AFTER the tuned vector so the two compose: a
+        // `--ktune` file tunes the terms 順位効用 then scales.
+        weights: rank ? { ...ktune?.heuristic, ...rank } : ktune?.heuristic,
+        augment: ktune?.augment,
+        // M9 composes AFTER `--ktune`, and orthogonally to it: the curves
+        // replace the CONSUMPTION of the evidence, while the tuned vector still
+        // decides what the evidence says (`riskOf`'s ladder, the fold scales,
+        // the 計算 reader's own constants).
+        consumer,
+      },
+    );
+  }
   if (kind === "o") {
     // The oracle reads the round in play through `MatchOptions.tableRef`. There
     // is no such tap in `play` — and a CPU that could see the human's hand is
@@ -122,7 +333,7 @@ function makePolicy(
       );
     }
   }
-  return new HeuristicPolicy(name, seed);
+  return new HeuristicPolicy(name, seed, { weights: rank, consumer });
 }
 
 function parseArgs(argv: string[]): Args {
@@ -136,6 +347,8 @@ function parseArgs(argv: string[]): Args {
     timerBank: 10_000,
     noIntro: false,
     seats: "hhhh",
+    plan: false,
+    standings: false,
     oracle: parseChannels(DEFAULT_ORACLE)!,
     oracleSpec: DEFAULT_ORACLE,
     noise: 0,
@@ -143,6 +356,12 @@ function parseArgs(argv: string[]): Args {
     temp: 0,
     record: "",
     recordAll: false,
+    ktunePath: "",
+    ktuneBPath: "",
+    consumerPath: "",
+    consumerBPath: "",
+    calibrate: "",
+    json: false,
     help: false,
   };
   for (const arg of argv) {
@@ -174,9 +393,33 @@ function parseArgs(argv: string[]): Args {
       const v = Number(arg.slice(8));
       if (!Number.isFinite(v) || v < 0 || v > 1) die(`--noise は 0..1 の実数: ${arg.slice(8)}`);
       a.noise = v;
-    } else if (arg.startsWith("--seats=")) {
+    } else if (arg.startsWith("--curriculum=")) {
+      const v = Number(arg.slice(13));
+      if (!Number.isFinite(v) || v < 0 || v > 1) {
+        die(`--curriculum は 0..1 の実数: ${arg.slice(13)}`);
+      }
+      a.curriculum = v;
+    } else if (arg.startsWith("--ktune-b=")) {
+      a.ktuneBPath = arg.slice(10);
+      a.ktuneB = loadKtune(a.ktuneBPath, "--ktune-b");
+    } else if (arg.startsWith("--ktune=")) {
+      a.ktunePath = arg.slice(8);
+      a.ktune = loadKtune(a.ktunePath);
+    } else if (arg.startsWith("--consumer=")) {
+      a.consumerPath = arg.slice(11);
+      a.consumer = loadConsumer(a.consumerPath);
+    } else if (arg.startsWith("--consumer-b=")) {
+      a.consumerBPath = arg.slice(13);
+      a.consumerB = loadConsumer(a.consumerBPath);
+    } else if (arg.startsWith("--calibrate=")) {
+      a.calibrate = arg.slice(12);
+      if (!a.calibrate) die("--calibrate には書き出し先のパスが要ります");
+    } else if (arg === "--json") a.json = true;
+    else if (arg === "--plan") a.plan = true;
+    else if (arg === "--standings") a.standings = true;
+    else if (arg.startsWith("--seats=")) {
       const v = arg.slice(8);
-      if (!/^[hrno]{1,4}$/.test(v)) die(`--seats は h, r, n, o を4文字まで: ${v}`);
+      if (!/^[hrnok]{1,4}$/.test(v)) die(`--seats は h, r, n, o, k を4文字まで: ${v}`);
       // Short forms repeat the last letter: "hr" ⇒ "hrrr".
       a.seats = v.padEnd(4, v[v.length - 1]);
     } else if (arg.startsWith("--glyphs=")) {
@@ -187,7 +430,52 @@ function parseArgs(argv: string[]): Args {
     else if (!a.cmd) a.cmd = arg;
     else die(`余分な引数: ${arg}`);
   }
+  const err = argError(a);
+  if (err) die(err);
   return a;
+}
+
+/** The subset of `Args` the cross-flag rules below actually read. */
+export type ArgCheck =
+  & Pick<Args, "cmd" | "seats" | "calibrate">
+  & Partial<Pick<Args, "curriculum" | "consumerBPath" | "ktuneBPath">>;
+
+/**
+ * Cross-flag legality, as a MESSAGE rather than an exit. Every rule here refuses
+ * a layout rather than ignoring it — a flag that quietly does nothing is worse
+ * than one that is missing — and returning the message instead of calling
+ * `die` is what lets a test read the rules without spawning a process.
+ */
+export function argError(a: ArgCheck): string | null {
+  // The curriculum reads the live Table (that is what makes it a curriculum),
+  // so it belongs to the headless drivers alone.
+  if (a.curriculum !== undefined && a.cmd === "play") {
+    return "--curriculum は selfplay / bench / paired 専用です (play では隠蔽情報を読めません)";
+  }
+  // --consumer-b / --ktune-b name the CONTROL arm, and only `paired` has one.
+  if (a.consumerBPath && a.cmd !== "paired") return "--consumer-b は paired 専用です";
+  if (a.ktuneBPath && a.cmd !== "paired") return "--ktune-b は paired 専用です";
+  // The recorder needs BOTH readers: the 計算 seat whose predictions are being
+  // graded (seat 0, and only a "k" seat computes them) and the oracle's tap on
+  // the live Table (headless drivers only). Every one of these is refused rather
+  // than ignored — a calibration run that quietly recorded nothing would be
+  // discovered a thousand hanchan later.
+  if (a.calibrate) {
+    if (a.cmd !== "selfplay" && a.cmd !== "paired") {
+      return "--calibrate は selfplay / paired 専用です (play では隠蔽情報の真値を読めません)";
+    }
+    if (a.seats[0] !== "k") {
+      return `--calibrate は席0が k席 (計算) のときだけ使えます: --seats=${a.seats}\n` +
+        "計算の読みを真値と突き合わせる機能なので、記録する読み手が要ります。";
+    }
+    if (a.curriculum !== undefined) {
+      // The curriculum REPLACES the computed answer with truth part of the time;
+      // calibration measures the computed answer against truth. Recording under
+      // a curriculum would grade a seat nobody ships.
+      return "--calibrate と --curriculum は併用できません (較正するのは素の計算の読みです)";
+    }
+  }
+  return null;
 }
 
 function die(msg: string): never {
@@ -216,12 +504,24 @@ const USAGE = `mjgame — 雀鬼流ルールの4人麻雀 (人間1 + CPU3)
                       マイナス表示になる。打牌は強制されず、遅さの代償は
                       雀鬼流の長考ペナルティのみ
   --seats=hrrn        CPUの種類: h=手作り評価関数, r=ランダム,
-                      n=学習済みニューラルポリシー, o=オラクル増補 (既定 hhhh)。
+                      n=学習済みニューラルポリシー, o=オラクル増補,
+                      k=計算 (公開情報だけの組合せ読み) (既定 hhhh)。
                       短く書くと最後の文字を繰り返す ("hr" ⇒ "hrrr")。
                       selfplay/bench では席番号ごと。play では人間の席を
                       飛ばして先頭3文字を席順に割り当てるので、"nhhh" なら
                       必ずAI(学習済み)が1人入る。n のCPUは AI東 のように表示。
-                      o は隠蔽情報 (他家の手牌・山) を直接読むので headless 専用
+                      o は隠蔽情報 (他家の手牌・山) を直接読むので headless 専用。
+                      k は隠蔽情報を一切見ない (スジ・カベ・現物・見えている枚数・
+                      副露・リーチ・巡目だけを数える) ので play でも使える
+  --plan              k席で最大利益ロックオン立案 (C7) を有効にする (既定 無効)。
+                      o席の立案は --oracle=C7O/C7P 側で指定する
+  --standings         A腕席0で順位効用レイヤを有効にする (順位分布モデルで押し引きを
+                      尺度化)。持ち点・局数・供託・本場という公開情報だけから
+                      最終着順分布を閉形式で解き、和了の値打ちと放銃の代償を
+                      平場 (全員25000) 比の2つの倍率にして押し引きに掛ける。
+                      雀鬼流の補正として「順位−1の仮想プレイヤー」を常に自分の
+                      8000点上に置くので、独走トップでも打つのを止めない。
+                      h席・k席に効き、対照の B腕 (hhhh) には決して渡らない
   --oracle=C1,C2,C3   o席が読んでよい情報チャネル (既定 C1,C2,C3)。
                       C1=放銃真値 C2=聴牌真値 C3=打点真値 C4=次のツモ
                       C5=次の槓ドラ C6=リーチ者の次のツモ。none で全部切る
@@ -236,6 +536,50 @@ const USAGE = `mjgame — 雀鬼流ルールの4人麻雀 (人間1 + CPU3)
                       扱いになり、その項だけ手作り評価関数の推測に戻る。
                       E を振ると「どこまで読みが粗くなると優位が消えるか」が測れる。
                       E=1 では C7O が C7P と同じ挙動まで落ちる (立案機構は残る)
+  --curriculum=E      A腕席0 (k席) の読みを「オラクル→計算」のカリキュラムにする。
+                      1判断ごとに情報グループを確率Eで落とし、落ちた分は
+                      「無い」ではなく計算 (公開情報だけの読み) の答えで埋める。
+                      E=0 は純オラクル席と、E=1 は素の k席とビット単位で同一。
+                      --oracle= で読ませるチャネルを選ぶ。selfplay/bench/paired 専用。
+                      学習用: 消費曲線を鍛えるとき、読みの精度だけを連続に劣化させる
+  --ktune=PATH        k席の感性ベクトル {heuristic, augment, computed} のJSON。
+                      selfplay / bench / paired のみ。paired では A腕の k席
+                      だけに効き、対照の B腕 (hhhh) には決して渡らない。
+                      scripts/tune.ts が書き出す形式
+  --ktune-b=PATH      paired の対照 (B腕) にも感性ベクトルを積む。B腕は hhhh ではなく
+                      A腕と同じ席種・同じ読み・同じ曲線のまま、--ktune の file だけ
+                      こちらになる。つまり測るのは「候補 − 現行」であって
+                      「候補 − 素の hhhh」ではない。--consumer-b のスカラ版で、
+                      小さな摂動は大半の局をビット単位で不変に保つので、同じシード数で
+                      桁違いに細かい差が読める (探索器の分散削減)。--consumer-b とも
+                      併用でき、その場合 B腕は自前の感性ベクトルと自前の曲線を持つ。
+                      paired 専用
+  --consumer=PATH     M9: 打牌評価の「消費」を単調曲線に差し替える (証拠ベクトルの
+                      名前つき素性 → 4節点の区分線形写像17本)。selfplay / bench /
+                      paired の席0だけに効き、対照の B腕 (hhhh) には決して渡らない。
+                      計算 (証拠の作り方) は一切変えない — 変わるのは消費だけ。
+                      scripts/consumer_init.ts が書き出す初期値は現行の手書き評価と
+                      ビット単位で同一なので、--consumer=weights/consumer-init.json
+                      を渡した paired は必ず全局同着になる (これが健全性検査)。
+                      --ktune と併用可 (危険度の梯子や降り倍率は感性側が決める)
+  --consumer-b=PATH   paired の対照 (B腕) にも曲線を積む。B腕は hhhh ではなく
+                      A腕と同じ席種・同じ --ktune・同じ読みのまま、曲線だけ
+                      この file になる。つまり測るのは「候補 − 現行」であって
+                      「候補 − 素の hhhh」ではない。小さな摂動は大半の局を
+                      ビット単位で不変に保つので、同じシード数で桁違いに
+                      細かい差が読める (探索器の分散削減)。paired 専用
+  --calibrate=PATH    M10a: 席0 (k席) の1判断ごとに「計算の予測」と「真値」を
+                      対にした較正記録を JSONL で書き出す。selfplay / paired 専用で、
+                      paired では A腕だけ。打牌は一切変わらない (記録は out-param で、
+                      席が読む Reads は素の計算のまま — だから記録あり/なしで
+                      全局ビット単位で同一になる)。
+                      1行1判断: 他家3人ぶんの聴牌確率・待ちの形の素の枚数 (パラメータ
+                      非依存の整数) ・副露の内容読み・打点の材料と、真値の聴牌/ロン牌
+                      集合/打点。パラメータを変えた再評価は再対局なしで閉じた式で
+                      できる。読むのは scripts/calibrate_report.ts。
+                      1半荘あたり約220KB (判断190行) — 出力先は作業用ディレクトリに
+  --json              paired の結果を1行のJSONで出す (表の代わり)。
+                      scripts/tune.ts が読む機械可読出力
   --weights=PATH      n席が読む manifest.json (既定 weights/manifest.json)。
                       読めなければ起動時にエラー — trainer か train/randinit.py で作る
   --temp=T            n席の方策温度。0=決定的(既定)、1=PPO自己対戦のサンプリング。
@@ -319,7 +663,15 @@ async function cmdPlay(a: Args): Promise<void> {
 
   const cpu = (s: Seat) =>
     new PacedPolicy(
-      makePolicy(cpuKindAt(a.seats, humanSeat, s), names[s], a.seed * 4 + s, a.weights),
+      makePolicy(
+        cpuKindAt(a.seats, humanSeat, s),
+        names[s],
+        a.seed * 4 + s,
+        a.weights,
+        undefined,
+        undefined,
+        a.plan,
+      ),
       () => app.paceDelay(),
     );
   const policies: Policy[] = SEATS.map((s) => s === humanSeat ? app.human : cpu(s));
@@ -363,6 +715,70 @@ interface HeadlessOptions {
   oracle?: Set<OracleChannel>;
   /** Per-decision, per-group dropout applied to those channels (0 = off). */
   noise?: number;
+  /**
+   * M9c: SEAT 0's reader becomes an oracle→計算 curriculum at this dropout rate.
+   * Seat 0 and seat 0 alone, for the same reason `standings` and `consumer` are:
+   * a reader handed to every seat would move both sides of a paired comparison.
+   * `undefined` leaves every seat exactly as it was.
+   */
+  curriculum?: number;
+  /** Engage the C7 planner on any "k" seat. */
+  plan?: boolean;
+  /**
+   * Engage 順位効用 on SEAT 0, and on seat 0 alone. Deliberately narrower than
+   * every other option here: the layer applies to any heuristic-family seat, so
+   * a run-wide switch would move all four of them at once and there would be
+   * nothing left to measure the one against.
+   */
+  standings?: boolean;
+  /**
+   * Tuned 感性 vector for any "k" seat. Every other seat kind ignores it — see
+   * `makePolicy`, and `pairedRun`, which deliberately withholds it from the
+   * control arm.
+   */
+  ktune?: KTune;
+  /**
+   * `pairedRun` ONLY (`headless` ignores it): the CONTROL arm's 感性 vector.
+   *
+   * The scalar-space half of the variance-reduction instrument (M10d), and the
+   * exact mirror of `consumerB` below — same seats, same policy dice, same
+   * curves, same oracle/curriculum wiring, only the `--ktune` file differs. What
+   * `paired` then measures is candidate MINUS INCUMBENT, which is the comparison
+   * a search actually asks about; against plain `hhhh` a twelve-scalar nudge is
+   * swamped by the ~1.4 per-seed SD of two different players' rank difference.
+   * The two may compose: with both set, arm B gets its own vector AND its own
+   * curves.
+   */
+  ktuneB?: KTune;
+  /**
+   * M9's learned consumer, for SEAT 0 and seat 0 alone — the same narrowing as
+   * `standings`, and the same reason: a curve set applied to every seat would
+   * move both sides of a paired measurement at once.
+   */
+  consumer?: ConsumerParams;
+  /**
+   * `pairedRun` ONLY (`headless` ignores it): the CONTROL arm's curve set.
+   *
+   * Setting it changes what `paired` measures, and it is the whole point of the
+   * option. Against the default control (`hhhh`, no curves) a small perturbation
+   * of a curve set is swamped: the two arms are different players, most games
+   * diverge on the first turn, and the per-seed SD of the rank difference is
+   * ~1.4 — so a 1000-seed run carries a ±0.08 CI, which cannot rank neighbours
+   * that differ by 0.02. Against an INCUMBENT the two arms are the same player
+   * up to a nudge, most games stay bit-identical to the end, and the difference
+   * is measured where it actually occurs. Same seeds, same policy dice, same
+   * `--ktune`, same oracle/curriculum wiring — only the curve file differs.
+   */
+  consumerB?: ConsumerParams;
+  /**
+   * M10a: SEAT 0's calibration recorder, one file for the whole run.
+   *
+   * A WRITER rather than a path, because `pairedRun` calls `headless` once per
+   * game and a path would truncate the file at every seed. It is also why the
+   * control arm never receives it — `pairedRun` strips it explicitly, the same
+   * discipline `record` follows.
+   */
+  calibrate?: CalibrationWriter;
 }
 
 function headless(
@@ -381,6 +797,11 @@ function headless(
   // ...and the oracle seats' window onto the same thing. One tap serves both.
   const ref: { t: Table | null } = { t: null };
   const oracleSeats = seats.includes("o");
+  // The curriculum's oracle half needs the same tap, on a "k" seat that would
+  // otherwise never ask for it.
+  const curriculumOn = opts.curriculum !== undefined && seats[0] === "k";
+  // …and so does the calibration recorder, for the truth half of its records.
+  const calibrateOn = opts.calibrate !== undefined && seats[0] === "k";
   const wiring: OracleWiring = {
     get: () => ref.t,
     channels: opts.oracle ?? new Set(),
@@ -390,6 +811,7 @@ function headless(
   try {
     for (let g = 0; g < games; g++) {
       const s = seed + g;
+      if (calibrateOn) opts.calibrate!.beginGame(s);
       const policies: SyncPolicy[] = SEATS.map((seat) => {
         const p = makePolicy(
           seats[seat],
@@ -398,6 +820,12 @@ function headless(
           opts.weights,
           opts.temp,
           wiring,
+          opts.plan,
+          opts.ktune,
+          (opts.standings ?? false) && seat === 0,
+          seat === 0 ? opts.consumer : undefined,
+          seat === 0 ? opts.curriculum : undefined,
+          calibrateOn && seat === 0 ? opts.calibrate!.record : undefined,
         );
         // Record ONLY neural seats: ppo.py recomputes behavior logp from
         // --init, so a heuristic seat's "d" lines would be treated as samples
@@ -416,7 +844,7 @@ function headless(
         cfg: JANKI,
         dojo: DOJO_HEADLESS,
         scorer,
-        tableRef: writer || oracleSeats ? ref : undefined,
+        tableRef: writer || oracleSeats || curriculumOn || calibrateOn ? ref : undefined,
         ...makeDojoHooks(DOJO_HEADLESS),
       });
       results.push(r);
@@ -440,14 +868,56 @@ function oracleLabel(a: Args): string {
   return a.noise > 0 ? `${ch} ノイズ ${a.noise}` : ch;
 }
 
+/**
+ * The calibration recorder for a run, or nothing. `parseArgs` has already
+ * refused every layout that could not fill it, so reaching here with a path
+ * means seat 0 is a "k" seat under a headless driver.
+ *
+ * The header states the 感性 vector the predictions were made with (the same
+ * merge the seat's constructor performs), because every number in the file is a
+ * function of it — a report against the wrong weights is worse than no report.
+ */
+function makeCalibrationWriter(a: Args): CalibrationWriter | undefined {
+  if (!a.calibrate) return undefined;
+  return new CalibrationWriter(a.calibrate, {
+    seats: a.seats,
+    seed: a.seed,
+    games: a.games,
+    w: mergeComputed({ planner: a.plan, ...a.ktune?.computed }),
+  });
+}
+
+/** The one line a recording run prints about what it wrote. */
+function calibrationReport(a: Args, cal?: CalibrationWriter): void {
+  if (!cal) return;
+  const st = cal.stats();
+  console.log(`較正 ${a.calibrate}: 判断 ${st.rows}行  (半荘 ${st.games})`);
+}
+
 function cmdSelfplay(a: Args): void {
+  const calibrate = makeCalibrationWriter(a);
+  try {
+    cmdSelfplayInner(a, calibrate);
+  } finally {
+    calibrate?.close();
+  }
+  calibrationReport(a, calibrate);
+}
+
+function cmdSelfplayInner(a: Args, calibrate?: CalibrationWriter): void {
   const { results, ms, traj } = headless(a.games, a.seed, a.seats, {
+    calibrate,
     weights: a.weights,
     temp: a.temp,
     record: a.record || undefined,
     recordAll: a.recordAll,
     oracle: a.oracle,
     noise: a.noise,
+    curriculum: a.curriculum,
+    plan: a.plan,
+    ktune: a.ktune,
+    standings: a.standings,
+    consumer: a.consumer,
   });
   const place = SEATS.map(() => [0, 0, 0, 0]);
   const total = [0, 0, 0, 0];
@@ -504,7 +974,9 @@ function cmdSelfplay(a: Args): void {
 
   // The oracle arm is named only when a seat actually reads it, so an all-h run
   // — the line the training scripts grep — stays byte-identical.
-  const arm = a.seats.includes("o") ? `  オラクル ${oracleLabel(a)}` : "";
+  const arm = (a.seats.includes("o") ? `  オラクル ${oracleLabel(a)}` : "") +
+    (a.seats.includes("k") ? `  計算${a.plan ? " 立案あり" : ""}` : "") +
+    (a.standings ? "  順位効用" : "");
   console.log(
     `対局数 ${a.games}  (seed ${a.seed}..${a.seed + a.games - 1})  席 ${a.seats}${arm}`,
   );
@@ -659,7 +1131,31 @@ export function pairedRun(
   for (let g = 0; g < games; g++) {
     const s = seed + g;
     const a = headless(1, s, seats, opts).results[0];
-    const b = headless(1, s, "hhhh", { weights: opts.weights }).results[0];
+    // The control arm is handed ONE option, and it is not a tuning knob: the
+    // manifest path, so an "n" seat in `seats` has a comparable baseline to
+    // load. Nothing that could move seat 0's play — `oracle`, `noise`, `plan`,
+    // `ktune`, `standings` — may cross this line, or the difference below would be measured
+    // against a baseline the candidate had already edited. (hhhh has no "k" or
+    // "o" seat to read them anyway; the point is that it stays that way.)
+    //
+    // …UNLESS `consumerB` (M9c-b) or `ktuneB` (M10d) names an INCUMBENT. Then
+    // the control arm is the same seat, the same everything, carrying a
+    // DIFFERENT curve set / a DIFFERENT 感性 vector — and the difference
+    // measured is candidate minus incumbent rather than candidate minus
+    // baseline. Whichever of the two is absent is inherited from arm A, so the
+    // two arms still differ in exactly one file. See `consumerB` / `ktuneB`.
+    const paired = opts.consumerB !== undefined || opts.ktuneB !== undefined;
+    const b = paired
+      ? headless(1, s, seats, {
+        ...opts,
+        record: undefined,
+        // The control arm is not what is being calibrated, and its decisions
+        // would interleave into the same file under the same seed.
+        calibrate: undefined,
+        consumer: opts.consumerB ?? opts.consumer,
+        ktune: opts.ktuneB ?? opts.ktune,
+      }).results[0]
+      : headless(1, s, "hhhh", { weights: opts.weights }).results[0];
     const ra = rankOfSeat0(a.scores);
     const rb = rankOfSeat0(b.scores);
     const da = dojoRankOfSeat0(a);
@@ -706,20 +1202,75 @@ export function pairedRun(
   };
 }
 
+/**
+ * `paired --json`: the same measurement as the tables below, in one line a
+ * search loop can parse. Only the fields a tuner grades on — the Maps become
+ * plain objects, and everything the human tables derive (勝敗 counts, the
+ * per-arm score means) is left out on purpose: what is not printed cannot be
+ * optimised against by accident.
+ */
+export function pairedJson(st: PairedStats): string {
+  const obj = {
+    games: st.games,
+    seed: st.seed,
+    seats: st.seats,
+    rankA: st.rankA,
+    rankB: st.rankB,
+    dRank: st.dRank,
+    dRankDojo: st.dRankDojo,
+    dScore: st.dScore,
+    vioA0: Object.fromEntries(st.vioA0),
+    vioB0: Object.fromEntries(st.vioB0),
+    ms: st.ms,
+  };
+  return JSON.stringify(obj);
+}
+
 function cmdPaired(a: Args): void {
+  const calibrate = makeCalibrationWriter(a);
+  try {
+    cmdPairedInner(a, calibrate);
+  } finally {
+    calibrate?.close();
+  }
+  calibrationReport(a, calibrate);
+}
+
+function cmdPairedInner(a: Args, calibrate?: CalibrationWriter): void {
   if (a.games < 1) die("--games は1以上");
   const st = pairedRun(a.games, a.seed, a.seats, {
+    calibrate,
     weights: a.weights,
     temp: a.temp,
     oracle: a.oracle,
     noise: a.noise,
+    curriculum: a.curriculum,
+    plan: a.plan,
+    ktune: a.ktune,
+    ktuneB: a.ktuneB,
+    standings: a.standings,
+    consumer: a.consumer,
+    consumerB: a.consumerB,
   });
+  if (a.json) {
+    console.log(pairedJson(st));
+    return;
+  }
   const sign = (x: number) => (x >= 0 ? "+" : "") + x.toFixed(3);
   const signPt = (x: number) => (x >= 0 ? "+" : "") + x.toFixed(0);
 
   console.log(
     `対局数 ${st.games}  (seed ${st.seed}..${st.seed + st.games - 1})  ` +
-      `A席 ${st.seats} / B席 hhhh  オラクル ${oracleLabel(a)}`,
+      `A席 ${st.seats} / B席 ${a.consumerBPath || a.ktuneBPath ? st.seats : "hhhh"}  オラクル ${
+        oracleLabel(a)
+      }` +
+      (a.seats.includes("k") ? `  計算${a.plan ? " 立案あり" : ""}` : "") +
+      (a.curriculum !== undefined ? `  カリキュラム E=${a.curriculum}` : "") +
+      (a.standings ? "  順位効用" : "") +
+      (a.ktunePath ? `  感性${a.ktuneBPath ? "A" : ""} ${a.ktunePath}` : "") +
+      (a.ktuneBPath ? `  感性B ${a.ktuneBPath}` : "") +
+      (a.consumerPath ? `  消費${a.consumerBPath ? "A" : ""} ${a.consumerPath}` : "") +
+      (a.consumerBPath ? `  消費B ${a.consumerBPath}` : ""),
   );
   console.log("");
   console.log("腕     席0平均順位   道場順位   席0平均点   違反(全席)");
@@ -727,8 +1278,12 @@ function cmdPaired(a: Args): void {
     `A ${st.seats}${st.rankA.toFixed(3).padStart(10)}${st.rankDojoA.toFixed(3).padStart(11)}` +
       `${st.scoreA.toFixed(0).padStart(12)}${String(st.vioA).padStart(13)}`,
   );
+  // With --consumer-b / --ktune-b the control arm is the same seat kind as A,
+  // not hhhh.
   console.log(
-    `B hhhh${st.rankB.toFixed(3).padStart(10)}${st.rankDojoB.toFixed(3).padStart(11)}` +
+    `B ${(a.consumerBPath || a.ktuneBPath ? st.seats : "hhhh").padEnd(4)}${
+      st.rankB.toFixed(3).padStart(10)
+    }${st.rankDojoB.toFixed(3).padStart(11)}` +
       `${st.scoreB.toFixed(0).padStart(12)}${String(st.vioB).padStart(13)}`,
   );
   console.log("");
@@ -786,6 +1341,11 @@ function cmdBench(a: Args): void {
     weights: a.weights,
     oracle: a.oracle,
     noise: a.noise,
+    curriculum: a.curriculum,
+    plan: a.plan,
+    ktune: a.ktune,
+    standings: a.standings,
+    consumer: a.consumer,
   });
   const rounds = results.reduce((n, r) => n + r.rounds.length, 0);
   const secs = ms / 1000;

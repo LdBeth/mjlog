@@ -22,14 +22,18 @@
 // future it is holding out for.
 
 import type { Tile } from "mjrender/model.ts";
-import { countsFromTiles, shanten, ukeireTypes } from "mjrender/shanten.ts";
 import { doraFromIndicatorType, tileType } from "mjrender/tiles.ts";
+import { countsFromTiles, shanten, ukeireTypes } from "../kernel.ts";
+import type { CalibRecord } from "./calibration.ts";
+import { buildCalibRecord } from "./calibration.ts";
+import type { ComputedTraceRef } from "./computed.ts";
 import type { Ctx, HeuristicOptions } from "./heuristic.ts";
 import { HeuristicPolicy } from "./heuristic.ts";
 import type { PlannerOptions, TargetPlan } from "./planner.ts";
 import { availabilityFrom, enumerateTargets, relock, RELOCK_MARGIN } from "./planner.ts";
 import type { Observation } from "../observe.ts";
 import { sfc32 } from "../rng.ts";
+import type { Rng } from "../rng.ts";
 import type { Scorer } from "../round.ts";
 import { ronValue } from "../score.ts";
 import type { Table } from "../table.ts";
@@ -383,6 +387,120 @@ export function noisyReads(inner: ReadsProvider, epsilon: number, seed = 0xC0FFE
   };
 }
 
+/**
+ * Oracle fading with a FLOOR: a dropped group falls back to the 計算 reader's
+ * own answer instead of to nothing.
+ *
+ * WHY THIS EXISTS (M9c curriculum). `noisyReads` measures how much the oracle is
+ * worth by taking it away — the honest ablation, and the right tool for that
+ * question. It is the wrong tool for TEACHING: a consumer fitted against a seat
+ * that alternates between perfect truth and no information at all is being fitted
+ * against two different players, and the curves it learns for "danger" have to
+ * serve both. What a curriculum wants instead is one player whose danger reading
+ * degrades CONTINUOUSLY from truth to what a real seat can actually count — so
+ * that at ε = 1 the thing being trained is exactly the thing that will be
+ * deployed, and every ε below 1 is the same player with a sharper reader.
+ *
+ * THE ENDPOINTS ARE EXACT, and that is the whole contract:
+ *   ε = 0 returns `oracle` itself — the same function object, so a curriculum run
+ *         at 0 is bit-identical to the plain oracle arm.
+ *   ε = 1 returns `computed` itself — so the final re-score of a champion is
+ *         bit-identical to the 計算 seat that ships, with no oracle machinery
+ *         anywhere in the path. A champion that only works with help cannot hide
+ *         behind a difference in wiring.
+ *
+ * IN BETWEEN, one uniform is drawn per information group (the same groups, in
+ * the same order, as `noisyReads`) per decision: below ε the group is taken from
+ * `computed`, otherwise from `oracle`. A group neither side fills draws no
+ * randomness, so the stream length depends only on the channel set — the same
+ * reproducibility property the paired driver needs. `planner` is not a group and
+ * is never dropped; it is taken from the oracle when the oracle set it, and from
+ * the computed reader otherwise.
+ *
+ * `rng` may be a seed (mirroring `noisyReads`, with ε folded in so two levels of
+ * a schedule do not share their losses) or an `Rng` supplied by the caller.
+ */
+export function curriculumReads(
+  oracle: ReadsProvider,
+  computed: ReadsProvider,
+  epsilon: number,
+  rng: number | Rng = 0xC0FFEE,
+): ReadsProvider {
+  if (!Number.isFinite(epsilon) || epsilon < 0 || epsilon > 1) {
+    throw new RangeError(`curriculumReads: ε は 0..1 の実数: ${epsilon}`);
+  }
+  if (epsilon === 0) return oracle;
+  if (epsilon === 1) return computed;
+  const r: Rng = typeof rng === "number" ? sfc32((rng ^ Math.round(epsilon * 1e6)) >>> 0) : rng;
+
+  return (obs: Observation): Reads | null => {
+    const o = oracle(obs);
+    const c = computed(obs);
+    if (o === null && c === null) return null;
+    const out: Reads = {};
+    const planner = o?.planner ?? c?.planner;
+    if (planner !== undefined) out.planner = planner;
+    for (const group of NOISE_GROUPS) {
+      if (!group.some((f) => o?.[f] !== undefined || c?.[f] !== undefined)) continue;
+      const src = r.float() < epsilon ? c : o;
+      for (const f of group) {
+        const v = src?.[f];
+        if (v !== undefined) (out as Record<string, unknown>)[f] = v;
+      }
+    }
+    return out;
+  };
+}
+
+// ---------------------------------------------------------------------------
+// calibration: the same reader, watched
+// ---------------------------------------------------------------------------
+
+/**
+ * The 計算 reader, UNCHANGED, with one record written per decision pairing what
+ * it predicted against what the engine knows to be true (M10a).
+ *
+ * WHAT IT RETURNS is `computed`'s own answer — the same object, not a copy, not
+ * a merge. A seat wired through here plays exactly the game it plays without
+ * the flag: no field is added, none is removed, and no randomness is drawn. The
+ * `paired` self-diff test pins that; the sink is meant to be invisible.
+ *
+ * WHY IT IS NOT `curriculumReads` WITH THE RECORDING BOLTED ON. The curriculum
+ * MIXES the two providers to teach a consumer; this MEASURES one of them against
+ * the other. Mixing would make the recorded prediction the thing that was
+ * sometimes replaced by truth, and then the reliability tables would be scoring
+ * a player nobody ships. The two flags are refused together in `main.ts` for the
+ * same reason.
+ *
+ * BOTH PROVIDERS MUST BE ARMED. `computed` must be a `computedReads(w, traceRef)`
+ * sharing the `traceRef` passed here — that is how the model's intermediates
+ * arrive — and `oracle` needs the `MatchOptions.tableRef` tap, so this is
+ * headless-only, exactly like the curriculum. A decision where either side comes
+ * back empty is skipped rather than half-recorded.
+ */
+export function calibrationReads(
+  computed: ReadsProvider,
+  traceRef: ComputedTraceRef,
+  oracle: ReadsProvider,
+  sink: (rec: CalibRecord) => void,
+): ReadsProvider {
+  return (obs: Observation): Reads | null => {
+    traceRef.t = null;
+    const reads = computed(obs);
+    const trace = traceRef.t;
+    traceRef.t = null;
+    if (trace === null) {
+      // A wiring bug, not a quiet degradation: the provider was built without
+      // this `traceRef`, so the run would produce an empty file and nobody
+      // would find out until the report was run on it.
+      throw new Error("calibrationReads: computedReads に同じ traceRef が渡されていません");
+    }
+    const truth = oracle(obs);
+    if (truth) sink(buildCalibRecord(obs, trace, truth));
+    return reads;
+  };
+}
+
 // ---------------------------------------------------------------------------
 // the consumer
 // ---------------------------------------------------------------------------
@@ -514,9 +632,14 @@ export class AugmentedHeuristic extends HeuristicPolicy {
     if (!dealinP) return base;
 
     // RULE FLOOR, top half: "安全" is genbutsu — a proof, not an assessment.
-    // No estimate, however confident, may price a provably safe tile.
-    const level = ctx.obs.danger.get(tileType(tile))?.level ?? "安全";
-    if (level === "安全") return 0;
+    // No estimate, however confident, may price a provably safe tile. The proof
+    // must be EXPLICIT: an absent entry means the assessor was not looking (no
+    // declared threat on the table), which is absence of assessment, not
+    // absence of danger — the base policy prices that 0 (its `?? "安全"`), but
+    // an estimate-holding policy must keep pricing there. Quiet tables are
+    // where a silent tenpai lives, and where the deal-in estimate has no rule
+    // reading to fall back on.
+    if (ctx.obs.danger.get(tileType(tile))?.level === "安全") return 0;
 
     const ty = tileType(tile);
     let risk = 0;

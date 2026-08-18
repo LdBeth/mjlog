@@ -26,13 +26,19 @@
 
 import type { DangerLevel } from "mjrender/danger.ts";
 import type { Meld, Tile } from "mjrender/model.ts";
-import { countsFromTiles, shanten, ukeireTypes } from "mjrender/shanten.ts";
 import { doraFromIndicatorType, rankOfType, suitOfType, tileType } from "mjrender/tiles.ts";
+import { countsFromTiles, shanten, ukeireTypes } from "../kernel.ts";
 import { isHonor, isYaochu } from "../tiles.ts";
 import type { Observation } from "../observe.ts";
 import type { ActionPreview } from "../penalty/preview.ts";
 import { pickLesserEvil, violationPoints } from "../penalty/preview.ts";
 import type { SyncPolicy } from "../policy.ts";
+import type { ConsumerParams } from "./consumer.ts";
+import { scoreDiscard as consumeEvidence } from "./consumer.ts";
+import type { ContextEvidence, EvidenceHooks } from "./evidence.ts";
+import { assembleCandidate, assembleContext } from "./evidence.ts";
+import type { StandingsWeights } from "./standings.ts";
+import { standingsScales } from "./standings.ts";
 import type { Rng } from "../rng.ts";
 import { sfc32 } from "../rng.ts";
 import type { Action, Violation } from "../types.ts";
@@ -80,6 +86,14 @@ export interface HeuristicWeights {
   foldEfficiency: number;
   /** Danger is scaled by this while folding. */
   foldDanger: number;
+  /**
+   * 順位効用. Absent by DEFAULT, and absent means off: every scale the layer
+   * produces is 1 and the policy is bit-for-bit the point-EV agent it has always
+   * been. Present, it prices this seat's points by what they do to the FINAL
+   * PLACEMENT — see `standings.ts` — and reaches the decision through exactly
+   * two multipliers, on the push/fold gate and on the price of danger.
+   */
+  standings?: StandingsWeights;
 }
 
 export const DEFAULT_WEIGHTS: HeuristicWeights = {
@@ -114,6 +128,15 @@ export interface HeuristicOptions {
   dojo?: boolean;
   /** Probability of taking a uniformly random legal action instead. */
   epsilon?: number;
+  /**
+   * M9. The learned consumer of the evidence vector (`consumer.ts`). ABSENT BY
+   * DEFAULT, and absent means the hand-written arithmetic below runs unchanged,
+   * bit for bit. Present, it replaces the discard score CORE and nothing else:
+   * the compliance filter, the `dojoCost` fallthrough pricing and the riichi
+   * decision are outside it on both paths, and `initFromWeights` makes the two
+   * paths agree exactly.
+   */
+  consumer?: ConsumerParams;
 }
 
 /**
@@ -136,6 +159,17 @@ export interface Ctx {
   def: number;
 }
 
+/**
+ * Everything the consumer path needs that is fixed for one decision: the bound
+ * hooks and the per-decision context evidence, assembled once and shared by
+ * every candidate. Null whenever no consumer is set, which is what makes the
+ * old path free.
+ */
+interface EvidenceRun {
+  hooks: EvidenceHooks;
+  context: ContextEvidence;
+}
+
 export class HeuristicPolicy implements SyncPolicy {
   readonly name: string;
   readonly sync = true;
@@ -144,6 +178,8 @@ export class HeuristicPolicy implements SyncPolicy {
   private dojo: boolean;
   private epsilon: number;
   private rng: Rng;
+  /** M9's learned consumer, or null for the hand-written score. */
+  private consumer: ConsumerParams | null;
 
   constructor(name: string, seed: number, opts: HeuristicOptions = {}) {
     this.name = name;
@@ -158,7 +194,28 @@ export class HeuristicPolicy implements SyncPolicy {
     this.kuitan = opts.kuitan ?? true;
     this.dojo = opts.dojo ?? true;
     this.epsilon = opts.epsilon ?? 0;
+    this.consumer = opts.consumer ?? null;
     this.rng = sfc32(seed);
+  }
+
+  /**
+   * The evidence assembler's window onto this instance's own methods. Built as
+   * closures rather than passed as a `this` reference so that the hook set is a
+   * NAMED, minimal contract — and, more to the point, so that the calls dispatch
+   * virtually: an `AugmentedHeuristic`'s `riskOf`/`pressureOf` overrides fill
+   * the evidence automatically, with no cooperation from `evidence.ts`.
+   */
+  private evidenceHooks(): EvidenceHooks {
+    return {
+      handWithout: (ctx, tile) => this.handWithout(ctx, tile),
+      liveCopies: (obs, type, counts) => this.liveCopies(obs, type, counts),
+      riskOf: (ctx, tile) => this.riskOf(ctx, tile),
+      drawBonus: (ctx, tile) => this.drawBonus(ctx, tile),
+      keepBonus: (ctx, tile) => this.keepBonus(ctx, tile),
+      pressureOf: (obs) => this.pressureOf(obs),
+      bufferScale: (obs) => this.bufferScale(obs),
+      standings: (obs) => this.standingsOf(obs),
+    };
   }
 
   reset(seed: number): void {
@@ -254,8 +311,30 @@ export class HeuristicPolicy implements SyncPolicy {
       folding,
       canRiichi: obs.legal.some((a) => a.t === "discard" && a.riichi),
       eff: folding ? this.w.foldEfficiency : 1,
-      def: folding ? this.w.foldDanger : 1,
+      // 順位効用 rides on `def` and not on `eff`: how rank-sensitive this seat's
+      // points are is a statement about the PRICE OF DANGER, so a protected lead
+      // pays more for every risky tile and folds earlier, while a hopeless
+      // deficit pays less and pushes tiles a point-EV agent would never let go.
+      // Off (the default) the factor is exactly 1 and this is the old value.
+      def: (folding ? this.w.foldDanger : 1) * this.standingsOf(obs).risk,
     };
+  }
+
+  /**
+   * 順位効用's two multipliers, or the neutral pair when the layer is off — which
+   * it is unless a weights object asked for it, so this is `1 × 1` and changes
+   * nothing by default.
+   *
+   * Recomputed rather than cached: it is closed form (a handful of `phi` calls
+   * over four public numbers), it is called at most twice per decision, and the
+   * alternative is threading a per-decision cache through `Ctx` and every
+   * subclass hook that builds one — a far larger surface than the arithmetic it
+   * would save.
+   */
+  private standingsOf(obs: Observation): { gain: number; risk: number } {
+    const w = this.w.standings;
+    if (!w) return { gain: 1, risk: 1 };
+    return standingsScales(obs, w);
   }
 
   /**
@@ -284,7 +363,11 @@ export class HeuristicPolicy implements SyncPolicy {
 
     push *= this.bufferScale(obs);
 
-    return push < 0.5 * pressure;
+    // 順位効用: the same hand against the same table is worth pushing for a
+    // different amount depending on what the points would DO. Off (the default)
+    // both scales are 1 and this is the old `push < 0.5 * pressure`, exactly.
+    const st = this.standingsOf(obs);
+    return push * st.gain < 0.5 * pressure * st.risk;
   }
 
   /**
@@ -353,13 +436,21 @@ export class HeuristicPolicy implements SyncPolicy {
       if (s < best) best = s;
     }
 
+    // M9. One assembly per decision when a consumer is set, and not a single
+    // line of work when one is not.
+    let run: EvidenceRun | null = null;
+    if (this.consumer) {
+      const hooks = this.evidenceHooks();
+      run = { hooks, context: assembleContext(hooks, ctx) };
+    }
+
     let bestTile = candidates[0];
     let bestScore = -Infinity;
     for (const tile of candidates) {
       const sh = shantenAfter.get(tile)!;
       // Ukeire is the expensive part (34 shanten probes); only the tiles that
       // actually hold the best shanten can win on it.
-      const score = this.scoreDiscard(ctx, tile, sh, sh === best);
+      const score = this.scoreDiscard(ctx, tile, sh, sh === best, run);
       if (score > bestScore || (score === bestScore && tile < bestTile)) {
         bestScore = score;
         bestTile = tile;
@@ -439,7 +530,32 @@ export class HeuristicPolicy implements SyncPolicy {
     return shanten(counts, ctx.open, ctx.closed);
   }
 
-  private scoreDiscard(ctx: Ctx, tile: Tile, sh: number, wideOpen: boolean): number {
+  /**
+   * One discard candidate's score.
+   *
+   * TWO PATHS, ONE SURROUND. With a consumer set (M9) the CORE — the efficiency
+   * aggregate, the price of danger, and the two hook bonuses — is computed from
+   * the named evidence vector by `consumer.ts` instead of by the arithmetic
+   * below; `dojoCost` is subtracted identically either way, because a 禁じ手 is
+   * priced by the ledger and not by anything a fit is allowed to move. At init
+   * the two paths agree bit for bit (`initFromWeights`), which is what makes the
+   * swap measurable rather than merely plausible.
+   */
+  private scoreDiscard(
+    ctx: Ctx,
+    tile: Tile,
+    sh: number,
+    wideOpen: boolean,
+    run: EvidenceRun | null,
+  ): number {
+    if (this.consumer && run) {
+      const ev = {
+        context: run.context,
+        candidate: assembleCandidate(run.hooks, ctx, tile, sh, wideOpen),
+      };
+      return consumeEvidence(ev, this.consumer) - this.dojoCost(ctx, tile, sh);
+    }
+
     const { obs } = ctx;
     const rest = this.handWithout(ctx, tile);
     const counts = countsFromTiles(rest);

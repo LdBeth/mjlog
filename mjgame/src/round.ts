@@ -16,8 +16,8 @@
 //            none -> abortive checks, exhaustion check, TURN(next seat)
 
 import type { GameEvent, PlayerInfo, Tile } from "mjrender/model.ts";
-import { countsFromTiles, shanten, ukeireTypes } from "mjrender/shanten.ts";
 import { tileType } from "mjrender/tiles.ts";
+import { countsFromTiles, shanten, ukeireTypes } from "./kernel.ts";
 import { isYaochu } from "./tiles.ts";
 import type { DojoConfig, RuleConfig } from "./rules.ts";
 import {

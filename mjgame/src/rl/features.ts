@@ -43,7 +43,7 @@
 import type { Tile } from "mjrender/model.ts";
 import type { DangerLevel } from "mjrender/danger.ts";
 import { doraFromIndicatorType, tileType } from "mjrender/tiles.ts";
-import { countsFromTiles, shanten } from "mjrender/shanten.ts";
+import { countsFromTiles, shanten } from "../kernel.ts";
 import type { Observation } from "../observe.ts";
 import type { Table } from "../table.ts";
 import type { Seat } from "../types.ts";

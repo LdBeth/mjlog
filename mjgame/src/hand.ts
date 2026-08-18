@@ -10,8 +10,8 @@
 // `analyze`, not by pattern-matching a half-built hand.
 
 import type { Tile } from "mjrender/model.ts";
-import { countsFromTiles, shanten, ukeireTypes } from "mjrender/shanten.ts";
 import { tileType } from "mjrender/tiles.ts";
+import { countsFromTiles, shanten, ukeireTypes } from "./kernel.ts";
 import type { WinOracle } from "./legal.ts";
 import { ANY_WIN } from "./legal.ts";
 import type { Table } from "./table.ts";

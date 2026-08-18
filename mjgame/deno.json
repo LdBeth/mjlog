@@ -3,9 +3,11 @@
     "play": "deno run --allow-read --allow-write --allow-ffi --allow-env=MJGAME_NATIVE src/main.ts play",
     "selfplay": "deno run --allow-read --allow-write --allow-ffi --allow-env=MJGAME_NATIVE src/main.ts selfplay",
     "bench": "deno run --allow-read --allow-ffi --allow-env=MJGAME_NATIVE src/main.ts bench",
-    "check": "deno check src/*.ts src/*/*.ts",
-    "test": "deno test --allow-read --allow-write --allow-ffi --allow-env=MJGAME_NATIVE --allow-run=clang",
+    "check": "deno check src/*.ts src/*/*.ts scripts/*.ts",
+    "tune": "deno run --allow-read --allow-write --allow-run=deno scripts/tune.ts",
+    "test": "deno test --allow-read --allow-write --allow-ffi --allow-env=MJGAME_NATIVE --allow-run=clang,clang++",
     "build-native": "clang -O3 -dynamiclib -framework Accelerate -o native/librlnet.dylib native/rlnet.c",
+    "build-kernel": "sh native/build_kernel.sh",
     "fmt": "deno fmt"
   },
   "imports": {

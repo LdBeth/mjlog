@@ -111,15 +111,27 @@ function kokushiShanten(counts: number[]): number {
   return 13 - kinds - (hasPair ? 1 : 0);
 }
 
+// Shanten is a pure function of (counts, openMelds, closed), and the same
+// shapes recur heavily within a decision loop (34 ukeire probes per candidate,
+// per-discard rescoring), so results are memoized: ~60% of calls in bulk
+// self-play are exact repeats. Cleared wholesale when full — LRU bookkeeping
+// would cost more than the occasional re-derivation after a reset.
+const shantenMemo = new Map<string, number>();
+const SHANTEN_MEMO_LIMIT = 1 << 20;
+
 /**
  * Minimum shanten across standard / chiitoitsu / kokushi.
  * `closed` disables the two closed-only forms (i.e. when melds were called).
  */
 export function shanten(counts: number[], openMelds = 0, closed = true): number {
+  const cl = closed && openMelds === 0;
+  const key = counts.join("") + openMelds + (cl ? "c" : "o");
+  const hit = shantenMemo.get(key);
+  if (hit !== undefined) return hit;
   let s = standardShanten(counts, openMelds);
-  if (closed && openMelds === 0) {
-    s = Math.min(s, chiitoitsuShanten(counts), kokushiShanten(counts));
-  }
+  if (cl) s = Math.min(s, chiitoitsuShanten(counts), kokushiShanten(counts));
+  if (shantenMemo.size >= SHANTEN_MEMO_LIMIT) shantenMemo.clear();
+  shantenMemo.set(key, s);
   return s;
 }
 

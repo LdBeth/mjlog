@@ -9,8 +9,8 @@
 // mjrender's Tenhou-XML table, which has no 三倍満 slot.
 
 import type { Meld, Tile } from "mjrender/model.ts";
-import { countsFromTiles, shanten } from "mjrender/shanten.ts";
 import { doraFromIndicatorType, tileType } from "mjrender/tiles.ts";
+import { countsFromTiles, shanten } from "./kernel.ts";
 import type { RuleConfig } from "./rules.ts";
 import type { Scorer, WinFlags } from "./round.ts";
 import type { Table } from "./table.ts";

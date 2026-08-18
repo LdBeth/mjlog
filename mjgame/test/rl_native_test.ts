@@ -417,7 +417,14 @@ Deno.test({
       const path = writeAttnBlob(dir, 0x4a11);
       const ts = loadAttn(`${dir}/manifest.json`, path);
       const nat = loadAttn(`${dir}/manifest.json`, path);
-      assert(loadNativeAttn(nat), "native の attn を読み込めませんでした");
+      // The gate is FORCED here rather than inherited. `loadNativeAttn` honours
+      // MJGAME_NATIVE, so running the suite with the variable set to 0 in the
+      // shell used to fail this test for a reason that has nothing to do with
+      // attn — the point of the test is that the two paths agree, and that needs
+      // the native path to exist.
+      withGate("1", () => {
+        assert(loadNativeAttn(nat), "native の attn を読み込めませんでした");
+      });
       assertEquals(ts.native, undefined, "TS 側に ctx が付いています");
 
       for (const tokens of seqCases(sfc32(31))) {

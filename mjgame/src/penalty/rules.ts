@@ -7,8 +7,8 @@
 // Nothing here blocks a move. Every check runs after the action has committed.
 
 import type { Meld, Tile } from "mjrender/model.ts";
-import { countsFromTiles, shanten } from "mjrender/shanten.ts";
 import { doraFromIndicatorType, rankOfType, suitOfType, tileType } from "mjrender/tiles.ts";
+import { countsFromTiles, shanten } from "../kernel.ts";
 import type { TenpaiInfo } from "../hand.ts";
 import { analyze, isOkurikan, wouldChangeWait } from "../hand.ts";
 import { PENALTY } from "../rules.ts";

@@ -9,8 +9,8 @@
 //   - mechanics: 同巡内食い替え, the post-riichi discard lock, having the tiles.
 
 import type { Meld, Tile } from "mjrender/model.ts";
-import { countsFromTiles, shanten } from "mjrender/shanten.ts";
 import { rankOfType, suitOfType, tileType } from "mjrender/tiles.ts";
+import { countsFromTiles, shanten } from "./kernel.ts";
 import { isComplete } from "./decompose.ts";
 import type { Table } from "./table.ts";
 import { anyFuriten } from "./table.ts";

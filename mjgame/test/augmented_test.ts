@@ -19,18 +19,24 @@ import { tileType } from "mjrender/tiles.ts";
 import type { Ctx } from "../src/ai/heuristic.ts";
 import { HeuristicPolicy } from "../src/ai/heuristic.ts";
 import type { OracleChannel, Reads, ReadsProvider } from "../src/ai/augmented.ts";
-import { AugmentedHeuristic, noisyReads, oracleReads, parseChannels } from "../src/ai/augmented.ts";
-import { makeDojoHooks, pairedRun } from "../src/main.ts";
-import { runMatchSync } from "../src/match.ts";
+import {
+  AugmentedHeuristic,
+  curriculumReads,
+  noisyReads,
+  oracleReads,
+  parseChannels,
+} from "../src/ai/augmented.ts";
+import { pairedRun } from "../src/main.ts";
+import { sfc32 } from "../src/rng.ts";
 import { observe } from "../src/observe.ts";
 import type { Observation } from "../src/observe.ts";
-import { DOJO_HEADLESS, JANKI } from "../src/rules.ts";
+import { JANKI } from "../src/rules.ts";
 import { ronValue, scorer } from "../src/score.ts";
 import { Table } from "../src/table.ts";
 import type { Seat } from "../src/types.ts";
 import { SEATS } from "../src/types.ts";
 import { Wall } from "../src/wall.ts";
-import { tiles } from "./helpers.ts";
+import { playHanchan, tiles } from "./helpers.ts";
 
 // ---------------------------------------------------------------------------
 // fixtures
@@ -319,6 +325,19 @@ Deno.test("augmented: 安全 is a proof — no estimate may price it", () => {
   assertEquals(probe.riskWith(ctx, hot * 4, dealin(0, hot, 12000)), 0.25 * 12000);
 });
 
+Deno.test("augmented: an absent assessment is not a proof — the estimate prices quiet tables", () => {
+  const silent = 12; // 4p; nobody has declared anything, the assessor is idle
+  const probe = new Probe("probe", 1, () => null);
+  const ctx = riskCtx(new Map()); // quiet table: EMPTY danger map
+
+  // The base policy has nothing to say here...
+  assertEquals(probe.riskWith(ctx, silent * 4, null), 0);
+  // ...but a deal-in estimate must still reach the discard choice: an absent
+  // entry means "not assessed", and only an explicit 安全 entry is a proof.
+  const est = dealin(0, silent, 8000);
+  assertEquals(probe.riskWith(ctx, silent * 4, est), 0.25 * 8000);
+});
+
 Deno.test("augmented: the rule floor bounds a quiet estimate from below", () => {
   const hot = 12;
   const probe = new Probe("probe", 1, () => null);
@@ -486,25 +505,163 @@ Deno.test("noise: one draw per PRESENT group — the stream tracks the channel s
 });
 
 // ---------------------------------------------------------------------------
+// the curriculum (curriculumReads)
+// ---------------------------------------------------------------------------
+
+/**
+ * What a COUNTING reader can produce, filled with values no oracle fixture uses
+ * so that the source of every surviving group is identifiable. Deliberately
+ * missing the three order groups (`nextDraw`, `nextDora`, `riichiNextDraw`):
+ * `computedReads` refuses to invent an ordering of unseen tiles, so a dropped
+ * order group has nothing to fall back TO — and must degrade to absence, exactly
+ * as it does under `noisyReads`.
+ */
+function computedFixture(): Reads {
+  const f3 = (v: number) => [0, 1, 2].map(() => new Float32Array(34).fill(v));
+  return {
+    tenpaiP: [0.5, 0.5, 0.5],
+    dealinP: f3(9),
+    dealinValue: f3(9),
+    expLoss: [1234, 1234, 1234],
+    wallComposition: new Float32Array(34).fill(2),
+    oppConcealed: f3(9),
+  };
+}
+
+/** "o" = this group came from the oracle, "c" = from the counting reader. */
+function source(r: Reads): string {
+  const at = (
+    got: boolean,
+    oracleSide: boolean,
+  ) => (!got ? "-" : oracleSide ? "o" : "c");
+  return [
+    at(r.dealinP !== undefined, r.dealinP?.[0][0] === 0),
+    at(r.tenpaiP !== undefined, r.tenpaiP?.[0] === 1),
+    at(r.expLoss !== undefined, r.expLoss?.[0] === 3900),
+    at(r.nextDraw !== undefined, true),
+    at(r.nextDora !== undefined, true),
+    at(r.riichiNextDraw !== undefined, true),
+    at(r.wallComposition !== undefined, r.wallComposition?.[0] === 0),
+  ].join("");
+}
+
+const ORACLE_P: ReadsProvider = () => fullReads();
+const COMPUTED_P: ReadsProvider = () => computedFixture();
+
+Deno.test("curriculum: ε=0 is the oracle provider itself, not a copy", () => {
+  assertStrictEquals(
+    curriculumReads(ORACLE_P, COMPUTED_P, 0),
+    ORACLE_P,
+    "ε=0 の腕は純オラクルとビット単位で同一でなければならない",
+  );
+});
+
+Deno.test("curriculum: ε=1 is the computed provider itself, not a copy", () => {
+  // The contract the M9c champion re-score depends on: at ε=1 there is no
+  // oracle machinery left in the path, so "graded without help" is a fact about
+  // the wiring and not a statistical claim.
+  assertStrictEquals(curriculumReads(ORACLE_P, COMPUTED_P, 1), COMPUTED_P);
+});
+
+Deno.test("curriculum: a dropped group falls back to the computed answer", () => {
+  const p = curriculumReads(ORACLE_P, COMPUTED_P, 0.5, 4242);
+  let sawComputed = false;
+  let sawOracle = false;
+  for (let i = 0; i < 200; i++) {
+    const s = source(p(OBS)!);
+    // The four groups the counting reader can answer are never absent…
+    assert(/^[oc][oc][oc]/.test(s), `落ちた組が undefined になった: ${s}`);
+    assert(s[6] === "o" || s[6] === "c", `残り枚数の組が消えた: ${s}`);
+    // …and the three ORDER groups are oracle-or-nothing, since counting cannot
+    // produce an order.
+    assert(/[o-]{3}$/.test(s.slice(3, 6)), `数えられない情報が湧いた: ${s}`);
+    if (s.includes("c")) sawComputed = true;
+    if (s.includes("o")) sawOracle = true;
+  }
+  assert(sawComputed && sawOracle, "ε=0.5 なのに片側しか出ていない");
+});
+
+Deno.test("curriculum: each group takes the computed answer ≈ε of the time", () => {
+  const n = 2000;
+  const eps = 0.3;
+  const p = curriculumReads(ORACLE_P, COMPUTED_P, eps, 0xABCDEF);
+  const fell = [0, 0, 0, 0, 0, 0, 0];
+  for (let i = 0; i < n; i++) {
+    const s = source(p(OBS)!);
+    for (let g = 0; g < fell.length; g++) if (s[g] !== "o") fell[g]++;
+  }
+  for (let g = 0; g < fell.length; g++) {
+    const rate = fell[g] / n;
+    assert(Math.abs(rate - eps) < 0.05, `組 ${g}: 脱落率 ${rate.toFixed(3)} が 0.3 から離れすぎ`);
+  }
+});
+
+Deno.test("curriculum: the schedule is deterministic per (ε, seed)", () => {
+  const trace = (eps: number, seed: number) => {
+    const p = curriculumReads(ORACLE_P, COMPUTED_P, eps, seed);
+    let s = "";
+    for (let i = 0; i < 40; i++) s += source(p(OBS)!) + " ";
+    return s;
+  };
+  assertEquals(trace(0.3, 1), trace(0.3, 1), "同じ種で同じ脱落 — paired が再現できる条件");
+  assertNotEquals(trace(0.3, 1), trace(0.3, 2));
+  assertNotEquals(trace(0.3, 1), trace(0.6, 1), "ε は種に畳み込まれている");
+});
+
+Deno.test("curriculum: a caller-supplied Rng is used as given", () => {
+  const trace = (r: ReturnType<typeof sfc32>) => {
+    const p = curriculumReads(ORACLE_P, COMPUTED_P, 0.4, r);
+    let s = "";
+    for (let i = 0; i < 30; i++) s += source(p(OBS)!) + " ";
+    return s;
+  };
+  assertEquals(trace(sfc32(99)), trace(sfc32(99)));
+  assertNotEquals(trace(sfc32(99)), trace(sfc32(100)));
+});
+
+Deno.test("curriculum: ε outside [0,1] is refused", () => {
+  assertThrows(() => curriculumReads(ORACLE_P, COMPUTED_P, -0.01), RangeError);
+  assertThrows(() => curriculumReads(ORACLE_P, COMPUTED_P, 1.01), RangeError);
+  assertThrows(() => curriculumReads(ORACLE_P, COMPUTED_P, NaN), RangeError);
+});
+
+Deno.test("curriculum: a silent oracle leaves the counting reader in charge", () => {
+  const p = curriculumReads(() => null, COMPUTED_P, 0.5, 7);
+  for (let i = 0; i < 20; i++) {
+    const r = p(OBS)!;
+    // Every group either the computed answer or nothing — never an oracle value,
+    // and never a crash.
+    assert(r.nextDraw === undefined, "オラクルが黙っているのに順序が湧いた");
+    const s = source(r);
+    assert(/^[c-][c-][c-]/.test(s), `オラクル由来の値が出た: ${s}`);
+  }
+  // Both silent is silence.
+  assertEquals(curriculumReads(() => null, () => null, 0.5, 7)(OBS), null);
+});
+
+Deno.test("curriculum: the planner flag survives every dropout", () => {
+  const p = curriculumReads(ORACLE_P, COMPUTED_P, 0.9, 3);
+  for (let i = 0; i < 30; i++) assertEquals(p(OBS)!.planner, true);
+  // …and is taken from the counting reader when only it declared one.
+  const q = curriculumReads(() => ({ tenpaiP: [1, 0, 0] }), () => ({ planner: true }), 0.5, 3);
+  for (let i = 0; i < 10; i++) assertEquals(q(OBS)!.planner, true);
+});
+
+// ---------------------------------------------------------------------------
 // end to end
 // ---------------------------------------------------------------------------
 
 function playOne(seed: number, channels: Set<OracleChannel>, noise = 0) {
-  const ref: { t: Table | null } = { t: null };
-  const provider = noisyReads(oracleReads(() => ref.t, scorer, channels), noise);
-  const policies = SEATS.map((s) =>
+  // `make` runs once per seat, so the (stateful) noise wrapper is built exactly
+  // once — for seat 0, the only seat that reads it.
+  return playHanchan(seed, (s, ref) =>
     s === 0
-      ? new AugmentedHeuristic(`O${s}`, seed * 4 + s, provider)
-      : new HeuristicPolicy(`H${s}`, seed * 4 + s)
-  );
-  return runMatchSync(policies, {
-    seed,
-    cfg: JANKI,
-    dojo: DOJO_HEADLESS,
-    scorer,
-    tableRef: ref,
-    ...makeDojoHooks(DOJO_HEADLESS),
-  });
+      ? new AugmentedHeuristic(
+        `O${s}`,
+        seed * 4 + s,
+        noisyReads(oracleReads(() => ref.t, scorer, channels), noise),
+      )
+      : new HeuristicPolicy(`H${s}`, seed * 4 + s));
 }
 
 Deno.test("augmented: an all-channels seat plays a legal hanchan, deterministically", () => {
