@@ -3,7 +3,9 @@
 //      discard must not be offered (an empty turn action list soft-locks the
 //      round loop),
 //   2. when the drawn tile's type is also held, BOTH the tsumogiri and the
-//      tedashi discard must be enumerated.
+//      tedashi discard must be enumerated,
+//   3. chi/pon options are distinct by tile *kind* (type + aka), not id: two
+//      plain copies of a tile must not double the offered calls.
 
 import { assert, assertEquals } from "@std/assert";
 import type { Tile } from "mjrender/model.ts";
@@ -124,6 +126,45 @@ Deno.test("turn: drawn type also held yields both tsumogiri and tedashi", () => 
   assert(ones[1].t === "discard" && ones[1].tsumogiri);
   // Exactly one held representative, as before: 1m2m…9m plus the drawn copy.
   assertEquals(ds.length, 10);
+});
+
+Deno.test("claim: duplicate copies in hand do not duplicate chi options", () => {
+  const t = makeTable();
+  // Two 6m and two 7m used to enumerate 2×2 identical 6m7m chis.
+  setHand(t, 1, tiles("66778m9s"));
+  const called = tiles("5m")[0];
+
+  const chis = claimActions(t, 1, called, 0).filter((a) => a.t === "chi");
+  assertEquals(chis.length, 1, "one chi per distinct shape, not per id combination");
+});
+
+Deno.test("claim: aka and plain five stay distinct chi options", () => {
+  const t = makeTable();
+  // tiles() hands out 5p copies in ascending id order and ids 52/53 are aka,
+  // so "555p" is aka, aka, plain: two aka must collapse to one option while
+  // the plain copy stays separately offered.
+  setHand(t, 1, tiles("555p6p9s"));
+  const called = tiles("4p")[0];
+
+  const chis = claimActions(t, 1, called, 0).filter((a) => a.t === "chi");
+  assertEquals(chis.length, 2, "spend-the-aka and keep-the-aka, nothing else");
+});
+
+Deno.test("claim: pon pairs are distinct by aka composition, not id", () => {
+  const t = makeTable();
+
+  // Three plain copies (5s has no aka): one pon, not three.
+  setHand(t, 1, tiles("555s9m9p"));
+  const calledS = tiles("5555s")[3];
+  const ponsS = claimActions(t, 1, calledS, 0).filter((a) => a.t === "pon");
+  assertEquals(ponsS.length, 1);
+
+  // aka, aka, plain 5p: pon with two aka and pon with aka+plain — the two
+  // aka-aka id pairs collapse, the aka-plain choice survives.
+  setHand(t, 2, tiles("555p9m9p"));
+  const calledP = tiles("5555p")[3]; // id 55, a plain copy
+  const ponsP = claimActions(t, 2, calledP, 0).filter((a) => a.t === "pon");
+  assertEquals(ponsP.length, 2);
 });
 
 Deno.test("turn: drawn type held only once yields a single tsumogiri candidate", () => {

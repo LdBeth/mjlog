@@ -210,17 +210,3 @@ export function assembleCandidate(
     tsumogiri: obs.drawn !== null && tile === obs.drawn ? 1 : 0,
   };
 }
-
-/** Both halves at once. The convenient form; the decision loop uses the split. */
-export function assembleEvidence(
-  h: EvidenceHooks,
-  ctx: Ctx,
-  tile: Tile,
-  sh: number,
-  wideOpen: boolean,
-): EvidenceVector {
-  return {
-    context: assembleContext(h, ctx),
-    candidate: assembleCandidate(h, ctx, tile, sh, wideOpen),
-  };
-}

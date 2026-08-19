@@ -15,10 +15,6 @@ export function relSeat(self: Seat, from: Seat): 0 | 1 | 2 | 3 {
   return ((from - self + 4) % 4) as 0 | 1 | 2 | 3;
 }
 
-export function nextSeat(s: Seat): Seat {
-  return ((s + 1) % 4) as Seat;
-}
-
 // ---------------------------------------------------------------------------
 // Actions
 // ---------------------------------------------------------------------------
@@ -39,8 +35,6 @@ export type Action =
   | { t: "ron" }
   | { t: "tsumo" }
   | { t: "pass" };
-
-export type ActionKind = Action["t"];
 
 /** A request from the game master for one seat to choose among `legal`. */
 export type Request =

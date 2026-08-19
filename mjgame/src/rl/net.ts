@@ -562,11 +562,6 @@ export function loadNativeAttn(attn: Attn): boolean {
   return true;
 }
 
-/** Whether this net's river encoder currently runs natively. */
-export function isAttnNative(net: Net): boolean {
-  return net.attn?.native !== undefined;
-}
-
 /** Releases the native encoder context; the TS path keeps working. */
 export function closeAttn(attn: Attn): void {
   if (!attn.native) return;

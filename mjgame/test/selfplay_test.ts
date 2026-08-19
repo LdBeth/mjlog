@@ -58,11 +58,11 @@ Deno.test("self-play: points are conserved every round", () => {
 });
 
 Deno.test("finalize: leftover 供託 goes to the top finisher instead of evaporating", () => {
-  // Seed 11 ends in an exhaustive draw with one riichi stick still on the table.
+  // Seed 24 ends in an exhaustive draw with one riichi stick still on the table.
   // If the fixture ever stops leaving one, re-pick a seed with that property
   // rather than dropping the test — a match that ends on a draw is the only way
   // sticks can outlive the last round.
-  const r = play(11);
+  const r = play(24);
   const sticks = leftoverKyotaku(r);
   assertEquals(r.outcomes[r.outcomes.length - 1].kind, "ryuukyoku");
   assert(sticks > 0, "fixture seed no longer leaves a 供託 stick");

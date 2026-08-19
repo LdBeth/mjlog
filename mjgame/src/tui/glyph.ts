@@ -75,11 +75,6 @@ export function typeSpan(type: number, o: GlyphOpts, extra = ""): Span {
   return sp(typeText(type, o.mode), typeSgr(type, extra));
 }
 
-/** Tile ids joined into a row of spans, one per tile, no separators. */
-export function tileSpans(ids: readonly Tile[], o: GlyphOpts, extra = ""): Span[] {
-  return ids.map((id) => tileSpan(id, o, extra));
-}
-
 // ---------------------------------------------------------------------------
 // River markers
 // ---------------------------------------------------------------------------

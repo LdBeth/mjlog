@@ -5,7 +5,7 @@
 // physical copies of a type are ids `type*4 .. type*4+3`.
 
 import type { Tile } from "mjrender/model.ts";
-import { rankOfType, suitOfType, tileType } from "mjrender/tiles.ts";
+import { rankOfType, tileType } from "mjrender/tiles.ts";
 
 export * from "mjrender/tiles.ts";
 export type { Tile };
@@ -16,16 +16,6 @@ export type { Tile };
  * (one red 5m/5p/5s), which mjrender hardcodes — see `setAkaIds()` there.
  */
 export const AKA_5P: readonly Tile[] = [52, 53];
-
-export function isAkaId(id: Tile, set: ReadonlySet<Tile>): boolean {
-  return set.has(id);
-}
-
-/** The four physical copies of a tile type. */
-export function idsOfType(type: number): [Tile, Tile, Tile, Tile] {
-  const b = type * 4;
-  return [b, b + 1, b + 2, b + 3];
-}
 
 export function isHonor(type: number): boolean {
   return type >= 27;
@@ -78,10 +68,6 @@ export function sujiTypes(type: number): number[] {
   if (r > 3) out.push(type - 3);
   if (r < 7) out.push(type + 3);
   return out;
-}
-
-export function sameSuit(a: number, b: number): boolean {
-  return suitOfType(a) === suitOfType(b);
 }
 
 /** 34-length zero vector. */

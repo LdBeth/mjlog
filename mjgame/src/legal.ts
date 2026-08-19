@@ -39,8 +39,6 @@ export interface WinOracle {
 /** Placeholder oracle: every complete shape counts. Replaced by `yaku.ts`. */
 export const ANY_WIN: WinOracle = { hasYaku: () => true };
 
-const uniq = (xs: Tile[]): Tile[] => [...new Set(xs)];
-
 /**
  * One representative id per distinct tile *type* in hand, plus every aka copy —
  * except for the drawn tile's type, which gets two (see below).
@@ -171,17 +169,27 @@ function chiShapes(t: Table, seat: Seat, tile: Tile): Array<[Tile, Tile]> {
   if (ty >= 27) return [];
   const suit = suitOfType(ty);
   const r = rankOfType(ty);
-  const pick = (rank: number): Tile[] =>
-    rank < 1 || rank > 9 ? [] : t.hands[seat].filter((id) => {
+  // One representative per distinct *kind* at each rank: copies of a tile are
+  // interchangeable in a chi, but an aka is not a plain 5 — spending it or
+  // keeping it are different options, so both representatives are offered.
+  const pick = (rank: number): Tile[] => {
+    if (rank < 1 || rank > 9) return [];
+    let plain: Tile | undefined;
+    let aka: Tile | undefined;
+    for (const id of t.hands[seat]) {
       const q = tileType(id);
-      return suitOfType(q) === suit && rankOfType(q) === rank;
-    });
+      if (suitOfType(q) !== suit || rankOfType(q) !== rank) continue;
+      if (t.cfg.akaIds.has(id)) aka ??= id;
+      else plain ??= id;
+    }
+    return [plain, aka].filter((x): x is Tile => x !== undefined);
+  };
 
   const out: Array<[Tile, Tile]> = [];
   const combos: Array<[number, number]> = [[r - 2, r - 1], [r - 1, r + 1], [r + 1, r + 2]];
   for (const [x, y] of combos) {
-    for (const a of uniq(pick(x))) {
-      for (const b of uniq(pick(y))) out.push([a, b]);
+    for (const a of pick(x)) {
+      for (const b of pick(y)) out.push([a, b]);
     }
   }
   return out;
@@ -250,11 +258,14 @@ export function claimActions(
 
   if (sameType.length >= 2) {
     // Offer each distinct pair, so a player can choose to keep or spend an aka.
+    // Distinct means by aka composition, not by id: copies of a plain tile are
+    // interchangeable, so e.g. 5p 5p 0p offers exactly 5p5p and 5p0p.
     const combos = new Set<string>();
+    const kind = (id: Tile) => (t.cfg.akaIds.has(id) ? "a" : "p");
     for (let i = 0; i < sameType.length; i++) {
       for (let j = i + 1; j < sameType.length; j++) {
         const pair: [Tile, Tile] = [sameType[i], sameType[j]];
-        const key = pair.join(",");
+        const key = [kind(pair[0]), kind(pair[1])].sort().join("");
         if (combos.has(key)) continue;
         combos.add(key);
         const pon: Action = { t: "pon", tiles: pair, called: tile };

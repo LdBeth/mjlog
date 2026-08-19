@@ -233,9 +233,4 @@ export function observe(
   };
 }
 
-/** Absolute seat for a relative index in an Observation. */
-export function absSeat(obs: Observation, relIndex: number): Seat {
-  return ((obs.seat + relIndex) % 4) as Seat;
-}
-
 export { relSeat };

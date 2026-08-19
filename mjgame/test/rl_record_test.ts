@@ -103,7 +103,7 @@ Deno.test("record: 1半荘の JSONL が契約どおりに書かれる", async (t
     // truncate-toward-zero half of 精算 actually bite. If engine changes ever
     // trip the guards below, re-pick a seed with the same three properties
     // rather than dropping them.
-    const { result, lines, stats } = record(path, 966);
+    const { result, lines, stats } = record(path, 111);
     assert(leftoverKyotaku(result) > 0, "fixture seed no longer leaves a 供託 stick");
     assert(result.outcomes.some((o) => o.kind === "agari"), "fixture seed has no 和了");
     assert(result.scores.some((s) => s < JANKI.returnScore), "fixture seed has no minus 精算");

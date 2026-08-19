@@ -188,13 +188,4 @@ export function toSidecar(m: MatchResult, cfg: RuleConfig): Sidecar {
   };
 }
 
-/** Write `<base>.xml` and `<base>.mjgame.json` side by side. */
-export async function writeMatch(base: string, m: MatchResult, cfg: RuleConfig): Promise<void> {
-  await Deno.writeTextFile(`${base}.xml`, toTenhouXml(m, cfg));
-  await Deno.writeTextFile(
-    `${base}.mjgame.json`,
-    JSON.stringify(toSidecar(m, cfg), null, 2) + "\n",
-  );
-}
-
 export type { Tile };

@@ -103,7 +103,6 @@ import type {
 } from "./computed.ts";
 import {
   baseValueOf,
-  combineShapes,
   DEFAULT_COMPUTED,
   tenpaiPriorOf,
   valueOnType,
@@ -463,17 +462,6 @@ export function dealinRowFrom(tenpaiP: number, cond: Float64Array): Float32Array
     if (q > 0) row[ty] = q;
   }
   return row;
-}
-
-/** The per-shape weights of one cell, for a human staring at one decision. */
-export function shapesFromRecord(
-  rec: CalibRecord,
-  i: number,
-  ty: number,
-  w: ComputedWeights = DEFAULT_COMPUTED,
-): Record<string, number> {
-  const o = rec.o[i];
-  return combineShapes(ty, basesFromRecord(o)[ty], flagsFromRecord(o, ty, decode34(rec.dr)), w);
 }
 
 /**

@@ -13,7 +13,6 @@
 
 import type { Tile } from "mjrender/model.ts";
 import type { WinOracle } from "../legal.ts";
-import { ANY_WIN } from "../legal.ts";
 import type { DojoConfig, RuleConfig } from "../rules.ts";
 import type { Table } from "../table.ts";
 import type { Action, Seat, Violation } from "../types.ts";
@@ -112,15 +111,4 @@ export function makeRunner(rules: DojoRule[]) {
     }
     return out;
   };
-}
-
-export function defaultCtx(
-  t: Table,
-  seat: Seat,
-  action: Action,
-  dojo: DojoConfig,
-  drawn: Tile | null = null,
-  oracle: WinOracle = ANY_WIN,
-): RuleCtx {
-  return { t, seat, action, drawn, cfg: t.cfg, dojo, oracle };
 }

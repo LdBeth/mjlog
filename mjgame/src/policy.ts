@@ -19,7 +19,3 @@ export interface Policy {
 export interface SyncPolicy extends Policy {
   decide(obs: Observation): Action;
 }
-
-export function isSync(p: Policy): p is SyncPolicy {
-  return (p as { sync?: boolean }).sync === true;
-}
