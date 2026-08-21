@@ -15,7 +15,7 @@ import { doraFromIndicatorType, tileType } from "mjrender/tiles.ts";
 import { countsFromTiles, shanten } from "mjrender/shanten.ts";
 import { HeuristicPolicy } from "../src/ai/heuristic.ts";
 import { RandomPolicy } from "../src/ai/random.ts";
-import { makeDojoHooks } from "../src/main.ts";
+import { makeDojoHooks } from "../src/dojo.ts";
 import { runMatchSync } from "../src/match.ts";
 import type { Observation } from "../src/observe.ts";
 import type { SyncPolicy } from "../src/policy.ts";

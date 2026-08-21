@@ -81,6 +81,7 @@ import type { SyncPolicy } from "../policy.ts";
 import type { RuleConfig } from "../rules.ts";
 import type { Action, PublicEvent, RoundOutcome, Violation } from "../types.ts";
 import { actionIndex, maskIndices } from "./actionspace.ts";
+import type { EncodingCache } from "./features.ts";
 import { encode, encodeSeq, FEATURES } from "./features.ts";
 
 // ---------------------------------------------------------------------------
@@ -115,41 +116,115 @@ export function f32leBytes(a: Float32Array): Uint8Array {
 // writer
 // ---------------------------------------------------------------------------
 
+/** Line counts by kind, as `TrajectoryWriter.stats` reports them. */
+export interface LineCounts {
+  d: number;
+  r: number;
+  m: number;
+}
+
 /**
  * One open file, shared by all four seats of a run. Each line is handed to
  * `writeSync` on its own, so a killed run still leaves every completed line on
  * disk (only the partial tail, if any, is lost — and there is no partial tail,
  * because a line is a single write).
+ *
+ * A writer can also hold its lines IN MEMORY instead (`TrajectoryWriter.
+ * buffering()`), which is what `--jobs` is built on: a worker has no business
+ * writing into the run's one dataset — the file belongs to the main thread,
+ * which appends each game's buffered text in GAME ORDER (`writeRaw`) so the
+ * result is byte-identical to the sequential run. `drain` hands one game's
+ * lines over and clears the buffer, so a worker's memory does not grow with the
+ * shard.
  */
 export class TrajectoryWriter {
   readonly path: string;
-  private file: Deno.FsFile;
+  private file: Deno.FsFile | null;
+  /** Non-null exactly in memory mode; `file` is then null. */
+  private buf: string[] | null;
   private enc = new TextEncoder();
   private counts = { d: 0, r: 0, m: 0 };
+  /** `drain`'s cursor: counts as of the last drain. */
+  private drained = { d: 0, r: 0, m: 0 };
 
   /** Opens (and TRUNCATES) `path`: a new run is a new dataset. */
   constructor(path: string) {
     this.path = path;
+    if (path === "") {
+      // Memory mode — see `buffering()`, the only caller that passes "".
+      this.file = null;
+      this.buf = [];
+      return;
+    }
     const dir = path.slice(0, path.lastIndexOf("/"));
     if (dir) Deno.mkdirSync(dir, { recursive: true });
     this.file = Deno.openSync(path, { create: true, write: true, truncate: true });
+    this.buf = null;
+  }
+
+  /** A writer that accumulates lines for `drain()` and never touches disk. */
+  static buffering(): TrajectoryWriter {
+    return new TrajectoryWriter("");
   }
 
   writeLine(obj: Record<string, unknown>): void {
-    const bytes = this.enc.encode(JSON.stringify(obj) + "\n");
-    let n = 0;
-    while (n < bytes.length) n += this.file.writeSync(bytes.subarray(n));
+    const text = JSON.stringify(obj) + "\n";
     const k = obj.k as "d" | "r" | "m";
     if (k in this.counts) this.counts[k]++;
+    if (this.buf) {
+      this.buf.push(text);
+      return;
+    }
+    const bytes = this.enc.encode(text);
+    let n = 0;
+    while (n < bytes.length) n += this.file!.writeSync(bytes.subarray(n));
+  }
+
+  /**
+   * Append already-serialised lines (a `drain()` result from a worker) verbatim,
+   * folding their counts in. The bytes are written exactly as the worker built
+   * them, which is what makes a `--jobs=N` dataset identical to a `--jobs=1` one
+   * rather than merely equivalent.
+   */
+  writeRaw(text: string, counts: LineCounts): void {
+    this.counts.d += counts.d;
+    this.counts.r += counts.r;
+    this.counts.m += counts.m;
+    if (this.buf) {
+      this.buf.push(text);
+      return;
+    }
+    if (text === "") return;
+    const bytes = this.enc.encode(text);
+    let n = 0;
+    while (n < bytes.length) n += this.file!.writeSync(bytes.subarray(n));
+  }
+
+  /**
+   * Memory mode only: everything written since the last drain, as one string,
+   * plus the counts of just those lines. Clears the buffer.
+   */
+  drain(): { text: string; counts: LineCounts } {
+    if (!this.buf) throw new Error("drain() is for a buffering writer only");
+    const text = this.buf.join("");
+    this.buf.length = 0;
+    const counts: LineCounts = {
+      d: this.counts.d - this.drained.d,
+      r: this.counts.r - this.drained.r,
+      m: this.counts.m - this.drained.m,
+    };
+    this.drained = { ...this.counts };
+    return { text, counts };
   }
 
   /** Line counts by kind — what the CLI prints after a recording run. */
-  stats(): { d: number; r: number; m: number } {
+  stats(): LineCounts {
     return { ...this.counts };
   }
 
   close(): void {
-    this.file.close();
+    this.file?.close();
+    this.file = null;
   }
 }
 
@@ -190,8 +265,21 @@ export class RecordingPolicy implements SyncPolicy {
 
   decide(obs: Observation): Action {
     const a = this.inner.decide(obs);
-    const { planes, scalars } = encode(obs);
-    const seq = encodeSeq(obs);
+    // The inner policy has usually just encoded this very Observation — a
+    // `NeuralPolicy` cannot decide without doing so — and then offers what it
+    // built. Take the offer only when it names THIS Observation by reference,
+    // and encode here otherwise: a heuristic seat offers nothing, and a v3 net
+    // offers no seq. The bytes are identical either way, `encode`/`encodeSeq`
+    // being pure functions of the Observation.
+    //
+    // INVARIANT the offer relies on: every field is serialised BY VALUE right
+    // here (`toBase64` and `f32leBytes` both copy) and the line is written
+    // before this method returns, so nothing survives into the next decision.
+    // Whatever scratch buffers the encoders reuse are therefore invisible.
+    const offered = (this.inner as Partial<EncodingCache>).lastEncoding ?? null;
+    const cached = offered !== null && offered.obs === obs ? offered : null;
+    const { planes, scalars } = cached ?? encode(obs);
+    const seq = cached?.seq ?? encodeSeq(obs);
     const line: Record<string, unknown> = {
       k: "d",
       v: FEATURES.version,
@@ -203,7 +291,7 @@ export class RecordingPolicy implements SyncPolicy {
       scalars: toBase64(f32leBytes(scalars)),
       seq: toBase64(new Uint8Array(seq.buffer, seq.byteOffset, seq.byteLength)),
       mask: maskIndices(obs.legal),
-      a: actionIndex(a, obs.akaIds),
+      a: actionIndex(a),
     };
     if (this.oracle) {
       const { oplanes, oppShanten } = this.oracle(obs.seat);
@@ -226,11 +314,14 @@ export interface RoundId {
 }
 
 /**
- * `id`: the round's (kyoku, honba), which is what joins this line to the "d"
- * lines of the same round — see the header. `viol`: 評価点マイナス incurred in
- * THIS round, per absolute seat (length 4).
+ * One "r" line. `id`: the round's (kyoku, honba), which is what joins it to the
+ * "d" lines of the same round — see the header. `viol`: 評価点マイナス incurred
+ * in THIS round, per absolute seat (length 4).
+ *
+ * Module-private: an "r" line only ever makes sense as part of the batch
+ * `writeMatchEnd` flushes, which is where the per-round ledger slicing lives.
  */
-export function writeRoundEnd(
+function writeRoundEnd(
   w: TrajectoryWriter,
   id: RoundId,
   outcome: RoundOutcome,

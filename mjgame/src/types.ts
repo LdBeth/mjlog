@@ -45,7 +45,7 @@ export type Request =
 // Violations (dojo penalty ledger)
 // ---------------------------------------------------------------------------
 
-export type RuleTier = "A" | "B";
+type RuleTier = "A" | "B";
 
 export interface Violation {
   rule: string;
@@ -57,7 +57,6 @@ export interface Violation {
   tier: RuleTier;
   confidence: number; // 1.0 for Tier A; < 1 for approximations
   detail: string; // human-readable evidence
-  sanction?: "和了放棄" | "振込禁止";
 }
 
 // ---------------------------------------------------------------------------

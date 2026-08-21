@@ -62,7 +62,12 @@ export interface Reads {
   dealinP?: Float32Array[];
   /** Per opponent: expected ron payment in points, over its ronnable types. */
   expLoss?: number[];
-  /** Per opponent, per tile type: the exact payment. Oracle only. */
+  /**
+   * Per opponent, per tile type: what a ron on that type pays. The oracle fills
+   * it exactly; `computedReads` fills it from the static value model, so a
+   * shipped 計算 seat has it too and `riskOf` reaches `expLoss` only when the
+   * whole deal-in group has been dropped.
+   */
   dealinValue?: Float32Array[];
   /** Tile TYPE of `wall.peekLive(0)` — the next tile off the live wall. */
   nextDraw?: number | null;
@@ -106,7 +111,7 @@ export type ReadsProvider = (obs: Observation) => Reads | null;
  */
 export type OracleChannel = "C1" | "C2" | "C3" | "C4" | "C5" | "C6" | "C7O" | "C7P";
 
-export const ORACLE_CHANNELS: readonly OracleChannel[] = [
+const ORACLE_CHANNELS: readonly OracleChannel[] = [
   "C1",
   "C2",
   "C3",
@@ -160,7 +165,7 @@ export interface AugmentedWeights {
   planRelock: number;
 }
 
-export const DEFAULT_AUGMENTED_WEIGHTS: AugmentedWeights = {
+const DEFAULT_AUGMENTED_WEIGHTS: AugmentedWeights = {
   lambda: 0.25,
   floor: 0.5,
   drawRealize: 150,
@@ -507,7 +512,7 @@ export function calibrationReads(
 
 const clamp = (x: number, lo: number, hi: number) => x < lo ? lo : x > hi ? hi : x;
 
-export interface AugmentedOptions extends HeuristicOptions {
+interface AugmentedOptions extends HeuristicOptions {
   augment?: Partial<AugmentedWeights>;
   /** Search bounds and ruleset for the C7 planner. */
   plan?: PlannerOptions;
@@ -541,9 +546,23 @@ export class AugmentedHeuristic extends HeuristicPolicy {
     this.planOpts = opts.plan ?? {};
   }
 
-  /** The plan currently locked on, if any. Read-only; for the TUI and tests. */
+  /** The plan currently locked on, if any. Read-only; the tests read it. */
   get plan(): TargetPlan | null {
     return this.target;
+  }
+
+  /**
+   * A new match, and therefore a new hand: the lock must not survive it.
+   *
+   * `target` outlives a decision on purpose (that IS the lock) and is scoped to
+   * one 局 by `targetRound`. A reset does not change the 局 label, so without
+   * this the FIRST hand after a reset would inherit the last one's shape
+   * whenever the two happened to carry the same `kyoku:honba`.
+   */
+  override reset(seed: number): void {
+    super.reset(seed);
+    this.target = null;
+    this.targetRound = "";
   }
 
   /**
@@ -627,7 +646,10 @@ export class AugmentedHeuristic extends HeuristicPolicy {
 
   /** P(deal in) × what it pays, floored by the rule-based reading. */
   protected override riskOf(ctx: Ctx, tile: Tile): number {
-    const base = super.riskOf(ctx, tile);
+    // ONE lookup for both halves: the rule ladder's price, and the proof test
+    // below. They are the same entry of the same danger map.
+    const level = this.dangerLevelOf(ctx, tile);
+    const base = this.ruleRisk(level);
     const dealinP = this.reads?.dealinP;
     if (!dealinP) return base;
 
@@ -639,7 +661,7 @@ export class AugmentedHeuristic extends HeuristicPolicy {
     // an estimate-holding policy must keep pricing there. Quiet tables are
     // where a silent tenpai lives, and where the deal-in estimate has no rule
     // reading to fall back on.
-    if (ctx.obs.danger.get(tileType(tile))?.level === "安全") return 0;
+    if (level === "安全") return 0;
 
     const ty = tileType(tile);
     let risk = 0;

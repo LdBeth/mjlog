@@ -48,23 +48,6 @@ export interface DojoRule {
   check(ctx: RuleCtx): Array<Partial<Violation>> | null;
 }
 
-export class Ledger {
-  readonly items: Violation[] = [];
-
-  add(v: Violation): void {
-    this.items.push(v);
-  }
-  bySeat(seat: Seat): Violation[] {
-    return this.items.filter((v) => v.seat === seat);
-  }
-  total(seat: Seat): number {
-    return this.bySeat(seat).reduce((a, v) => a + v.points, 0);
-  }
-  clean(seat: Seat): boolean {
-    return this.bySeat(seat).length === 0;
-  }
-}
-
 /** Fill in the fields every rule shares, so `check` only returns the specifics. */
 function complete(rule: DojoRule, ctx: RuleCtx, part: Partial<Violation>): Violation {
   return {
@@ -91,10 +74,17 @@ export function makeRunner(rules: DojoRule[]) {
     }
   }
 
-  return function runHook(hook: Hook, ctx: RuleCtx): Violation[] {
+  /**
+   * `only` narrows the run to a single rule id. It is a pure optimization for
+   * callers that would discard the rest anyway (`preview.ts::previewSkipKan`):
+   * the result is exactly what filtering the full run by `v.rule === only`
+   * would give, minus the predicate calls whose answers were thrown away.
+   */
+  return function runHook(hook: Hook, ctx: RuleCtx, only?: string): Violation[] {
     if (!ctx.dojo.enabled) return [];
     const out: Violation[] = [];
     for (const rule of byHook.get(hook) ?? []) {
+      if (only !== undefined && rule.id !== only) continue;
       if (rule.tier === "B" && !ctx.dojo.tierB) continue;
       let parts: Array<Partial<Violation>> | null = null;
       try {

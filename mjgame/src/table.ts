@@ -47,7 +47,7 @@ export interface RoundInit {
   dice: [number, number];
 }
 
-export type EventSink = (e: PublicEvent) => void;
+type EventSink = (e: PublicEvent) => void;
 
 export class Table {
   readonly cfg: RuleConfig;
@@ -170,9 +170,6 @@ export class Table {
   }
   get roundWindType(): number {
     return this.board.roundWindType;
-  }
-  valueHonors(seat: Seat): ReadonlySet<number> {
-    return this.board.valueHonorsBySeat[seat];
   }
 
   threats(seat: Seat): RiichiThreat[] {

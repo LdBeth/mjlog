@@ -13,36 +13,17 @@ import { doraFromIndicatorType, tileType } from "mjrender/tiles.ts";
 import { countsFromTiles, shanten } from "./kernel.ts";
 import type { RuleConfig } from "./rules.ts";
 import type { Scorer, WinFlags } from "./round.ts";
+import { winFlags } from "./round.ts";
 import type { Table } from "./table.ts";
 import type { DrawKind, Seat, Violation, WinInfo } from "./types.ts";
 import { SEATS } from "./types.ts";
-import { hasAnyYaku, scoreWin as scoreHand, type WinContext } from "./yaku.ts";
+import { basePoints, hasAnyYaku, scoreWin as scoreHand, type WinContext } from "./yaku.ts";
 
-const LIMIT_NAMES = ["", "満貫", "跳満", "倍満", "三倍満", "役満"] as const;
+// 基本点 lives in `yaku.ts` (which needs it and must not import this module);
+// it is re-exported here because that is where its callers look for it.
+export { basePoints };
 
 const ceil100 = (n: number): number => Math.ceil(n / 100) * 100;
-
-/**
- * 基本点 for a han/fu pair, capped on the 満貫 ladder.
- * With `cfg.kazoeYakuman` off (the dojo setting), 13+ han settles as 三倍満.
- */
-export function basePoints(
-  han: number,
-  fu: number,
-  cfg: RuleConfig,
-): { base: number; limit: number; name: string } {
-  const at = (limit: number, base: number) => ({ base, limit, name: LIMIT_NAMES[limit] });
-  if (han >= 13) return cfg.kazoeYakuman ? at(5, 8000) : at(4, 6000);
-  if (han >= 11) return at(4, 6000);
-  if (han >= 8) return at(3, 4000);
-  if (han >= 6) return at(2, 3000);
-  if (han >= 5) return at(1, 2000);
-  const base = fu * (1 << (2 + han));
-  if (base >= 2000) return at(1, 2000);
-  // 切り上げ満貫 promotes exactly the 1920 cell (4飜30符 / 3飜60符).
-  if (cfg.kiriageMangan && base >= 1920) return at(1, 2000);
-  return { base, limit: 0, name: "" };
-}
 
 export function ronPayment(dealerWins: boolean, base: number): number {
   return ceil100(base * (dealerWins ? 6 : 4));
@@ -149,13 +130,7 @@ function buildContext(
   const hand = flags.tsumo ? [...t.hands[who]] : [...t.hands[who], winTile];
   const melds = [...t.melds[who]];
 
-  // 裏ドラ is riichi-only, and 槓裏 is a separate switch: without it only the
-  // opening indicator's ura counts.
-  let ura: Tile[] = [];
-  if (flags.riichi && t.cfg.uradora) {
-    const all = t.wall.uraIndicators();
-    ura = t.cfg.kanUra ? all : all.slice(0, 1);
-  }
+  const ura = uraIndicatorsOf(t, flags);
 
   return {
     seat: who,
@@ -190,20 +165,12 @@ function buildContext(
  */
 function gateFlags(t: Table, seat: Seat, tsumo: boolean): WinFlags {
   const last = t.wall.remaining === 0;
-  return {
-    tsumo,
-    riichi: t.riichi[seat],
-    doubleRiichi: t.doubleRiichi[seat],
-    ippatsu: t.ippatsu[seat],
+  return winFlags(t, seat, tsumo, {
     rinshan: false,
     chankan: false,
     haitei: tsumo && last,
     houtei: !tsumo && last,
-    tenhou: t.cfg.tenhouChiihou && tsumo && t.firstTurnIntact && seat === t.dealer &&
-      t.turnIndex === 0,
-    chiihou: t.cfg.tenhouChiihou && tsumo && t.firstTurnIntact && seat !== t.dealer &&
-      t.turnIndex < 4,
-  };
+  });
 }
 
 // ---------------------------------------------------------------------------

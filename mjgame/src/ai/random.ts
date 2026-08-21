@@ -8,7 +8,7 @@ import type { Rng } from "../rng.ts";
 import { sfc32 } from "../rng.ts";
 import type { Action } from "../types.ts";
 
-export interface RandomOptions {
+interface RandomOptions {
   /** Probability of taking a win when one is offered. 1 = always. */
   winRate?: number;
   /** Probability of accepting a call (pon/chi/kan) when offered. */

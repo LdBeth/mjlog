@@ -7,14 +7,9 @@ import { assertEquals } from "@std/assert";
 import type { Meld, MeldKind, Tile } from "mjrender/model.ts";
 import { shanten, ukeireTypes } from "mjrender/shanten.ts";
 import { type Rng, sfc32 } from "../src/rng.ts";
-import {
-  type Block,
-  decomposeWin,
-  type Decomposition,
-  isComplete,
-  waitTypes,
-} from "../src/decompose.ts";
-import { countsOf, YAOCHU_TYPES, zeros34 } from "../src/tiles.ts";
+import { type Block, decomposeWin, type Decomposition, isComplete } from "../src/decompose.ts";
+import { countsFromTiles as countsOf } from "../src/kernel.ts";
+import { YAOCHU_TYPES, zeros34 } from "../src/tiles.ts";
 import type { Seat } from "../src/types.ts";
 import { tiles } from "./helpers.ts";
 
@@ -217,7 +212,7 @@ function blocksCover(d: Decomposition, nMelds: number, counts: number[]): boolea
 
 const MELD_WEIGHTS = [0, 0, 0, 0, 1, 1, 1, 2, 2, 3];
 
-Deno.test("decomposeWin/waitTypes agree with mjrender's shanten engine", () => {
+Deno.test("decomposeWin/isComplete agree with mjrender's shanten engine", () => {
   const rng = sfc32("decompose-invariants");
   const N = 20000;
   let completeSeen = 0;
@@ -237,7 +232,7 @@ Deno.test("decomposeWin/waitTypes agree with mjrender's shanten engine", () => {
     const closed = melds.every((m) => m.kind === "ankan");
     const winTile = hand[rng.int(hand.length)];
 
-    const dec = decomposeWin(counts.slice(), melds, winTile, false);
+    const dec = decomposeWin(counts.slice(), melds, winTile);
     const sh = shanten(counts.slice(), melds.length, closed);
     assertEquals(
       dec.length > 0,
@@ -255,13 +250,20 @@ Deno.test("decomposeWin/waitTypes agree with mjrender's shanten engine", () => {
       }
     }
 
-    // Drop one tile and compare the wait sets whenever that leaves tenpai.
+    // Drop one tile and compare the wait sets whenever that leaves tenpai —
+    // i.e. probe `isComplete` with each of the 34 types added back.
     const drop = rng.int(hand.length);
     const c13 = counts.slice();
     c13[hand[drop] >> 2]--;
     if (shanten(c13.slice(), melds.length, closed) !== 0) continue;
     tenpaiSeen++;
-    const mine = waitTypes(c13.slice(), melds).sort((a, b) => a - b);
+    const mine: number[] = [];
+    for (let ty = 0; ty < 34; ty++) {
+      if (c13[ty] >= 4) continue; // all four copies already in hand
+      c13[ty]++;
+      if (isComplete(c13, melds.length)) mine.push(ty);
+      c13[ty]--;
+    }
     const theirs = ukeireTypes(c13.slice(), melds.length, closed, 0).sort((a, b) => a - b);
     assertEquals(mine, theirs, `waits #${i} ${JSON.stringify(c13)} melds=${melds.length}`);
   }
@@ -281,7 +283,7 @@ Deno.test("decomposeWin/waitTypes agree with mjrender's shanten engine", () => {
 function dec(spec: string, win: string, melds: Meld[] = []): Decomposition[] {
   const hand = tiles(spec);
   const w = tiles(win)[0];
-  return decomposeWin(countsOf(hand), melds, w, false);
+  return decomposeWin(countsOf(hand), melds, w);
 }
 
 Deno.test("111222333m reads as three triplets and as three runs", () => {
@@ -384,10 +386,9 @@ Deno.test("ankan stays concealed and occupies a slot", () => {
   assertEquals(ds[0].wait, "penchan"); // 7 finishing 789, waiting from 8-9
 });
 
-Deno.test("isComplete and waitTypes on a plain tenpai hand", () => {
+Deno.test("isComplete on a plain tenpai hand", () => {
   const hand = countsOf(tiles("123m456m789m11p23s"));
   assertEquals(isComplete(hand.slice(), 0), false);
-  assertEquals(waitTypes(hand.slice(), []), [18, 21]); // 1s, 4s
   const won = hand.slice();
   won[18]++;
   assertEquals(isComplete(won, 0), true);

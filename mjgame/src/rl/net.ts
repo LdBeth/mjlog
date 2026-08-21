@@ -695,8 +695,11 @@ function attnForwardTS(a: Attn, tokens: Int8Array): Float32Array {
 export function attnEncode(attn: Attn, tokens: Int8Array): Float32Array {
   // Both out-of-range rules the spec fixes, applied HERE so the two paths agree
   // by construction: a partial trailing token is dropped, and anything past
-  // token 96 is ignored (`encodeSeq` truncates to 96, so a longer stream is a
-  // caller bug — but it must not be a bug the two implementations disagree on).
+  // token 96 is ignored. `encodeSeq` can violate NEITHER — it writes whole
+  // tokens and truncates each river to 24 — so on the play path the two lines
+  // below are always `ntok = tokens.length / 4` and `packed = tokens`. They
+  // stay because a hand-built or replayed stream can break both rules, and the
+  // tests hold the TS and native encoders to the same answer when it does.
   const ntok = Math.min(Math.floor(tokens.length / SEQ_TOKEN_BYTES), SEQ_MAX);
   const packed = ntok * SEQ_TOKEN_BYTES === tokens.length
     ? tokens
@@ -726,13 +729,27 @@ export function isSeqNet(net: Net): boolean {
  * one call site working against both generations of snapshot. On a v4 net the
  * 64 encoder dims are appended at 1674..1737 — appended, never interleaved, so
  * the v3 columns of a widened first layer still line up with the v3 features.
+ *
+ * `out` lets a caller supply the `SEQ_INPUT_LEN` destination instead of getting
+ * a fresh one per call. It may be the very buffer `flat` is a prefix VIEW of
+ * (same `buffer`, same `byteOffset`), and then the plane/scalar half is already
+ * where it belongs and only `z` is written — which is how `NeuralPolicy` keeps
+ * one 1738-wide buffer for the whole match. Any other `out` is filled from
+ * `flat` first, so the result is the same vector either way.
  */
-export function seqInput(net: Net, flat: Float32Array, tokens: Int8Array): Float32Array {
+export function seqInput(
+  net: Net,
+  flat: Float32Array,
+  tokens: Int8Array,
+  out?: Float32Array,
+): Float32Array {
   if (!net.attn) return flat;
-  const out = new Float32Array(INPUT_LEN + Z_LEN);
-  out.set(flat.subarray(0, INPUT_LEN), 0);
-  out.set(attnEncode(net.attn, tokens), INPUT_LEN);
-  return out;
+  const dst = out ?? new Float32Array(INPUT_LEN + Z_LEN);
+  if (dst.buffer !== flat.buffer || dst.byteOffset !== flat.byteOffset) {
+    dst.set(flat.subarray(0, INPUT_LEN), 0);
+  }
+  dst.set(attnEncode(net.attn, tokens), INPUT_LEN);
+  return dst;
 }
 
 /**

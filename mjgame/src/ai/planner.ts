@@ -115,8 +115,14 @@ export function ownDraws(obs: Observation): number {
 
 /**
  * Copies of each type NOT visible to this seat: 4 minus rivers, melds,
- * indicators and own hand. The same accounting `HeuristicPolicy.liveCopies`
- * does, lifted out because the planner needs all 34 at once.
+ * indicators and own hand.
+ *
+ * THE ONE UNSEEN COUNT. Every consumer of "how many of this type are still out
+ * there" goes through this vector — the planner's availability model, the 計算
+ * reader's wait survival, and the base policy's ukeire pricing (`Ctx.unseen`,
+ * computed once per decision). It is the same accounting `Observation.ukeire`
+ * carries per accepted type (`4 − visibleCounts`), so a type that appears in
+ * both is priced identically whichever side asks.
  */
 export function publicUnseen(obs: Observation): number[] {
   const c = new Array<number>(34).fill(4);
@@ -131,6 +137,25 @@ export function publicUnseen(obs: Observation): number[] {
   for (const t of obs.hand) c[tileType(t)]--;
   for (let ty = 0; ty < 34; ty++) if (c[ty] < 0) c[ty] = 0;
   return c;
+}
+
+/**
+ * The dora TYPES the revealed indicators name (aka are tile ids, not types, so
+ * they are counted elsewhere). One definition, because three modules used to
+ * spell the same `map`+`Set` out for themselves.
+ */
+export function doraTypesOf(obs: Observation): Set<number> {
+  return new Set(obs.doraIndicators.map((t) => doraFromIndicatorType(tileType(t))));
+}
+
+/**
+ * The honor types worth a yaku to a seat sitting at `seatWind` in `roundWind`:
+ * the three dragons plus the two winds. Taken as loose numbers rather than an
+ * `Observation` because the 計算 reader builds one of these per OPPONENT, from
+ * a seat wind it derives itself.
+ */
+export function valueHonorsOf(roundWind: number, seatWind: number): Set<number> {
+  return new Set([31, 32, 33, seatWind, roundWind]);
 }
 
 /**
@@ -686,7 +711,7 @@ export function enumerateTargets(
   const cands = makeCandidates(obs, structures, avail);
   if (cands.length === 0) return [];
 
-  const doraTypes = new Set(obs.doraIndicators.map((t) => doraFromIndicatorType(tileType(t))));
+  const doraTypes = doraTypesOf(obs);
 
   // Cheap pass first: `pCompleteOf` is arithmetic, `valueOf` runs the scorer, so
   // only the most promising `maxPlans` futures are ever priced properly.

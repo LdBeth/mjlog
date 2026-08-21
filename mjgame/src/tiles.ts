@@ -4,11 +4,12 @@
 // (0-8 man, 9-17 pin, 18-26 sou, 27-30 winds, 31-33 dragons), and the four
 // physical copies of a type are ids `type*4 .. type*4+3`.
 
-import type { Tile } from "mjrender/model.ts";
-import { rankOfType, tileType } from "mjrender/tiles.ts";
+// Everything here is mjgame's own; the mjrender primitives (`tileType`,
+// `rankOfType`, …) are imported from `mjrender/tiles.ts` directly by their
+// users, so this module deliberately re-exports nothing.
 
-export * from "mjrender/tiles.ts";
-export type { Tile };
+import type { Tile } from "mjrender/model.ts";
+import { rankOfType } from "mjrender/tiles.ts";
 
 /**
  * 雀鬼会 aka set: 赤5筒 ×2. 5p is type 13, so its four copies are ids 52..55;
@@ -73,10 +74,4 @@ export function sujiTypes(type: number): number[] {
 /** 34-length zero vector. */
 export function zeros34(): number[] {
   return new Array<number>(34).fill(0);
-}
-
-export function countsOf(tiles: readonly Tile[]): number[] {
-  const c = zeros34();
-  for (const t of tiles) c[tileType(t)]++;
-  return c;
 }

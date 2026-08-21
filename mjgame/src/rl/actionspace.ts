@@ -52,23 +52,29 @@ export interface ResolveCtx {
   akaIds?: ReadonlySet<Tile>;
 }
 
-/** Where the called tile ranks inside the sorted three-tile run: 0, 1 or 2. */
+/**
+ * Where the called tile ranks inside the sorted three-tile run: 0, 1 or 2.
+ *
+ * `a.tiles` is exactly two tiles, so the sorted pair is one comparison — the
+ * `map().sort()` this used to spell it with allocated two arrays for every chi
+ * candidate `resolve` walks past, and `resolve` is on the decision path.
+ */
 function chiPosition(a: Action & { t: "chi" }): number {
   const c = tileType(a.called);
-  const [x, y] = a.tiles.map(tileType).sort((p, q) => p - q);
+  const t0 = tileType(a.tiles[0]), t1 = tileType(a.tiles[1]);
+  const x = t0 < t1 ? t0 : t1, y = t0 < t1 ? t1 : t0;
   return c < x ? 0 : c > y ? 2 : 1;
 }
 
 /**
  * The slot an engine action occupies.
  *
- * `akaIds` is accepted because the recorder always has it and the contract
- * names it; v1 does not consult it, since a discard is indexed by tile TYPE and
- * a red five shares its type with the plain copies (plane 5 of the feature
- * encoding is where redness lives).
+ * Red fives need no say here: a discard is indexed by tile TYPE and an aka
+ * shares its type with the plain copies (plane 5 of the feature encoding is
+ * where redness lives). The function took an `akaIds` argument for a while and
+ * never once consulted it.
  */
-export function actionIndex(a: Action, akaIds: ReadonlySet<Tile> = EMPTY): number {
-  void akaIds;
+export function actionIndex(a: Action): number {
   switch (a.t) {
     case "discard":
       return (a.riichi ? IDX.riichi : IDX.discard) + tileType(a.tile);

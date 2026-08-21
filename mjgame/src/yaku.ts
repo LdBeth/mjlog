@@ -11,7 +11,6 @@ import { suitOfType, tileType } from "mjrender/tiles.ts";
 import type { Block, Decomposition } from "./decompose.ts";
 import { decomposeWin } from "./decompose.ts";
 import { ankouCount, countFu, isPinfu, menzenOf } from "./fu.ts";
-import { basePoints } from "./score.ts";
 import type { RuleConfig } from "./rules.ts";
 import { GREEN_TYPES, isHonor, isSimple, isTerminal, isYaochu, zeros34 } from "./tiles.ts";
 import type { Seat } from "./types.ts";
@@ -57,6 +56,34 @@ export interface YakuResult {
 /** Dora / 裏ドラ / 赤ドラ ids — han-bearing but not yaku: they cannot open a win. */
 export const DORA_IDS = { dora: 52, ura: 53, aka: 54 } as const;
 
+const LIMIT_NAMES = ["", "満貫", "跳満", "倍満", "三倍満", "役満"] as const;
+
+/**
+ * 基本点 for a han/fu pair, capped on the 満貫 ladder.
+ * With `cfg.kazoeYakuman` off (the dojo setting), 13+ han settles as 三倍満.
+ *
+ * Lives here rather than in `score.ts` so the runtime import graph stays
+ * acyclic: `score.ts` needs the scorer, the scorer needs the ladder, and the
+ * ladder needs nothing. `score.ts` re-exports it for its outside callers.
+ */
+export function basePoints(
+  han: number,
+  fu: number,
+  cfg: RuleConfig,
+): { base: number; limit: number; name: string } {
+  const at = (limit: number, base: number) => ({ base, limit, name: LIMIT_NAMES[limit] });
+  if (han >= 13) return cfg.kazoeYakuman ? at(5, 8000) : at(4, 6000);
+  if (han >= 11) return at(4, 6000);
+  if (han >= 8) return at(3, 4000);
+  if (han >= 6) return at(2, 3000);
+  if (han >= 5) return at(1, 2000);
+  const base = fu * (1 << (2 + han));
+  if (base >= 2000) return at(1, 2000);
+  // 切り上げ満貫 promotes exactly the 1920 cell (4飜30符 / 3飜60符).
+  if (cfg.kiriageMangan && base >= 1920) return at(1, 2000);
+  return { base, limit: 0, name: "" };
+}
+
 const GREEN = new Set(GREEN_TYPES);
 
 // ---------------------------------------------------------------------------
@@ -79,7 +106,11 @@ function allBlocks(d: Decomposition): Block[] {
   return d.form === "chiitoi" ? d.blocks : [...d.blocks, d.pair];
 }
 
-/** 34-vector over hand + meld tiles (a kan therefore contributes 4). */
+/**
+ * 34-vector over hand + meld tiles (a kan therefore contributes 4).
+ * Invariant across the readings of one hand, so `scoreWin` computes it once and
+ * threads it through as `all`.
+ */
 function fullCounts(ctx: WinContext): number[] {
   const c = zeros34();
   for (const t of ctx.hand) c[tileType(t)]++;
@@ -159,7 +190,12 @@ function chuurenId(ctx: WinContext, counts: readonly number[]): number {
 // Detection
 // ---------------------------------------------------------------------------
 
-function detectYakuman(d: Decomposition, ctx: WinContext, counts: readonly number[]): number[] {
+function detectYakuman(
+  d: Decomposition,
+  ctx: WinContext,
+  counts: readonly number[],
+  all: readonly number[],
+): number[] {
   const out: number[] = [];
   if (ctx.tenhou) out.push(37);
   if (ctx.chiihou) out.push(38);
@@ -169,7 +205,6 @@ function detectYakuman(d: Decomposition, ctx: WinContext, counts: readonly numbe
     return out;
   }
 
-  const all = fullCounts(ctx);
   if (everyType(all, isHonor)) out.push(42); // 字一色
   if (everyType(all, (t) => GREEN.has(t))) out.push(43); // 緑一色
   if (everyType(all, isTerminal)) out.push(44); // 清老頭
@@ -189,7 +224,11 @@ function detectYakuman(d: Decomposition, ctx: WinContext, counts: readonly numbe
   return out.sort((a, b) => a - b);
 }
 
-function detectYaku(d: Decomposition, ctx: WinContext): Array<{ id: number; han: number }> {
+function detectYaku(
+  d: Decomposition,
+  ctx: WinContext,
+  all: readonly number[],
+): Array<{ id: number; han: number }> {
   const y: Array<{ id: number; han: number }> = [];
   const add = (id: number, han: number) => y.push({ id, han });
   const menzen = menzenOf(ctx);
@@ -206,7 +245,6 @@ function detectYaku(d: Decomposition, ctx: WinContext): Array<{ id: number; han:
   if (ctx.haitei && ctx.tsumo) add(5, 1);
   if (ctx.houtei && !ctx.tsumo) add(6, 1);
 
-  const all = fullCounts(ctx);
   const blocks = allBlocks(d);
   const hasRun = blocks.some(isRun);
   const hasHonor = anyType(all, isHonor);
@@ -270,9 +308,14 @@ function countHits(counts: readonly number[], types: readonly number[]): number 
 
 // ---------------------------------------------------------------------------
 
-function evaluate(d: Decomposition, ctx: WinContext, counts: readonly number[]): YakuResult | null {
+function evaluate(
+  d: Decomposition,
+  ctx: WinContext,
+  counts: readonly number[],
+  all: readonly number[],
+): YakuResult | null {
   const fu = countFu(d, ctx).fu;
-  const yakuman = detectYakuman(d, ctx, counts);
+  const yakuman = detectYakuman(d, ctx, counts, all);
   if (yakuman.length > 0) {
     // A yakuman suppresses every normal yaku and all dora.
     return {
@@ -287,11 +330,10 @@ function evaluate(d: Decomposition, ctx: WinContext, counts: readonly number[]):
     };
   }
 
-  const yaku = detectYaku(d, ctx);
+  const yaku = detectYaku(d, ctx, all);
   const yakuHan = yaku.reduce((a, x) => a + x.han, 0);
   if (yakuHan === 0) return null; // 役なし — dora alone never opens a win
 
-  const all = fullCounts(ctx);
   const dora = countHits(all, ctx.doraTypes);
   const ura = countHits(all, ctx.uraTypes);
   if (dora) yaku.push({ id: DORA_IDS.dora, han: dora });
@@ -323,9 +365,13 @@ function better(a: YakuResult, b: YakuResult): boolean {
 export function scoreWin(ctx: WinContext): YakuResult | null {
   const counts = zeros34();
   for (const t of ctx.hand) counts[tileType(t)]++;
+  const readings = decomposeWin(counts.slice(), ctx.melds, ctx.winTile);
+  if (readings.length === 0) return null;
+  // hand + melds, invariant across readings — computed here, never per reading.
+  const all = fullCounts(ctx);
   let best: YakuResult | null = null;
-  for (const d of decomposeWin(counts.slice(), ctx.melds, ctx.winTile, ctx.tsumo)) {
-    const r = evaluate(d, ctx, counts);
+  for (const d of readings) {
+    const r = evaluate(d, ctx, counts, all);
     if (r && (!best || better(r, best))) best = r;
   }
   return best;

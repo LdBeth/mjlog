@@ -43,7 +43,7 @@ import {
   packRecords,
   paramSpecs,
 } from "../scripts/calibrate_fit.ts";
-import { pairedRun } from "../src/main.ts";
+import { pairedRun } from "../src/paired.ts";
 
 // ---------------------------------------------------------------------------
 // helpers

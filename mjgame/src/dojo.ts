@@ -8,6 +8,7 @@ import { ANY_WIN } from "./legal.ts";
 import type { Hook, RuleCtx } from "./penalty/mod.ts";
 import { runHook } from "./penalty/rules.ts";
 import type { DojoConfig } from "./rules.ts";
+import { scorer } from "./score.ts";
 import type { Table } from "./table.ts";
 import type { Action, RoundOutcome, Seat } from "./types.ts";
 import { SEATS } from "./types.ts";
@@ -73,4 +74,20 @@ export function dojoHooks(opts: DojoHooksOptions) {
       }
     },
   };
+}
+
+/**
+ * The penalty registry's entry points, as every driver wants them. EVERY driver
+ * needs these: rules only ever run from `onAction`/`onRoundEnd`, so a driver
+ * that omits them plays with a permanently empty 違反台帳 — and with
+ * `Table.tsumogiriLock` never armed, because that flag is set by a rule
+ * (ドラ切り後の手出し), not by the engine.
+ *
+ * `dojo` is deliberately a parameter: it must be the same config the round is
+ * run with, or the ledger would judge by rules the round was not played under.
+ * `timing` is the TUI's stopwatch, and only the TUI has one — headless play
+ * leaves it out and the Tier-B 長考/腰 rules stay silent, by design.
+ */
+export function makeDojoHooks(dojo: DojoConfig, timing?: (seat: Seat) => Timing | undefined) {
+  return dojoHooks({ dojo, oracle: scorer, timing });
 }

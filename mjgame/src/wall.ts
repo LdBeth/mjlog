@@ -22,9 +22,7 @@ import type { Seat } from "./types.ts";
 /** Dead-wall slots used by successive rinshan draws. */
 const RINSHAN_ORD: readonly number[] = [1, 0, 3, 2];
 
-/** Live wall size (136 - 14 dead wall). */
-export const LIVE_WALL = 122;
-/** Post-deal draws available in a round (LIVE_WALL - 52 dealt). */
+/** Post-deal draws available in a round (the 122-tile live wall minus 52 dealt). */
 export const DRAWS_PER_ROUND = 70;
 
 export class Wall {
@@ -138,12 +136,14 @@ export class Wall {
    * assumption that no call intervenes.
    *
    * A pure read: no state changes, so an oracle may call it freely.
+   *
+   * `remaining` already bounds the index away from the dead wall: with L live
+   * draws and R rinshan draws taken, `remaining = 70 - L - R` and the index is
+   * `83 - L - k`, so `k < remaining` implies `index >= 14 + R`.
    */
   peekLive(k: number): Tile | null {
     if (k < 0 || k >= this.remaining) return null;
-    const idx = 135 - this.liveTaken - k;
-    if (idx < 14 + this.kans) return null;
-    return this.tiles[idx];
+    return this.tiles[135 - this.liveTaken - k];
   }
 
   /** What the next `revealIndicator()` would turn up, or null after the 5th. */

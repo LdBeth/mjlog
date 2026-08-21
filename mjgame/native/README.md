@@ -2,10 +2,10 @@
 
 Two unrelated dylibs live here, built separately and loaded separately:
 
-| source        | dylib               | build                    | what it accelerates           |
-| ------------- | ------------------- | ------------------------ | ----------------------------- |
-| `rlnet.c`     | `librlnet.dylib`    | `deno task build-native` | neural inference (Accelerate) |
-| `mjkernel.cc` | `libmjkernel.dylib` | `deno task build-kernel` | shanten / ukeire (pure C++17) |
+| source        | dylib               | build                    | what it accelerates               |
+| ------------- | ------------------- | ------------------------ | --------------------------------- |
+| `rlnet.c`     | `librlnet.dylib`    | `deno task build-native` | neural inference (Accelerate)     |
+| `mjkernel.cc` | `libmjkernel.dylib` | `deno task build-kernel` | shanten / ukeire / 待ち形 (C++17) |
 
 They share the `MJGAME_NATIVE` gate and nothing else — no symbols, no headers, no build flags.
 Either can be absent; the TypeScript path behind each is the reference implementation. The kernel is
@@ -104,13 +104,12 @@ Tensor order and shapes live in **`train/V4_SPEC.md` § "Weight file attn.f32"**
 contract; this one deliberately does not restate the layout. Same convention as `policy.f32`
 (row-major `[out][in]` then bias, little-endian float32, no header/padding).
 
-> **Spec defect, unresolved:** V4_SPEC.md's tensor list sums to **23,616** floats
-> (`64*42+64 + 4*(64*64+64) + 64 + 64*64+64` = 2752 + 16640 + 64 + 4160), but the line under it
-> states **23,872** — a 256-float (4×64) arithmetic slip in the prose. This loader implements the
-> **tensor list** (23,616 floats = 94,464 bytes) and **rejects any other file size** with `NULL`
-> rather than reading a prefix, so a writer that believes the 23,872 figure fails loudly at load
-> instead of silently misaligning every tensor. If the spec is corrected the other way,
-> `ATTN_N_FLOATS` in `rlnet.c` is the single place to change.
+> **Size:** the tensor list sums to **23,616** floats (`64*42+64 + 4*(64*64+64) + 64 + 64*64+64` =
+> 2752 + 16640 + 64 + 4160) = 94,464 bytes, which is what this loader implements — and it **rejects
+> any other file size** with `NULL` rather than reading a prefix, so a mis-sized blob fails loudly
+> at load instead of silently misaligning every tensor. (An early revision of V4_SPEC.md's prose
+> said 23,872, a 256-float slip; the spec now states 23,616 and says the tensor list was always
+> authoritative. `ATTN_N_FLOATS` in `rlnet.c` is the single place the number lives on this side.)
 
 ### Numerics
 
@@ -179,16 +178,23 @@ early.
 
 ---
 
-# mjkernel.cc — the shanten / ukeire kernel
+# mjkernel.cc — the shanten / ukeire / 待ち形 kernel
 
 `mjkernel.cc` is a self-contained C++17 library with no dependencies at all — no BLAS, no framework,
-no data file. It answers the two questions that dominate self-play wall time:
+no data file. It answers the three questions that dominate self-play wall time:
 
 ```c
-int32_t  mj_kernel_version(void);                     /* ABI, currently 1 */
+int32_t  mj_kernel_version(void);                     /* ABI, currently 2 */
 int32_t  mj_shanten(const uint8_t counts[34], int32_t open_melds, int32_t closed);
 uint64_t mj_ukeire_mask(const uint8_t counts[34], int32_t open_melds, int32_t closed, int32_t base);
+void     mj_shape_masses(const int32_t unseen[34], const int32_t flags[34],
+                         int32_t honitsu_suit, int32_t toitoi,
+                         const double w[17], double out[306]);
 ```
+
+The version is checked on every `dlopen`, so a dylib built before an entry point existed fails the
+check and the whole module degrades to TypeScript rather than half-loading — `dlopen` throws on a
+missing symbol, and there is no such thing as a partly-present ABI here.
 
 It is a **semantic mirror of `mjrender/src/shanten.ts`**, not an independent shanten engine: the
 same `cap < 0 → 8`, the same "chiitoitsu and kokushi only when `closed && open_melds == 0`", the
@@ -200,17 +206,26 @@ so unlike the float32 inference shim there is no tolerance to negotiate.
 exists because the TypeScript ukeire probe costs 34 shanten evaluations, and folding them into one
 FFI crossing is most of the win.
 
+`mj_shape_masses` is the 計算 reader's wait model, and the same mirror discipline applies to it —
+with one extra constraint, because it is the only **float** entry point here. See its own section
+below.
+
 ## Build
 
 ```sh
 deno task build-kernel
 # = sh native/build_kernel.sh
-# = clang++ -std=c++17 -O3 -flto -Wall -Wextra -fvisibility=hidden \
+# = clang++ -std=c++17 -O3 -flto -ffp-contract=off -Wall -Wextra -fvisibility=hidden \
 #           -dynamiclib -o native/libmjkernel.dylib native/mjkernel.cc
 ```
 
 Warning-free under `-Wall -Wextra`. Portable C++ — the build script picks `.so` off Darwin, and
 nothing in the source is Apple-specific.
+
+`-ffp-contract=off` is load-bearing rather than hygiene: without it clang may fuse `a + b*c` into an
+FMA, which is a _different double_ from the multiply-then-add JavaScript performs, and
+`mj_shape_masses` has to agree with the TypeScript to the last bit. `test/kernel_native_test.ts`
+compiles with the same flag when it has to build the dylib itself; keep the two in step.
 
 ## Algorithm
 
@@ -247,6 +262,44 @@ outside the table's domain — a count above 4, a group holding more than 14 til
 `open_melds`. Those cannot arise in play; they arise in fuzzing, and answering them exactly is
 cheaper than arguing about them. The fuzz deliberately visits that branch.
 
+## `mj_shape_masses` — one opponent's whole wait row
+
+The 計算 reader asks, per decision and per opponent, _how strongly does public counting support
+"they are waiting on this type"_ — for all 34 types. The answer is a **row**, not 34 verdicts: with
+`waitNormalize` on it is divided by its own total, so no per-type call could answer anyway. That
+fixes the cut point at **one crossing per (opponent, decision)**, three per decision.
+
+```
+unseen[34]   copies of each type not visible to the observer, 0..4
+flags[34]    bit0 現物, bit1 役牌 for this opponent, bit2 ドラ type
+honitsu_suit 染め手模様: 0 なし, 1 m, 2 p, 3 s   (a tile's own 字 suit is 0 too)
+toitoi       トイトイ模様, 0/1
+w[17]        the packed ComputedWeights slice (packShapeWeights in computed.ts)
+out[306]     34 wait likelihoods, then 34 × 8 parameter-free counts (ShapeBase)
+```
+
+The counts come back alongside the row because the calibration recorder wants exactly them, and
+because having one buffer means the trace and the live seat cannot be reading different numbers.
+
+It is a transliteration of `shapeRowTS` in `src/ai/computed.ts`, which is itself the flat twin of
+`shapeBaseMasses` + `waitRowFrom` + `combineShapes` there. Being **float**, the mirroring is finer
+than the shanten half's:
+
+- associativity is copied, not simplified — `prK * kanchan / 16` is `(prK * kanchan) / 16` while
+  リャンメン is `prR * (mass / 32)`, and those are different doubles;
+- no contraction (`-ffp-contract=off`, above);
+- `Math.min(1, x)` is not `fmin(1.0, x)` — they disagree on NaN, and `jsMin1` settles it the
+  JavaScript way.
+
+`w[5]` arrives as `doraBridge − 1` rather than `doraBridge`, so the C performs no arithmetic on the
+weights at all. `src/kernel.ts` refuses a context outside the integer domain (a count that is not
+0..4) and takes the TypeScript instead, the same way it refuses a count vector that is not 34 long.
+
+The fuzz in `test/kernel_native_test.ts` compares all 306 slots under 26 weight vectors — the
+shipped one, normalized and not, plus randomized ones that put every multiplier to work — and
+demands **bit equality**, not closeness. It was mutation-checked: perturbing the `/ 32` divisor by
+1e-7 fails it.
+
 ## Measured
 
 Apple M4 Pro, machine under mixed load, so read these as ratios rather than absolutes:
@@ -258,12 +311,26 @@ Apple M4 Pro, machine under mixed load, so read these as ratios rather than abso
 
 The TypeScript memo makes repeat shapes cheap, so real play sits between the two right-hand columns.
 
+`mj_shape_masses` has no memo to compete with, and its TypeScript twin is a flat typed-array loop
+rather than the object-allocating definition, so the margin is much narrower — the crossing costs
+nearly as much as the arithmetic:
+
+| one opponent's row                                 | µs/row |
+| -------------------------------------------------- | ------ |
+| `shapeBaseMasses` + `waitRowFrom` (the definition) | 7.41   |
+| `shapeRowTS` (flat, the fallback)                  | 1.12   |
+| `mj_shape_masses`                                  | 0.82   |
+
+Most of the win is the flattening, which the no-FFI path gets too; the kernel takes another ~26% of
+what is left. On a `kkkk` bench (120 半荘) that is 5.81 s → 4.06 s → 3.88 s.
+
 ## Rules of use
 
 - **Not re-entrant and not thread-safe**: the lazy tables are written without a lock. One caller at
   a time, which is exactly how Deno FFI uses it.
-- `counts` must be exactly 34 bytes. `src/kernel.ts` refuses anything else and falls back to
-  TypeScript rather than let a short array be read past its end.
+- `counts` must be exactly 34 bytes, and `mj_shape_masses`'s `unseen`/`flags`/`w`/`out` exactly
+  34/34/17/306 elements. `src/kernel.ts` refuses anything else and falls back to TypeScript rather
+  than let a short array be read past its end.
 - The tables are ~16 MB of `calloc`, allocated on the first call and never freed — they are
   zero-filled and paged in on touch, so the resident cost is a few hundred KB in practice.
 
@@ -272,7 +339,9 @@ The TypeScript memo makes repeat shapes cheap, so real play sits between the two
 `src/kernel.ts` is the only importer, and every mjgame call site goes through it instead of
 importing `mjrender/shanten.ts` directly. It resolves the dylib **relative to the module** (`src/` →
 `../native/`), so the working directory is irrelevant, and it holds one reusable 34-byte buffer for
-the whole process rather than allocating per call.
+the whole process rather than allocating per call. `src/ai/computed.ts` keeps its own pair of
+process-wide `Int32Array(34)` scratches for `mj_shape_masses` on the same argument: a row evaluation
+is a leaf, so a fresh pair per opponent would be pure garbage.
 
 Same gate as `rlnet.c`:
 

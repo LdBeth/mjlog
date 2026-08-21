@@ -26,7 +26,7 @@
 
 import type { DangerLevel } from "mjrender/danger.ts";
 import type { Meld, Tile } from "mjrender/model.ts";
-import { doraFromIndicatorType, rankOfType, suitOfType, tileType } from "mjrender/tiles.ts";
+import { rankOfType, suitOfType, tileType } from "mjrender/tiles.ts";
 import { countsFromTiles, shanten, ukeireTypes } from "../kernel.ts";
 import { isHonor, isYaochu } from "../tiles.ts";
 import type { Observation } from "../observe.ts";
@@ -37,6 +37,7 @@ import type { ConsumerParams } from "./consumer.ts";
 import { scoreDiscard as consumeEvidence } from "./consumer.ts";
 import type { ContextEvidence, EvidenceHooks } from "./evidence.ts";
 import { assembleCandidate, assembleContext } from "./evidence.ts";
+import { doraTypesOf, publicUnseen, valueHonorsOf } from "./planner.ts";
 import type { StandingsWeights } from "./standings.ts";
 import { standingsScales } from "./standings.ts";
 import type { Rng } from "../rng.ts";
@@ -152,6 +153,19 @@ export interface Ctx {
   closed: boolean;
   doraTypes: Set<number>;
   valueHonors: Set<number>;
+  /**
+   * Copies of each of the 34 types this seat cannot see (`publicUnseen`).
+   *
+   * THE ONLY LIVENESS ACCOUNT. Every "how many are left" question in the
+   * decision reads this vector: the ukeire count, the 不聴時ドラ切り exception's
+   * visible-copy test (`4 − unseen`), and the planner's availability model.
+   * There used to be two — `Observation.ukeire[].live` for a type the resting
+   * hand happened to accept and `4 − own copies` for everything else — which
+   * priced the same tile differently depending on which candidate was asking,
+   * and always upward, because the second one counts neither the rivers nor the
+   * melds nor the indicators.
+   */
+  unseen: number[];
   folding: boolean;
   /** Riichi is on the table this turn — which puts a yaku on every wait. */
   canRiichi: boolean;
@@ -170,6 +184,29 @@ interface EvidenceRun {
   context: ContextEvidence;
 }
 
+/**
+ * The per-decision memo of the four PURE per-observation quantities.
+ *
+ * All four are closed forms over one `Observation` and were computed two or
+ * three times per decision — `shouldFold` from `context` and again from the C7
+ * planner's `updatePlan`, `pressureOf`/`bufferScale`/`standingsOf` from inside
+ * `shouldFold` and again from the evidence assembler. Keyed on the Observation's
+ * IDENTITY rather than cleared by hand: `decide` receives one object and every
+ * caller inside the decision is handed that same object, so a new decision
+ * invalidates the memo by construction and nothing has to remember to.
+ *
+ * It memoizes the CALL, never the method: `pressureOf` and `bufferScale` are
+ * hooks an augmented policy overrides, so the first call still dispatches
+ * virtually and the memo holds whatever that policy answered.
+ */
+interface DecisionMemo {
+  obs: Observation;
+  pressure?: number;
+  buffer?: number;
+  standings?: { gain: number; risk: number };
+  fold?: boolean;
+}
+
 export class HeuristicPolicy implements SyncPolicy {
   readonly name: string;
   readonly sync = true;
@@ -180,6 +217,7 @@ export class HeuristicPolicy implements SyncPolicy {
   private rng: Rng;
   /** M9's learned consumer, or null for the hand-written score. */
   private consumer: ConsumerParams | null;
+  private memo: DecisionMemo | null = null;
 
   constructor(name: string, seed: number, opts: HeuristicOptions = {}) {
     this.name = name;
@@ -208,18 +246,37 @@ export class HeuristicPolicy implements SyncPolicy {
   private evidenceHooks(): EvidenceHooks {
     return {
       handWithout: (ctx, tile) => this.handWithout(ctx, tile),
-      liveCopies: (obs, type, counts) => this.liveCopies(obs, type, counts),
       riskOf: (ctx, tile) => this.riskOf(ctx, tile),
       drawBonus: (ctx, tile) => this.drawBonus(ctx, tile),
       keepBonus: (ctx, tile) => this.keepBonus(ctx, tile),
-      pressureOf: (obs) => this.pressureOf(obs),
-      bufferScale: (obs) => this.bufferScale(obs),
+      pressureOf: (obs) => this.pressure(obs),
+      bufferScale: (obs) => this.buffer(obs),
       standings: (obs) => this.standingsOf(obs),
     };
   }
 
   reset(seed: number): void {
     this.rng = sfc32(seed);
+    this.memo = null;
+  }
+
+  /** The memo slot for this decision, freshly emptied when the board moved. */
+  private cache(obs: Observation): DecisionMemo {
+    const m = this.memo;
+    if (m && m.obs === obs) return m;
+    return (this.memo = { obs });
+  }
+
+  /** `pressureOf`, once per decision. */
+  private pressure(obs: Observation): number {
+    const m = this.cache(obs);
+    return m.pressure ??= this.pressureOf(obs);
+  }
+
+  /** `bufferScale`, once per decision. */
+  private buffer(obs: Observation): number {
+    const m = this.cache(obs);
+    return m.buffer ??= this.bufferScale(obs);
   }
 
   decide(obs: Observation): Action {
@@ -299,15 +356,14 @@ export class HeuristicPolicy implements SyncPolicy {
   // ---------------------------------------------------------------- context
 
   private context(obs: Observation): Ctx {
-    const doraTypes = new Set(obs.doraIndicators.map((t) => doraFromIndicatorType(tileType(t))));
-    const valueHonors = new Set([31, 32, 33, obs.seatWind, obs.roundWind]);
     const folding = this.shouldFold(obs);
     return {
       obs,
       open: obs.melds[0].length,
       closed: obs.melds[0].every((m) => m.kind === "ankan"),
-      doraTypes,
-      valueHonors,
+      doraTypes: doraTypesOf(obs),
+      valueHonors: valueHonorsOf(obs.roundWind, obs.seatWind),
+      unseen: publicUnseen(obs),
       folding,
       canRiichi: obs.legal.some((a) => a.t === "discard" && a.riichi),
       eff: folding ? this.w.foldEfficiency : 1,
@@ -325,16 +381,16 @@ export class HeuristicPolicy implements SyncPolicy {
    * it is unless a weights object asked for it, so this is `1 × 1` and changes
    * nothing by default.
    *
-   * Recomputed rather than cached: it is closed form (a handful of `phi` calls
-   * over four public numbers), it is called at most twice per decision, and the
-   * alternative is threading a per-decision cache through `Ctx` and every
-   * subclass hook that builds one — a far larger surface than the arithmetic it
-   * would save.
+   * Memoized per decision (`DecisionMemo`): `Ctx.def`, the push/fold gate and
+   * the evidence assembler all ask for it, and the closed form behind it is ten
+   * `rankStats` evaluations — not free enough to run three times for one
+   * discard.
    */
   private standingsOf(obs: Observation): { gain: number; risk: number } {
     const w = this.w.standings;
     if (!w) return { gain: 1, risk: 1 };
-    return standingsScales(obs, w);
+    const m = this.cache(obs);
+    return m.standings ??= standingsScales(obs, w);
   }
 
   /**
@@ -344,14 +400,20 @@ export class HeuristicPolicy implements SyncPolicy {
    *
    * Protected, not because the base policy shares it, but because a subclass
    * that runs work BEFORE `decide` (the C7 planner, which must not re-plan while
-   * the hand is being abandoned) has no other way to ask. Pure: calling it twice
-   * in a decision costs time and changes nothing.
+   * the hand is being abandoned) has no other way to ask. Pure — and memoized on
+   * the Observation for exactly that reason: the planner asks, and then `context`
+   * asks again for the same board.
    */
   protected shouldFold(obs: Observation): boolean {
+    const m = this.cache(obs);
+    return m.fold ??= this.computeFold(obs);
+  }
+
+  private computeFold(obs: Observation): boolean {
     // Committed: after riichi the only legal discard is the drawn tile anyway.
     if (obs.riichi[0]) return false;
 
-    const pressure = this.pressureOf(obs);
+    const pressure = this.pressure(obs);
     if (pressure === 0) return false;
 
     let push = obs.shanten <= 0 ? 1.0 : obs.shanten === 1 ? 0.45 : obs.shanten === 2 ? 0.15 : 0;
@@ -361,7 +423,7 @@ export class HeuristicPolicy implements SyncPolicy {
     // A dealer has more to lose by folding (連荘) — nudge, don't override.
     if (obs.seatWind === 27) push += 0.08;
 
-    push *= this.bufferScale(obs);
+    push *= this.buffer(obs);
 
     // 順位効用: the same hand against the same table is worth pushing for a
     // different amount depending on what the points would DO. Off (the default)
@@ -565,7 +627,7 @@ export class HeuristicPolicy implements SyncPolicy {
     if (wideOpen) {
       const types = ukeireTypes(counts, ctx.open, ctx.closed, sh);
       let live = 0;
-      for (const ty of types) live += this.liveCopies(obs, ty, counts);
+      for (const ty of types) live += ctx.unseen[ty];
       eff += live * this.w.ukeire + types.length * this.w.ukeireType;
     }
 
@@ -603,8 +665,25 @@ export class HeuristicPolicy implements SyncPolicy {
    * outranks a proof.
    */
   protected riskOf(ctx: Ctx, tile: Tile): number {
-    const level = ctx.obs.danger.get(tileType(tile))?.level ?? "安全";
-    return this.w.danger[level];
+    return this.ruleRisk(this.dangerLevelOf(ctx, tile));
+  }
+
+  /**
+   * The assessor's own reading of this tile, or `undefined` when it was not
+   * looking at all (no declared threat on the table).
+   *
+   * Split from `riskOf` because an override needs BOTH halves and the two are
+   * one map lookup: `AugmentedHeuristic` prices its estimate against the rule
+   * ladder while also honouring an EXPLICIT 安全 as a proof, and an absent entry
+   * is not that proof.
+   */
+  protected dangerLevelOf(ctx: Ctx, tile: Tile): DangerLevel | undefined {
+    return ctx.obs.danger.get(tileType(tile))?.level;
+  }
+
+  /** The rule ladder's price for a level; an absent reading costs nothing. */
+  protected ruleRisk(level: DangerLevel | undefined): number {
+    return this.w.danger[level ?? "安全"];
   }
 
   /**
@@ -649,8 +728,10 @@ export class HeuristicPolicy implements SyncPolicy {
     // 不聴時ドラ切り. Indicator dora only: the aka 5p may be cut before tenpai.
     // Charged only from 3向聴 out — 2向聴以内 is allowed.
     // 例外: an honor dora already twice in the rivers is spent.
+    // `4 − unseen` IS the visible count: rivers, melds, indicators and own hand
+    // are exactly what `publicUnseen` subtracts, and there are only four copies.
     if (sh > 2 && ctx.doraTypes.has(ty)) {
-      if (!(isHonor(ty) && this.visibleCount(obs, ty) >= 2)) cost += this.w.notenDora;
+      if (!(isHonor(ty) && ctx.unseen[ty] <= 2)) cost += this.w.notenDora;
     }
 
     // 片和了り, but only when riichi is not on offer: riichi is itself a yaku,
@@ -667,30 +748,6 @@ export class HeuristicPolicy implements SyncPolicy {
     if (obs.tsumogiriLock && tile !== obs.drawn) cost += this.w.tsumogiriLock;
 
     return cost;
-  }
-
-  /** Copies of a type this seat can see: rivers, melds, indicators, own hand. */
-  private visibleCount(obs: Observation, type: number): number {
-    let n = 0;
-    for (const river of obs.rivers) {
-      // Skip entries that were called away — the meld loop below counts those.
-      for (const e of river) if (e.calledBy === undefined && tileType(e.tile) === type) n++;
-    }
-    for (const melds of obs.melds) {
-      for (const m of melds) {
-        for (const t of m.tiles) if (tileType(t) === type) n++;
-      }
-    }
-    for (const t of obs.doraIndicators) if (tileType(t) === type) n++;
-    for (const t of obs.hand) if (tileType(t) === type) n++;
-    return n;
-  }
-
-  /** Copies of `type` this seat cannot see, minus the ones it already holds. */
-  private liveCopies(obs: Observation, type: number, counts: number[]): number {
-    const u = obs.ukeire.find((x) => x.type === type);
-    if (u) return u.live;
-    return Math.max(0, 4 - counts[type]);
   }
 
   // ----------------------------------------------------------------- riichi

@@ -56,8 +56,8 @@ export interface WinFlags {
 
 /**
  * Everything the round needs from the scorer. Injected so `round.ts` has no
- * dependency on yaku detection — M1 ran against `stubScorer`, M2 swaps in the
- * real one without touching this file.
+ * dependency on yaku detection: the real implementation is `scorer` in
+ * `score.ts`, and tests hand in stubs without this file knowing.
  */
 export interface Scorer extends WinOracle {
   scoreWin(t: Table, who: Seat, fromWho: Seat, winTile: Tile, flags: WinFlags): WinInfo | null;
@@ -372,7 +372,10 @@ function* claimPhase(
   const replies = new Map<Seat, Action>();
   for (const s of SEATS) {
     if (s === from) continue;
-    const legal = claimActions(t, s, tile, from, scorer, chankan);
+    // Asked once and used twice: `claimActions` needs it to offer a ron, and the
+    // 見逃し test below needs the same answer whether or not one was offered.
+    const completes = completesHand(t, s, tile);
+    const legal = claimActions(t, s, tile, from, scorer, chankan, completes);
     // A seat whose only option is "pass" is not worth bothering the policy
     // with, but it still has to be judged for 見逃し below.
     let a: Action = { t: "pass" };
@@ -386,7 +389,7 @@ function* claimPhase(
     // because the shape is yakuless, because 見せ牌/腰 blocks the tile, or
     // because the seat is furiten already. This runs for the 槍槓 window too,
     // which comes through the same loop.
-    if (a.t !== "ron" && completesHand(t, s, tile)) t.markPassedRon(s);
+    if (a.t !== "ron" && completes) t.markPassedRon(s);
   }
   return resolveClaims(t, from, replies);
 }
@@ -405,7 +408,13 @@ function currentWaits(t: Table, seat: Seat): number[] {
   return s <= 0 ? ukeireTypes(counts, open, closed, s) : [];
 }
 
-function winFlags(
+/**
+ * The seat-and-table half of a `WinFlags` set (立直/一発/天和/地和); the four
+ * situational flags come from the caller, which is the only thing that knows
+ * them. Exported because `score.ts`'s legality gate builds the same set — see
+ * `gateFlags` there for why it fills rinshan/chankan with false.
+ */
+export function winFlags(
   t: Table,
   seat: Seat,
   tsumo: boolean,

@@ -10,7 +10,8 @@
 import { assert, assertEquals } from "@std/assert";
 import { HeuristicPolicy } from "../src/ai/heuristic.ts";
 import { RandomPolicy } from "../src/ai/random.ts";
-import { cpuKindAt, makeDojoHooks } from "../src/main.ts";
+import { makeDojoHooks } from "../src/dojo.ts";
+import { cpuKindAt } from "../src/main.ts";
 import { runMatchSync } from "../src/match.ts";
 import { observe } from "../src/observe.ts";
 import { DOJO_DEFAULT, JANKI } from "../src/rules.ts";
@@ -94,6 +95,48 @@ Deno.test("play wiring: tsumogiriLock is armed, and an Observation sees it", () 
     }
   }
   assert(armed > 0, "ドラ切り後の手出し never armed the lock in 6 hanchan");
+});
+
+// ---------------------------------------------------------------------------
+// The timing channel: the TUI's stopwatch, and the two Tier-B rules that are
+// unreachable without it (長考 reads `elapsedMs`, 腰 reads `callPromptMs`).
+
+/** A hanchan in which one seat answers the stopwatch, as the human seat does. */
+function playTimed(seed: number, human: Seat, ms: number): Violation[] {
+  return runMatchSync(
+    SEATS.map((s) => new RandomPolicy(`R${s}`, seed * 4 + s)),
+    {
+      seed,
+      cfg: JANKI,
+      dojo: DOJO_DEFAULT,
+      scorer,
+      ...makeDojoHooks(
+        DOJO_DEFAULT,
+        // Exactly `cmdPlay`'s shape: the human's measurements, and nothing for a
+        // CPU — a policy that answers instantly has no time to be judged on.
+        (seat: Seat) => seat === human ? { elapsedMs: ms, callPromptMs: ms } : undefined,
+      ),
+    },
+  ).ledger;
+}
+
+Deno.test("play wiring: the TUI's stopwatch reaches 長考 and 腰", () => {
+  let chouko = 0;
+  let koshi = 0;
+  for (let seed = 1; seed <= 6; seed++) {
+    // Untimed: the two rules cannot fire at all, whatever the seats do.
+    for (const v of play(seed, true).ledger) {
+      assert(v.rule !== "chouko" && v.rule !== "koshi", "a timing rule fired without a stopwatch");
+    }
+    for (const v of playTimed(seed, 1, 9_000)) {
+      if (v.rule !== "chouko" && v.rule !== "koshi") continue;
+      assertEquals(v.seat, 1, "only the seat with a stopwatch can be judged on time");
+      if (v.rule === "chouko") chouko++;
+      else koshi++;
+    }
+  }
+  assert(chouko > 0, "9秒 の打牌が一度も長考にならなかった");
+  assert(koshi > 0, "9秒 の鳴き判断が一度も腰にならなかった");
 });
 
 // ---------------------------------------------------------------------------

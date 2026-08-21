@@ -23,6 +23,9 @@
 import { assert, assertEquals } from "@std/assert";
 import { shanten as shantenTS, ukeireTypes as ukeireTS } from "mjrender/shanten.ts";
 import { closeKernel, KERNEL_LIB_URL, kernelNative, shanten, ukeireTypes } from "../src/kernel.ts";
+import type { ComputedWeights, MeldRead, WaitContext } from "../src/ai/computed.ts";
+import { mergeComputed, SHAPE_ROW_LEN, shapeRowEvaluator, shapeRowTS } from "../src/ai/computed.ts";
+import type { Rng } from "../src/rng.ts";
 import { sfc32 } from "../src/rng.ts";
 
 // ---------------------------------------------------------------------------
@@ -31,17 +34,25 @@ import { sfc32 } from "../src/rng.ts";
 
 /** Empty when the kernel is testable here, otherwise why it is not. */
 function ensureDylib(): string {
+  const src = new URL("mjkernel.cc", KERNEL_LIB_URL);
+  // Rebuild when the dylib is MISSING or STALE. Staleness matters as much as
+  // absence: an artifact from before a new entry point fails `KERNEL_ABI` and
+  // would turn this whole file into a silent skip, which is the one outcome a
+  // differential test must never produce quietly.
   try {
-    Deno.statSync(KERNEL_LIB_URL);
-    return "";
+    const lib = Deno.statSync(KERNEL_LIB_URL).mtime?.getTime() ?? 0;
+    const cc = Deno.statSync(src).mtime?.getTime() ?? 0;
+    if (lib >= cc) return "";
   } catch {
     // not built yet — fall through and build it
   }
-  const src = new URL("mjkernel.cc", KERNEL_LIB_URL);
   const args = [
     "-std=c++17",
     "-O3",
     "-flto",
+    // Keep in step with native/build_kernel.sh — `mj_shape_masses` is bit-exact
+    // only if the compiler is forbidden to contract a multiply-add into an FMA.
+    "-ffp-contract=off",
     "-Wall",
     "-Wextra",
     "-fvisibility=hidden",
@@ -346,6 +357,137 @@ Deno.test({
     kokushi[0] = 2; // 14 tiles: a complete kokushi, i.e. shanten -1
     assertEquals(shanten(kokushi, 0, true), -1);
     assertEquals(ukeireTypes(kokushi, 0, true), ukeireTS(kokushi, 0, true));
+  },
+});
+
+// ---------------------------------------------------------------------------
+// mj_shape_masses — the 計算 reader's wait row
+// ---------------------------------------------------------------------------
+//
+// Unlike shanten this is FLOAT arithmetic, so there is a real question about
+// what "identical" means, and the answer taken here is the strict one: the same
+// double, every bit of it, on every one of the 306 slots the kernel writes. The
+// seat's whole-hanchan decision fingerprints are pinned in
+// `test/computed_test.ts`, and a single ulp of drift anywhere in this row can
+// flip a discard and with it every number downstream — so there is no tolerance
+// to be generous with. If clang ever reassociates or contracts (see
+// `-ffp-contract=off` in the compile line above), this is what says so.
+
+/** A board's worth of public facts, arbitrary but inside the kernel's domain. */
+function randCtx(rng: IntRng & { int(n: number): number }): WaitContext {
+  const unseen: number[] = [];
+  for (let t = 0; t < 34; t++) unseen.push(rng.int(5));
+  const genbutsu = new Set<number>();
+  for (let i = 0, n = rng.int(14); i < n; i++) genbutsu.add(rng.int(34));
+  const valueHonors = new Set<number>([31, 32, 33, 27 + rng.int(4), 27 + rng.int(4)]);
+  const dora: number[] = new Array(34).fill(0);
+  for (let i = 0, n = rng.int(4); i < n; i++) dora[rng.int(34)]++;
+  const suits = [null, "m", "p", "s"] as const;
+  const read: MeldRead = {
+    honitsuSuit: suits[rng.int(4)],
+    toitoi: rng.int(2) === 0,
+    yakuhai: new Set<number>(),
+    open: rng.int(5),
+  };
+  return {
+    unseen,
+    genbutsu,
+    valueHonors,
+    // Both optional fields absent sometimes: a menzen opponent gets no read, and
+    // a caller that does not care about dora supplies none.
+    read: rng.int(5) === 0 ? undefined : read,
+    dora: rng.int(6) === 0 ? undefined : dora,
+  };
+}
+
+/** A 感性 vector well off the shipped one — every multiplier doing something. */
+function randWeights(rng: Rng): ComputedWeights {
+  const f = () => Math.round(rng.float() * 1000) / 1000;
+  return mergeComputed({
+    shapePrior: {
+      "リャンメン": f(),
+      "カンチャン": f(),
+      "ペンチャン": f(),
+      "シャンポン": f(),
+      "タンキ": f(),
+    },
+    yakuhaiShanpon: f() * 2,
+    honitsuHot: f() * 2,
+    honitsuCold: f() * 2,
+    toitoiPair: f() * 2,
+    toitoiRun: f() * 2,
+    sujiHalfSurvive: f(),
+    sujiFullSurvive: f(),
+    doraPair: f() * 2,
+    doraBridge: f() * 2,
+    dealinScale: f() * 0.3,
+    expWaitMass: f() * 3,
+    waitNormalize: rng.int(2) === 0,
+  });
+}
+
+Deno.test({
+  name: "kernel native: mj_shape_masses が TS と1ビットも違わない",
+  ignore: SKIP,
+  fn: () => {
+    const rng = sfc32(340003);
+    const a = new Float64Array(SHAPE_ROW_LEN);
+    const b = new Float64Array(SHAPE_ROW_LEN);
+    // The shipped vector first — normalized and not — then vectors that put
+    // every weight to work. The shipped one is what the seat actually plays.
+    const vectors: ComputedWeights[] = [
+      mergeComputed(),
+      mergeComputed({ waitNormalize: true }),
+    ];
+    for (let i = 0; i < 24; i++) vectors.push(randWeights(rng));
+
+    let cells = 0;
+    const diffs: string[] = [];
+    for (const w of vectors) {
+      const native = shapeRowEvaluator(w, true);
+      const ts = shapeRowEvaluator(w, false);
+      for (let n = 0; n < 200; n++) {
+        const ctx = randCtx(rng);
+        native(ctx, a);
+        ts(ctx, b);
+        for (let k = 0; k < SHAPE_ROW_LEN; k++) {
+          cells++;
+          if (a[k] === b[k]) continue;
+          // Not `!==`: two NaNs would compare unequal and are the same answer.
+          if (Number.isNaN(a[k]) && Number.isNaN(b[k])) continue;
+          if (diffs.length < 10) {
+            diffs.push(
+              `slot ${k}: native=${a[k]} TS=${b[k]} unseen=[${ctx.unseen.join(",")}] ` +
+                `genbutsu=[${[...ctx.genbutsu].join(",")}]`,
+            );
+          }
+        }
+      }
+    }
+    for (const d of diffs) console.error(`差分 [shape masses] ${d}`);
+    assertEquals(diffs.length, 0, `${diffs.length} 件の不一致`);
+    console.log(`  形masses: ${vectors.length} 個の重みベクトル / ${cells} スロット 完全一致`);
+  },
+});
+
+Deno.test({
+  name: "kernel native: 形masses — 域外の unseen は TS に落ちる",
+  ignore: SKIP,
+  fn: () => {
+    // `packShapeCtx` refuses a count the kernel's int domain cannot hold, and
+    // the answer must still be the reference one rather than a wrong one.
+    const ctx: WaitContext = {
+      unseen: new Array(34).fill(0).map((_, t) => (t === 4 ? 9.5 : t % 5)),
+      genbutsu: new Set([7]),
+      valueHonors: new Set([31, 32, 33, 27, 28]),
+      dora: new Array(34).fill(0),
+    };
+    const w = mergeComputed();
+    const a = new Float64Array(SHAPE_ROW_LEN);
+    const b = new Float64Array(SHAPE_ROW_LEN);
+    shapeRowEvaluator(w, true)(ctx, a);
+    shapeRowTS(ctx, w, b);
+    assertEquals(Array.from(a), Array.from(b));
   },
 });
 

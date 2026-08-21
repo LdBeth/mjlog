@@ -14,8 +14,9 @@ import {
   assertNotEquals,
   assertThrows,
 } from "@std/assert";
-import { argError, pairedJson, pairedRun } from "../src/main.ts";
-import type { KTune } from "../src/main.ts";
+import { argError } from "../src/cli/args.ts";
+import { pairedJson, pairedRun } from "../src/paired.ts";
+import type { KTune } from "../src/harness.ts";
 import { initFromWeights } from "../src/ai/consumer.ts";
 import type { ConsumerParams } from "../src/ai/consumer.ts";
 import { sfc32 } from "../src/rng.ts";

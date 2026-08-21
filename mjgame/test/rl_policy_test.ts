@@ -103,7 +103,7 @@ function baseObs(over: Partial<Observation> = {}): Observation {
 function greedyIndex(obs: Observation, logits: Record<number, number>): number {
   const masked = new Float32Array(ACTIONS).fill(-Infinity);
   for (const a of obs.legal) {
-    const i = actionIndex(a, obs.akaIds);
+    const i = actionIndex(a);
     if (i >= 0 && i < ACTIONS) masked[i] = logits[i] ?? 0;
   }
   let best = -1;

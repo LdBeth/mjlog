@@ -172,10 +172,9 @@ function advance(m: MatchState, t: Table, outcome: RoundOutcome, opts: MatchOpti
 
 /**
  * Who takes the 供託 left on the table when the match ends: the top finisher,
- * ties broken by the lower seat index. That is the same tiebreak the two
- * settlement paths use — `settlement` (src/rl/record.ts) and the TUI's
- * `finalStandings` (src/tui/app.ts) both sort by `b.s - a.s || a.seat - b.seat`
- * — so the sticks can never land on a seat those two rank second.
+ * ties broken by the lower seat index. That is the same tiebreak
+ * `settlement` (src/rl/record.ts) uses — `b.s - a.s || a.seat - b.seat` —
+ * so the sticks can never land on a seat it ranks second.
  */
 export function topFinisher(scores: readonly number[]): Seat {
   let top: Seat = 0;
@@ -294,5 +293,3 @@ export async function runMatch(policies: Policy[], opts: MatchOptions): Promise<
     }
   }
 }
-
-export type { PublicEvent };

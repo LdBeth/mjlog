@@ -36,6 +36,10 @@ const KERNEL_SYMBOLS = {
   mj_kernel_version: { parameters: [], result: "i32" },
   mj_shanten: { parameters: ["buffer", "i32", "i32"], result: "i32" },
   mj_ukeire_mask: { parameters: ["buffer", "i32", "i32", "i32"], result: "u64" },
+  mj_shape_masses: {
+    parameters: ["buffer", "buffer", "i32", "i32", "buffer", "buffer"],
+    result: "void",
+  },
 } as const;
 
 export type KernelLib = Deno.DynamicLibrary<typeof KERNEL_SYMBOLS>;
@@ -49,8 +53,16 @@ const LIB_EXT = Deno.build.os === "windows"
 /** The one place the kernel is looked for, module-relative (src/ → ../native/). */
 export const KERNEL_LIB_URL = new URL(`../native/libmjkernel${LIB_EXT}`, import.meta.url);
 
-/** The ABI this module was written against; a mismatch means a stale dylib. */
-export const KERNEL_ABI = 1;
+/**
+ * The ABI this module was written against; a mismatch means a stale dylib.
+ *
+ * 2 added `mj_shape_masses`. A dylib built before it reports 1, fails this
+ * check, and the whole module degrades to TypeScript — which is the point of
+ * checking a version rather than probing for a symbol: a `dlopen` that is short
+ * one entry point throws, and a half-loaded kernel is not a thing this module
+ * is willing to be. `MJGAME_NATIVE=1` still says so out loud, naming the build.
+ */
+export const KERNEL_ABI = 2;
 
 const BUILD_HINT = `mjgame/ で \`deno task build-kernel\` ` +
   `(sh native/build_kernel.sh) を実行し、--allow-ffi をつけて起動してください`;
@@ -176,4 +188,39 @@ export function ukeireTypes(
   for (let t = 0; t < 32; t++) if ((lo >>> t) & 1) out.push(t);
   for (let t = 32; t < 34; t++) if ((hi >>> (t - 32)) & 1) out.push(t);
   return out;
+}
+
+/**
+ * One opponent's whole wait row — the 計算 engine's `shapeRowTS`, in C.
+ *
+ * The cut point is the (opponent, decision) pair, not the tile type: the row is
+ * normalized over its own total when `waitNormalize` is on, so a per-type call
+ * could not answer anyway, and 34 crossings to save 34 × 30 flops would cost
+ * more than they saved. One crossing per opponent means three per decision.
+ *
+ *   unseen[34]   copies of each type not visible to the observer, 0..4
+ *   flags[34]    bit0 現物, bit1 役牌 for this opponent, bit2 ドラ type
+ *   honitsuSuit  染め手模様 read: 0 なし, 1 m, 2 p, 3 s
+ *   toitoi       トイトイ模様, 0/1
+ *   weights[17]  the packed `ComputedWeights` slice (`packShapeWeights`)
+ *   out          34 wait likelihoods, then 34 × 8 parameter-free counts
+ *
+ * Returns false when no kernel is loaded, and then writes nothing — the caller
+ * runs the TypeScript. The two are bit-identical, not approximate: this is
+ * float arithmetic, so the C is written expression for expression and built
+ * with `-ffp-contract=off`, and `test/kernel_native_test.ts` fuzzes the pair to
+ * exact equality.
+ */
+export function shapeMasses(
+  unseen: Int32Array,
+  flags: Int32Array,
+  honitsuSuit: number,
+  toitoi: number,
+  weights: Float64Array,
+  out: Float64Array,
+): boolean {
+  const k = open();
+  if (k === null) return false;
+  k.symbols.mj_shape_masses(unseen, flags, honitsuSuit, toitoi, weights, out);
+  return true;
 }

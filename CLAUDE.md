@@ -119,6 +119,16 @@ imports typecheck under `deno check` AND run — `deno run src/mcp.ts` /
 `deno task mcp` work directly. The bundle (`deno bundle -o mcp.mjs
 src/mcp.ts`) remains the `deno compile` input for the `.mcpb`.
 
+## mjgame (`mjgame/`)
+
+A **separate Deno/TypeScript project** (not part of the C++ build): a 1-player
+雀鬼流 riichi mahjong game — TUI play, 禁じ手 violation ledger, heuristic/計算
+AI seats, and an RL pipeline (TS inference + MLX trainer, native Accelerate
+kernels). Played matches export as Tenhou mjlog XML (`--export`) that renders
+through mjrender. See **`mjgame/CLAUDE.md`** for tasks, layout, and the
+invariants (determinism, frozen trainer contracts, bit-exact kernel parity)
+that its test suite enforces.
+
 ## Maude Specification (`mahjong.maude`)
 
 A separate formal model (Maude, not C++) of mahjong hand classification —

@@ -20,8 +20,10 @@ import {
   genbutsuSets,
   meldReadOf,
   mergeComputed,
+  SHAPE_ROW_LEN,
   shapeBaseMasses,
   shapeFlagsOf,
+  shapeRowTS,
   tenpaiPriorOf,
   valueOnType,
   WAIT_SHAPES,
@@ -38,7 +40,7 @@ import type {
 } from "../src/ai/computed.ts";
 import { HeuristicPolicy } from "../src/ai/heuristic.ts";
 import { publicUnseen } from "../src/ai/planner.ts";
-import { makeDojoHooks } from "../src/main.ts";
+import { makeDojoHooks } from "../src/dojo.ts";
 import { runMatchSync } from "../src/match.ts";
 import type { Observation } from "../src/observe.ts";
 import { AKA_5P, zeros34 } from "../src/tiles.ts";
@@ -962,20 +964,29 @@ Deno.test("計算(M10b): 本場の額は score.ts の ronValue が実際に請�
 // ---- 7. nothing else moved -------------------------------------------------
 
 /**
- * The pre-M10b decision stream, seed by seed: `scores#FNV(全局の結果)` from the
- * M10a code, captured before a line of this milestone was written.
+ * The 計算 seat's decision stream with the 本場 term OFF, seed by seed:
+ * `scores#FNV(全局の結果)`.
  *
- * The milestone's contract is that `valuePerHonba: 0` reproduces it exactly —
- * the four other upgrades are no-ops at their defaults, so the 本場 surcharge is
- * the ONLY behavioural change M10b ships. Seed 707 plays eight 本場 rounds and
- * does diverge with the term on (see below), which is what makes the pinning
- * meaningful rather than vacuous.
+ * WHAT IT PINS. That `valuePerHonba` is the only weight in M10b's batch with a
+ * behavioural effect at the shipped defaults — the four other upgrades
+ * (`sujiHalfSurvive`, `sujiFullSurvive`, `doraBridge`, `waitNormalize`) are
+ * exact no-ops there — and, from that, that nothing ELSE moves the seat either.
+ * Seed 606 diverges with the term on (asserted below), which is what keeps the
+ * pinning meaningful rather than vacuous.
+ *
+ * RE-CAPTURED at the unification of the unseen-tile count. These were originally
+ * the M10a stream, but M10a priced ukeire liveness through two different
+ * formulas — `Observation.ukeire[].live` for a type the resting hand happened to
+ * accept and `4 − own copies` (blind to rivers, melds and indicators) for the
+ * rest — so the seat it describes no longer exists. The claim the strings carry
+ * is unchanged; only the code they were read off is newer.
  */
-const PRE_M10B: Record<number, string> = {
-  101: "25900/22700/37300/34100#2d3ebeb5",
-  404: "9700/30400/47200/32700#f86a6ad9",
-  505: "19500/33500/52500/14500#a6e25f27",
-  707: "19800/9600/55700/34900#66aa617f",
+const HONBA_OFF: Record<number, string> = {
+  101: "1400/21600/63500/33500#32a4e25f",
+  404: "36100/30400/23800/29700#9883694e",
+  505: "30000/40700/37500/11800#e7a125e7",
+  606: "24700/13400/45200/36700#01233df3",
+  707: "22900/9400/54100/33600#618b456e",
 };
 
 function fingerprint(seed: number, w?: Partial<ComputedWeights>): string {
@@ -998,9 +1009,9 @@ function fingerprint(seed: number, w?: Partial<ComputedWeights>): string {
   return `${r.scores.join("/")}#${h.toString(16).padStart(8, "0")}`;
 }
 
-Deno.test("計算(M10b): valuePerHonba=0 で M10a の対局をビット単位で再現する", () => {
+Deno.test("計算(M10b): 本場項を切れば対局はビット単位で固定されている", () => {
   let diverged = 0;
-  for (const [seed, want] of Object.entries(PRE_M10B)) {
+  for (const [seed, want] of Object.entries(HONBA_OFF)) {
     assertEquals(
       fingerprint(Number(seed), { valuePerHonba: 0 }),
       want,
@@ -1009,4 +1020,119 @@ Deno.test("計算(M10b): valuePerHonba=0 で M10a の対局をビット単位で
     if (fingerprint(Number(seed), {}) !== want) diverged++;
   }
   assert(diverged > 0, "本場を課しても何も変わらないなら、この訂正は測れていない");
+});
+
+// ---------------------------------------------------------------------------
+// the flat hot path is the same arithmetic
+// ---------------------------------------------------------------------------
+//
+// `shapeRowTS` writes the counts and the row into one Float64Array instead of
+// allocating a `ShapeBase` per tile type and a `Record<WaitShape, number>` per
+// cell — three quarters of what the 計算 seat spends its time on. It exists
+// ONLY as a faster spelling of `shapeBaseMasses` + `waitRowFrom`, so the thing
+// worth testing is that it is exactly that: the same double, bit for bit, on
+// every slot and under every weight vector. (The whole-hanchan fingerprints
+// above would catch a drift too, but not tell anyone where it was.)
+
+/** A board's worth of public facts, arbitrary. */
+function fuzzCtx(rng: () => number): WaitContext {
+  const pick = (n: number) => Math.floor(rng() * n);
+  const unseen: number[] = [];
+  for (let t = 0; t < 34; t++) unseen.push(pick(5));
+  const genbutsu = new Set<number>();
+  for (let i = 0, n = pick(14); i < n; i++) genbutsu.add(pick(34));
+  const dora: number[] = new Array(34).fill(0);
+  for (let i = 0, n = pick(4); i < n; i++) dora[pick(34)]++;
+  const suits = [null, "m", "p", "s"] as const;
+  const read: MeldRead = {
+    honitsuSuit: suits[pick(4)],
+    toitoi: pick(2) === 0,
+    yakuhai: new Set<number>(),
+    open: pick(5),
+  };
+  return {
+    unseen,
+    genbutsu,
+    valueHonors: new Set([31, 32, 33, 27 + pick(4), 27 + pick(4)]),
+    read: pick(5) === 0 ? undefined : read,
+    dora: pick(6) === 0 ? undefined : dora,
+  };
+}
+
+Deno.test("計算: 平坦化した経路は定義そのものと1ビットも違わない", () => {
+  // mulberry32 — a self-contained stream, so this test owns its own randomness.
+  let s = 0x9e3779b9;
+  const rng = () => {
+    s = (s + 0x6d2b79f5) | 0;
+    let t = Math.imul(s ^ (s >>> 15), 1 | s);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  const f = () => Math.round(rng() * 1000) / 1000;
+
+  const vectors: ComputedWeights[] = [DEFAULT_COMPUTED, mergeComputed(M10B_ON)];
+  for (let i = 0; i < 16; i++) {
+    vectors.push(mergeComputed({
+      shapePrior: {
+        "リャンメン": f(),
+        "カンチャン": f(),
+        "ペンチャン": f(),
+        "シャンポン": f(),
+        "タンキ": f(),
+      },
+      yakuhaiShanpon: f() * 2,
+      honitsuHot: f() * 2,
+      honitsuCold: f() * 2,
+      toitoiPair: f() * 2,
+      toitoiRun: f() * 2,
+      sujiHalfSurvive: f(),
+      sujiFullSurvive: f(),
+      doraPair: f() * 2,
+      doraBridge: f() * 2,
+      dealinScale: f() * 0.3,
+      expWaitMass: f() * 3,
+      waitNormalize: rng() < 0.5,
+    }));
+  }
+
+  const flat = new Float64Array(SHAPE_ROW_LEN);
+  let cells = 0;
+  for (const w of vectors) {
+    for (let n = 0; n < 120; n++) {
+      const ctx = fuzzCtx(rng);
+      shapeRowTS(ctx, w, flat);
+      const want = waitRow(ctx, w);
+      for (let ty = 0; ty < 34; ty++) {
+        assertEquals(flat[ty], want[ty], `重み${vectors.indexOf(w)} 牌${ty}: 待ち確率が違う`);
+        // and the counts the row was built from, field by field
+        const b = shapeBaseMasses(ty, ctx);
+        const o = 34 + ty * 8;
+        assertEquals(
+          [
+            flat[o],
+            flat[o + 1],
+            flat[o + 2],
+            flat[o + 3],
+            flat[o + 4],
+            flat[o + 5],
+            flat[o + 6],
+            flat[o + 7],
+          ],
+          [
+            b.ryanmen,
+            b.ryanmenDora,
+            b.ryanmenHalf,
+            b.ryanmenFull,
+            b.kanchan,
+            b.penchan,
+            b.shanpon,
+            b.tanki,
+          ],
+          `牌${ty}: 素の数え上げが違う`,
+        );
+        cells++;
+      }
+    }
+  }
+  assert(cells > 70000, `検査したセルが少なすぎる (${cells})`);
 });

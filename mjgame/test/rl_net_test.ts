@@ -27,7 +27,7 @@ import {
 } from "../src/rl/net.ts";
 import { NeuralPolicy } from "../src/rl/policy.ts";
 import { runMatchSync } from "../src/match.ts";
-import { makeDojoHooks } from "../src/main.ts";
+import { makeDojoHooks } from "../src/dojo.ts";
 import { DOJO_HEADLESS, JANKI } from "../src/rules.ts";
 import { scorer } from "../src/score.ts";
 import type { Rng } from "../src/rng.ts";

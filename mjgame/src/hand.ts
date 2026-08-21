@@ -32,8 +32,25 @@ export interface TenpaiInfo {
   katagari: boolean;
 }
 
+/**
+ * The shape half of `analyze`'s work: the 3n+1 hand as a 34-vector, the meld
+ * context it is read against, and its shanten.
+ *
+ * Split out so a caller that has already paid for it — `observe()` computes
+ * exactly this for its own `shanten`/`ukeire` fields, and again per candidate
+ * discard — can hand it back instead of making `analyze` redo it.
+ */
+export interface RestingShape {
+  counts: number[];
+  open: number;
+  closed: boolean;
+  shanten: number;
+  /** Ukeire types at shanten <= 0; derived on demand when omitted. */
+  waits?: number[];
+}
+
 /** Resting (3n+1) hand for a seat: concealed tiles minus the drawn tile. */
-export function restingHand(t: Table, seat: Seat, drawn: Tile | null): Tile[] {
+function restingHand(t: Table, seat: Seat, drawn: Tile | null): Tile[] {
   const hand = [...t.hands[seat]];
   if (drawn === null) return hand;
   const i = hand.lastIndexOf(drawn);
@@ -41,34 +58,34 @@ export function restingHand(t: Table, seat: Seat, drawn: Tile | null): Tile[] {
   return hand;
 }
 
+function restingShape(t: Table, seat: Seat, drawn: Tile | null): RestingShape {
+  const counts = countsFromTiles(restingHand(t, seat, drawn));
+  const open = t.melds[seat].length;
+  const closed = t.isMenzen(seat);
+  return { counts, open, closed, shanten: shanten(counts, open, closed) };
+}
+
 export function analyze(
   t: Table,
   seat: Seat,
   drawn: Tile | null = null,
   oracle: WinOracle = ANY_WIN,
+  /** The seat's resting shape, when the caller already computed it. */
+  pre?: RestingShape,
 ): TenpaiInfo {
-  const rest = restingHand(t, seat, drawn);
-  const open = t.melds[seat].length;
-  const closed = t.isMenzen(seat);
-  const counts = countsFromTiles(rest);
-  const sh = shanten(counts, open, closed);
-  if (sh > 0) {
-    return { tenpai: false, shanten: sh, waits: [], ronnable: [], katagari: false };
+  const s = pre ?? restingShape(t, seat, drawn);
+  if (s.shanten > 0) {
+    return { tenpai: false, shanten: s.shanten, waits: [], ronnable: [], katagari: false };
   }
-  const waits = ukeireTypes(counts, open, closed, sh);
+  const waits = s.waits ?? ukeireTypes(s.counts, s.open, s.closed, s.shanten);
   const ronnable = waits.filter((w) => oracle.hasYaku(t, seat, w * 4, false));
   return {
     tenpai: true,
-    shanten: sh,
+    shanten: s.shanten,
     waits,
     ronnable,
     katagari: ronnable.length > 0 && ronnable.length < waits.length,
   };
-}
-
-/** Copies of a tile type that could still be out there, from `seat`'s view. */
-export function liveCopies(t: Table, seat: Seat, type: number): number {
-  return Math.max(0, 4 - t.visibleCounts(seat)[type]);
 }
 
 /**

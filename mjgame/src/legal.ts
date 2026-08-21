@@ -11,7 +11,6 @@
 import type { Meld, Tile } from "mjrender/model.ts";
 import { rankOfType, suitOfType, tileType } from "mjrender/tiles.ts";
 import { countsFromTiles, shanten } from "./kernel.ts";
-import { isComplete } from "./decompose.ts";
 import type { Table } from "./table.ts";
 import { anyFuriten } from "./table.ts";
 import type { Action, Seat } from "./types.ts";
@@ -82,6 +81,23 @@ function discardCandidates(t: Table, seat: Seat, drawn: Tile | null): Tile[] {
   return out;
 }
 
+/**
+ * Whether `counts` (`total` concealed tiles alongside `openMelds` melds) is a
+ * complete winning shape.
+ *
+ * Shanten −1 IS completeness, and the kernel answers it in one call (native:
+ * one FFI crossing) where a hand-rolled DFS costs 34 partition attempts. The
+ * tile-count check is what `shanten` alone does not do: it happily reads a
+ * complete 14 out of a 15-tile vector, which the callers here must not.
+ * Irregular forms line up exactly — `shanten` gates 七対子/国士 on
+ * `openMelds === 0`, the same condition a hand-rolled check would use.
+ */
+function isComplete(counts: number[], openMelds: number, total: number): boolean {
+  const need = 4 - openMelds;
+  if (need < 0 || total !== need * 3 + 2) return false;
+  return shanten(counts, openMelds) === -1;
+}
+
 function tenpaiAfter(t: Table, seat: Seat, discard: Tile): boolean {
   const rest = [...t.hands[seat]];
   const i = rest.indexOf(discard);
@@ -129,29 +145,31 @@ export function turnActions(
     }
   }
 
-  // --- tsumo ---
-  if (drawn !== null && !t.sanctioned[seat]) {
-    const counts = countsFromTiles(t.hands[seat]);
-    if (
-      isComplete(counts, t.melds[seat].length) &&
-      oracle.hasYaku(t, seat, drawn, true, { rinshan })
-    ) {
-      out.push({ t: "tsumo" });
-    }
-  }
-
-  // --- kans ---
+  // --- tsumo and kans ---
   // 明槓 (kakan) is a dojo 禁じ手 but remains mechanically available; only the
   // fifth kan and an exhausted wall actually block it.
-  if (t.kanTotal < 4 && t.wall.remaining > 0 && !t.sanctioned[seat]) {
-    const counts = countsFromTiles(t.hands[seat]);
+  //
+  // Both questions read the same 34-vector, so it is built at most once.
+  const hand = t.hands[seat];
+  const wantsTsumo = drawn !== null && !t.sanctioned[seat];
+  const wantsKan = t.kanTotal < 4 && t.wall.remaining > 0 && !t.sanctioned[seat];
+  const counts = wantsTsumo || wantsKan ? countsFromTiles(hand) : null;
+
+  if (
+    wantsTsumo && isComplete(counts!, t.melds[seat].length, hand.length) &&
+    oracle.hasYaku(t, seat, drawn!, true, { rinshan })
+  ) {
+    out.push({ t: "tsumo" });
+  }
+
+  if (wantsKan) {
     for (let ty = 0; ty < 34; ty++) {
-      if (counts[ty] === 4) out.push({ t: "ankan", type: ty });
+      if (counts![ty] === 4) out.push({ t: "ankan", type: ty });
     }
     for (const m of t.melds[seat]) {
       if (m.kind !== "pon") continue;
       const ty = tileType(m.tiles[0]);
-      const held = t.hands[seat].find((id) => tileType(id) === ty);
+      const held = hand.find((id) => tileType(id) === ty);
       if (held !== undefined) out.push({ t: "kakan", tile: held });
     }
   }
@@ -218,7 +236,8 @@ function leavesLegalDiscard(t: Table, seat: Seat, action: Action): boolean {
  * question to decide 見逃し furiten, which must be judged on the shape alone.
  */
 export function completesHand(t: Table, seat: Seat, tile: Tile): boolean {
-  return isComplete(countsFromTiles([...t.hands[seat], tile]), t.melds[seat].length);
+  const hand = t.hands[seat];
+  return isComplete(countsFromTiles([...hand, tile]), t.melds[seat].length, hand.length + 1);
 }
 
 export function claimActions(
@@ -228,13 +247,19 @@ export function claimActions(
   from: Seat,
   oracle: WinOracle = ANY_WIN,
   chankan = false,
+  /**
+   * `completesHand(t, seat, tile)`, when the caller already knows it. `round.ts`
+   * needs the same answer to judge 見逃し furiten, so it computes it once and
+   * hands it in rather than paying for the shape twice per discard.
+   */
+  completes = completesHand(t, seat, tile),
 ): Action[] {
   if (seat === from) return [];
   const out: Action[] = [{ t: "pass" }];
   if (t.sanctioned[seat]) return out;
 
   // --- ron ---
-  if (completesHand(t, seat, tile)) {
+  if (completes) {
     const ty = tileType(tile);
     const blocked = t.ronBlocked[seat].has(ty);
     if (
@@ -260,14 +285,16 @@ export function claimActions(
     // Offer each distinct pair, so a player can choose to keep or spend an aka.
     // Distinct means by aka composition, not by id: copies of a plain tile are
     // interchangeable, so e.g. 5p 5p 0p offers exactly 5p5p and 5p0p.
-    const combos = new Set<string>();
-    const kind = (id: Tile) => (t.cfg.akaIds.has(id) ? "a" : "p");
+    // A pair is characterised entirely by how many of the two are aka (0, 1 or
+    // 2), so the seen-set is three bits rather than a sorted string per pair.
+    let combos = 0;
+    const aka = sameType.map((id) => (t.cfg.akaIds.has(id) ? 1 : 0));
     for (let i = 0; i < sameType.length; i++) {
       for (let j = i + 1; j < sameType.length; j++) {
+        const bit = 1 << (aka[i] + aka[j]);
+        if (combos & bit) continue;
+        combos |= bit;
         const pair: [Tile, Tile] = [sameType[i], sameType[j]];
-        const key = [kind(pair[0]), kind(pair[1])].sort().join("");
-        if (combos.has(key)) continue;
-        combos.add(key);
         const pon: Action = { t: "pon", tiles: pair, called: tile };
         if (leavesLegalDiscard(t, seat, pon)) out.push(pon);
       }
@@ -290,7 +317,7 @@ export function claimActions(
 // Claim resolution: priority, 頭ハネ, 三家和
 // ---------------------------------------------------------------------------
 
-export type Claim =
+type Claim =
   | { kind: "ron"; seats: Seat[] }
   | { kind: "call"; seat: Seat; action: Action }
   | { kind: "sanchahou"; seats: Seat[] }

@@ -95,10 +95,42 @@ export interface Encoded {
   scalars: Float32Array;
 }
 
+/**
+ * One encoding, kept by a policy that already did the work — see
+ * `EncodingCache`. `seq` is null when the policy had no use for the token
+ * stream (a v3 net), never when it built one.
+ */
+export interface CachedEncoding {
+  /** The very Observation these bytes were encoded from, for an identity check. */
+  obs: Observation;
+  planes: Int8Array;
+  scalars: Float32Array;
+  seq: Int8Array | null;
+}
+
+/**
+ * A policy that offers its last encoding to whoever wraps it. `RecordingPolicy`
+ * takes the offer when the Observation matches BY REFERENCE and re-encodes
+ * otherwise, so wrapping a heuristic seat (which implements nothing here) keeps
+ * working and the recorded bytes are identical either way.
+ */
+export interface EncodingCache {
+  readonly lastEncoding: CachedEncoding | null;
+}
+
+/**
+ * Shared 34-wide counter, refilled per call — `encode` is synchronous and each
+ * of its six count passes is fully consumed before the next one starts, so one
+ * buffer serves them all (the same scratch-reuse pattern `kernel.ts` documents).
+ * The array is module-private for exactly that reason: a caller that held on to
+ * a returned count would see it change under them.
+ */
+const COUNTS = new Uint8Array(TYPES);
+
 function countTypes(ids: Iterable<Tile>): Uint8Array {
-  const c = new Uint8Array(TYPES);
-  for (const id of ids) c[tileType(id)]++;
-  return c;
+  COUNTS.fill(0);
+  for (const id of ids) COUNTS[tileType(id)]++;
+  return COUNTS;
 }
 
 /** Which of p26–p28 a danger level lights. 安全 lights none. */
@@ -189,11 +221,14 @@ export function encode(obs: Observation): Encoded {
   for (const id of obs.hand) if (obs.akaIds.has(id)) set(5, tileType(id));
 
   // --- p6–p13: rivers ---
+  // Counted straight off the entries: a `.map(e => e.tile)` here would build
+  // four throwaway arrays per encode, one per river, for nothing.
   for (let r = 0; r < 4; r++) {
-    const c = countTypes((obs.rivers[r] ?? []).map((e) => e.tile));
+    COUNTS.fill(0);
+    for (const e of obs.rivers[r] ?? []) COUNTS[tileType(e.tile)]++;
     for (let ty = 0; ty < TYPES; ty++) {
-      if (c[ty] >= 1) set(6 + 2 * r, ty);
-      if (c[ty] >= 2) set(7 + 2 * r, ty);
+      if (COUNTS[ty] >= 1) set(6 + 2 * r, ty);
+      if (COUNTS[ty] >= 2) set(7 + 2 * r, ty);
     }
   }
 
@@ -404,9 +439,15 @@ export function encode(obs: Observation): Encoded {
  * tile is a discard that never sat in the river — reading the stream without it
  * would count a tile as passed-safe that was in fact scooped up immediately.
  *
- * Returns a fresh, exactly-sized Int8Array: `4 × L` bytes for `L` tokens, and a
+ * Returns an Int8Array of exactly `4 × L` bytes for `L` tokens, and a
  * ZERO-length array before anyone has discarded (the `L = 0` case every forward
  * implementation must special-case as `z = bz`).
+ *
+ * It is a VIEW onto a buffer allocated by this call — `subarray`, not `slice`,
+ * so the tail is not copied — and that buffer belongs to the returned view
+ * alone. Nothing here is shared between calls, so a caller may keep the result
+ * for as long as it likes; it only has to respect `byteOffset`/`byteLength`
+ * (`length` and the FFI's pointer-of-view both already do).
  */
 export function encodeSeq(obs: Observation): Int8Array {
   const buf = new Int8Array(SEQ_MAX * SEQ_TOKEN_BYTES);
@@ -426,7 +467,7 @@ export function encodeSeq(obs: Observation): Int8Array {
       buf[n++] = flags;
     }
   }
-  return buf.slice(0, n);
+  return buf.subarray(0, n);
 }
 
 /**
@@ -523,10 +564,23 @@ export function encodeOracle(t: Table, seat: Seat): EncodedOracle {
   return { oplanes, oppShanten };
 }
 
-/** planes ++ scalars as one Float32Array — the network's input vector. */
-export function flatten(e: Encoded): Float32Array {
-  const out = new Float32Array(INPUT_LEN);
-  for (let i = 0; i < PLANE_LEN; i++) out[i] = e.planes[i];
-  out.set(e.scalars, PLANE_LEN);
-  return out;
+/**
+ * planes ++ scalars as one Float32Array — the network's input vector.
+ *
+ * `out`, when given, is filled IN PLACE and returned: it must be at least
+ * `INPUT_LEN` long and may be LONGER, in which case the tail past `INPUT_LEN`
+ * is left exactly as it was. That is what lets `NeuralPolicy` keep one
+ * `SEQ_INPUT_LEN` buffer for every decision and have the river encoder write
+ * `z` into the tail. Without `out` a fresh `INPUT_LEN` vector is returned, as
+ * always.
+ *
+ * The plane half is an Int8→Float32 `set`, i.e. the per-element numeric
+ * conversion the spec defines — same values as the old cell-by-cell loop, since
+ * every Int8 is exact in float32.
+ */
+export function flatten(e: Encoded, out?: Float32Array): Float32Array {
+  const dst = out ?? new Float32Array(INPUT_LEN);
+  dst.set(e.planes, 0);
+  dst.set(e.scalars, PLANE_LEN);
+  return dst;
 }

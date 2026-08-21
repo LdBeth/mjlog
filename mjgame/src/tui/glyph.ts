@@ -79,27 +79,22 @@ export function typeSpan(type: number, o: GlyphOpts, extra = ""): Span {
 // River markers
 // ---------------------------------------------------------------------------
 
+export type MarkKind = "none" | "tsumogiri" | "riichi" | "called";
+
 /**
  * One-column suffix markers. ASCII on purpose: ▽ (U+25BD) and → (U+2192) are
  * East-Asian *Ambiguous*, so a river built from them is one column wider on
  * some terminals than on others — exactly the tearing this module exists to
  * prevent. Meaning is documented in the help overlay.
  */
-export const MARK = {
-  none: " ",
-  tsumogiri: "'", // ツモ切り
-  riichi: "*", // リーチ宣言牌
-  called: "^", // 鳴かれた
-} as const;
+export const MARK: Record<MarkKind, { ch: string; sgr: string }> = {
+  none: { ch: " ", sgr: "" },
+  tsumogiri: { ch: "'", sgr: SGR.gray }, // ツモ切り
+  riichi: { ch: "*", sgr: SGR.brightRed }, // リーチ宣言牌
+  called: { ch: "^", sgr: SGR.gray }, // 鳴かれた
+};
 
-export const MARK_SGR = {
-  none: "",
-  tsumogiri: SGR.gray,
-  riichi: SGR.brightRed,
-  called: SGR.gray,
-} as const;
-
-/** Wind name for a wind tile type (27..30). */
+/** Wind names, indexed by wind tile type − 27 (also seat order from 起家). */
 export const WINDS = ["東", "南", "西", "北"];
 
 /** Relative-seat labels used across the panels. */

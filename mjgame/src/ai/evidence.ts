@@ -36,7 +36,7 @@ import type { Observation } from "../observe.ts";
 import type { Ctx } from "./heuristic.ts";
 
 /** The danger ladder as an ordinal, cheapest first. Index = the level's rank. */
-export const DANGER_ORDER: readonly DangerLevel[] = ["安全", "危険度低", "危険度中", "危険度高"];
+const DANGER_ORDER: readonly DangerLevel[] = ["安全", "危険度低", "危険度中", "危険度高"];
 
 /**
  * The policy methods evidence assembly needs, bound to one instance.
@@ -49,8 +49,6 @@ export const DANGER_ORDER: readonly DangerLevel[] = ["安全", "危険度低", "
 export interface EvidenceHooks {
   /** The 13-tile shape left behind by a discard. */
   handWithout(ctx: Ctx, tile: Tile): Tile[];
-  /** Copies of a type this seat cannot see, minus the ones it already holds. */
-  liveCopies(obs: Observation, type: number, counts: number[]): number;
   /** What letting this tile go costs defensively, before the fold multiplier. */
   riskOf(ctx: Ctx, tile: Tile): number;
   /** One-turn-lookahead bonus, already in score units. */
@@ -176,7 +174,8 @@ export function assembleCandidate(
   let ukeireTypeCount = 0;
   if (wideOpen) {
     const types = ukeireTypes(counts, ctx.open, ctx.closed, sh);
-    for (const ty of types) ukeireLive += h.liveCopies(obs, ty, counts);
+    // `Ctx.unseen` is the decision's one liveness account — see the field.
+    for (const ty of types) ukeireLive += ctx.unseen[ty];
     ukeireTypeCount = types.length;
   }
 

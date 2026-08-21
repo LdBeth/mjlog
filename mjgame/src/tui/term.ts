@@ -115,12 +115,6 @@ export function padEnd(s: string, n: number): string {
   return t + " ".repeat(Math.max(0, n - width(t)));
 }
 
-/** Pad `s` on the left to exactly `n` columns. */
-export function padStart(s: string, n: number): string {
-  const t = truncate(s, n);
-  return " ".repeat(Math.max(0, n - width(t))) + t;
-}
-
 // ---------------------------------------------------------------------------
 // Screen mode
 // ---------------------------------------------------------------------------
@@ -225,30 +219,17 @@ export function onResize(cb: () => void): () => void {
 // ---------------------------------------------------------------------------
 
 export const SGR = {
-  none: "",
   bold: "1",
   dim: "2",
-  underline: "4",
   reverse: "7",
-  red: "31",
   green: "32",
   yellow: "33",
-  blue: "34",
-  magenta: "35",
   cyan: "36",
-  white: "37",
   gray: "90",
   brightRed: "91",
   brightGreen: "92",
   brightYellow: "93",
-  brightBlue: "94",
   brightCyan: "96",
   brightWhite: "97",
-  onRed: "41",
-  onBlue: "44",
   onGray: "100",
 } as const;
-
-export function join(...parts: string[]): string {
-  return parts.filter((p) => p.length > 0).join(";");
-}

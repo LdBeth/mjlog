@@ -4,7 +4,7 @@
 
 import type { Meld, Tile } from "mjrender/model.ts";
 import type { RiverEntry } from "mjrender/state.ts";
-import type { DangerLevel } from "mjrender/danger.ts";
+import type { DangerAssessment, DangerLevel } from "mjrender/danger.ts";
 import { roundName } from "mjrender/tiles.ts";
 import { doraFromIndicatorType, tileType } from "mjrender/tiles.ts";
 import type { Observation } from "../observe.ts";
@@ -12,19 +12,18 @@ import { anyFuriten } from "../table.ts";
 import type { Action, Seat, Violation } from "../types.ts";
 import type { Line, Span } from "./screen.ts";
 import { lineWidth, sp } from "./screen.ts";
-import type { GlyphOpts } from "./glyph.ts";
-import { MARK, MARK_SGR, REL_LABEL, tileSpan, typeSpan, typeText } from "./glyph.ts";
+import type { GlyphOpts, MarkKind } from "./glyph.ts";
+import { MARK, REL_LABEL, tileSpan, typeSpan, typeText, WINDS } from "./glyph.ts";
 import { padEnd, SGR, truncate, width } from "./term.ts";
 
-export type Phase = "idle" | "turn" | "claim" | "over";
+export type Phase = "idle" | "turn" | "claim";
 
 export type Overlay =
   | { kind: "help" }
   | { kind: "danger" }
-  | { kind: "kan"; options: Action[] }
-  /** Disambiguation between equally-shaped calls (chi shapes, or pon pairs
-   *  that differ only in whether they spend an aka five). */
-  | { kind: "chi"; options: Action[]; title: string }
+  /** A numbered menu: kan shapes, or a disambiguation between equally-shaped
+   *  calls (chi shapes, or pon pairs differing only in an aka five). */
+  | { kind: "pick"; options: Action[]; title: string }
   | { kind: "call"; openedAt: number }
   | { kind: "quit" }
   | { kind: "text"; title: string; body: Line[]; footer: string };
@@ -82,7 +81,7 @@ const LEVEL_SGR: Record<DangerLevel, string> = {
   "危険度高": "1;91",
 };
 
-const MELD_LABEL: Record<Meld["kind"], string> = {
+export const MELD_LABEL: Record<Meld["kind"], string> = {
   chi: "チー",
   pon: "ポン",
   daiminkan: "大明槓",
@@ -95,8 +94,21 @@ const MELD_LABEL: Record<Meld["kind"], string> = {
 // small helpers
 // ---------------------------------------------------------------------------
 
+/** Is `k` on offer right now? The one question every prompt asks of `legal`. */
+function has(ctx: Ctx, k: Action["t"]): boolean {
+  return ctx.obs?.legal.some((a) => a.t === k) ?? false;
+}
+
+/** Danger entries, most dangerous first, ties by tile type. Shared so the
+ *  one-line row and the evidence overlay can never disagree on the order. */
+function dangerOrder(obs: Observation): Array<[number, DangerAssessment]> {
+  return [...obs.danger.entries()].sort((a, b) =>
+    rankLevel(b[1].level) - rankLevel(a[1].level) || a[0] - b[0]
+  );
+}
+
 /** 1-based placements for a relative score array; ties break by absolute seat. */
-export function placements(obs: Observation): number[] {
+function placements(obs: Observation): number[] {
   const order = obs.scores
     .map((s, rel) => ({ rel, s, abs: (obs.seat + rel) % 4 }))
     .sort((a, b) => b.s - a.s || a.abs - b.abs);
@@ -105,18 +117,18 @@ export function placements(obs: Observation): number[] {
   return out;
 }
 
-export function absOf(obs: Observation, rel: number): Seat {
+function absOf(obs: Observation, rel: number): Seat {
   return ((obs.seat + rel) % 4) as Seat;
 }
 
 /** Pad a line out to `w` columns so panel backgrounds stay rectangular. */
-export function padLine(l: Line, w: number): Line {
+function padLine(l: Line, w: number): Line {
   const gap = w - lineWidth(l);
   return gap > 0 ? [...l, sp(" ".repeat(gap))] : l;
 }
 
 /** A box-drawn frame around pre-rendered lines, sized by display width. */
-export function boxed(lines: Line[], sgr = DIM): Line[] {
+function boxed(lines: Line[], sgr = DIM): Line[] {
   const inner = Math.max(...lines.map(lineWidth), 0);
   const bar = "─".repeat(inner + 2);
   return [
@@ -126,7 +138,7 @@ export function boxed(lines: Line[], sgr = DIM): Line[] {
   ];
 }
 
-export function meldSpans(melds: readonly Meld[], g: GlyphOpts): Span[] {
+function meldSpans(melds: readonly Meld[], g: GlyphOpts): Span[] {
   if (melds.length === 0) return [sp("―", DIM)];
   const out: Span[] = [];
   melds.forEach((m, i) => {
@@ -146,7 +158,7 @@ export function meldSpans(melds: readonly Meld[], g: GlyphOpts): Span[] {
  * River rows, 6 tiles per row like a real table. Each cell is 3 columns:
  * a 2-column tile plus a 1-column marker (see `MARK` for why it is ASCII).
  */
-export function riverLines(
+function riverLines(
   entries: readonly RiverEntry[],
   g: GlyphOpts,
   maxRows: number,
@@ -161,22 +173,15 @@ export function riverLines(
     const line: Line = [];
     for (const e of shown.slice(i, i + perRow)) {
       const called = e.calledBy !== undefined;
-      const mark = called
-        ? MARK.called
+      const kind: MarkKind = called
+        ? "called"
         : e.riichiDeclare
-        ? MARK.riichi
+        ? "riichi"
         : e.tsumogiri
-        ? MARK.tsumogiri
-        : MARK.none;
-      const markSgr = called
-        ? MARK_SGR.called
-        : e.riichiDeclare
-        ? MARK_SGR.riichi
-        : e.tsumogiri
-        ? MARK_SGR.tsumogiri
-        : "";
+        ? "tsumogiri"
+        : "none";
       line.push(tileSpan(e.tile, g, called ? SGR.dim : ""));
-      line.push(sp(mark, markSgr));
+      line.push(sp(MARK[kind].ch, MARK[kind].sgr));
     }
     rows.push(line);
   }
@@ -307,11 +312,10 @@ export function ownPanel(ctx: Ctx, w: number): Line[] {
   if (!o) return [];
   const ranks = placements(o);
   const abs = o.seat;
-  const winds = ["東", "南", "西", "北"];
   const head: Line = [
     sp("自分 ", SGR.bold),
     sp(`P${abs} `, DIM),
-    sp(`${winds[o.seatWind - 27] ?? "?"}家 `),
+    sp(`${WINDS[o.seatWind - 27] ?? "?"}家 `),
     sp(o.seatWind === 27 ? "親 " : "   ", "1;33"),
     sp(String(o.scores[0]), scoreSgr(o.scores[0])),
     sp(`  ${ranks[0]}位   `, DIM),
@@ -392,11 +396,8 @@ export function dangerRow(ctx: Ctx, w: number): Line {
   if (o.danger.size === 0) {
     return padLine([sp("危険  ", DIM), sp("リーチ・副露なし — 全牌安全", SGR.green)], w);
   }
-  const order = [...o.danger.entries()].sort((a, b) =>
-    rankLevel(b[1].level) - rankLevel(a[1].level) || a[0] - b[0]
-  );
   const line: Line = [sp("危険  ", DIM)];
-  for (const [type, d] of order) {
+  for (const [type, d] of dangerOrder(o)) {
     const note = d.details[0]?.notes[0];
     const cell: Line = [
       typeSpan(type, ctx.glyph),
@@ -463,37 +464,39 @@ function clipLine(l: Line, w: number): Line {
 // action bar
 // ---------------------------------------------------------------------------
 
+/** The answers a claim prompt offers, in bar order. `ronKey` differs between
+ *  the bottom bar (which advertises Enter too) and the overlay footer. */
+function claimParts(ctx: Ctx, ronKey: string): string[] {
+  return [
+    has(ctx, "ron") ? `${ronKey} 和了` : "",
+    has(ctx, "pon") ? "p ポン" : "",
+    has(ctx, "chi") ? "c チー" : "",
+    has(ctx, "daiminkan") ? "n カン" : "",
+    "Esc 見送り",
+  ].filter((s) => s);
+}
+
 export function actionBar(ctx: Ctx, w: number): Line {
   if (ctx.riichiArmed) {
     const t = " リーチ宣言中 — 切る牌を選んで Enter   Esc 解除 ";
     return [sp(padEnd(t, w), "1;97;41")];
   }
   if (ctx.phase === "claim") {
-    const has = (k: Action["t"]) => ctx.obs?.legal.some((a) => a.t === k) ?? false;
-    const parts = [
-      has("ron") ? "y/Enter 和了" : "",
-      has("pon") ? "p ポン" : "",
-      has("chi") ? "c チー" : "",
-      has("daiminkan") ? "n カン" : "",
-      "Esc 見送り",
-      "d 危険",
-      "? ヘルプ",
-    ].filter((s) => s);
+    const parts = [...claimParts(ctx, "y/Enter"), "d 危険", "? ヘルプ"];
     return [sp(padEnd(" " + parts.join("  "), w), "1;30;103")];
   }
   if (ctx.phase !== "turn") {
     return [sp(padEnd(" 待機中…   ? ヘルプ  q 終了", w), DIM)];
   }
-  const has = (k: Action["t"]) => ctx.obs?.legal.some((a) => a.t === k) ?? false;
   const canRiichi = ctx.obs?.legal.some((a) => a.t === "discard" && a.riichi) ?? false;
-  const canKan = has("ankan") || has("kakan");
+  const canKan = has(ctx, "ankan") || has(ctx, "kakan");
   const parts = [
     "←→ 選択",
     "Enter 打牌",
     "t ツモ切り",
     canRiichi ? "r リーチ" : "",
     canKan ? "k カン" : "",
-    has("tsumo") ? "a ツモ和了" : "",
+    has(ctx, "tsumo") ? "a ツモ和了" : "",
     "d 危険",
     "s 記録",
     "? ヘルプ",
@@ -517,28 +520,21 @@ export function overlay(ctx: Ctx, o: Overlay): OverlayView {
       return { title: "ヘルプ", body: helpBody(), footer: "任意のキーで閉じる" };
     case "danger":
       return { title: "危険牌の根拠", body: dangerBody(ctx), footer: "任意のキーで閉じる" };
-    case "kan":
-      return {
-        title: "カン",
-        body: o.options.map((a, i) => [
-          sp(`${i + 1}. `, SGR.brightCyan),
-          ...kanLabel(a, ctx),
-        ]),
-        footer: "1-9 選択   Esc 取消",
-      };
-    case "chi":
+    case "pick":
       return {
         title: o.title,
         body: o.options.map((a, i) => [
           sp(`${i + 1}. `, SGR.brightCyan),
-          ...(a.t === "chi" || a.t === "pon" ? a.tiles.map((t) => tileSpan(t, ctx.glyph)) : []),
-          sp(" + ", DIM),
-          ...(a.t === "chi" || a.t === "pon" ? [tileSpan(a.called, ctx.glyph, SGR.reverse)] : []),
+          ...pickLabel(a, ctx),
         ]),
         footer: "1-9 選択   Esc 取消",
       };
     case "call":
-      return { title: "鳴きますか", body: callBody(ctx), footer: barText(ctx) };
+      return {
+        title: "鳴きますか",
+        body: callBody(ctx),
+        footer: claimParts(ctx, "y").join("   "),
+      };
     case "quit":
       return {
         title: "終了しますか",
@@ -548,17 +544,6 @@ export function overlay(ctx: Ctx, o: Overlay): OverlayView {
     case "text":
       return { title: o.title, body: o.body, footer: o.footer };
   }
-}
-
-function barText(ctx: Ctx): string {
-  const has = (k: Action["t"]) => ctx.obs?.legal.some((a) => a.t === k) ?? false;
-  return [
-    has("ron") ? "y 和了" : "",
-    has("pon") ? "p ポン" : "",
-    has("chi") ? "c チー" : "",
-    has("daiminkan") ? "n カン" : "",
-    "Esc 見送り",
-  ].filter((s) => s).join("   ");
 }
 
 function callBody(ctx: Ctx): Line[] {
@@ -573,29 +558,41 @@ function callBody(ctx: Ctx): Line[] {
     ]);
   }
   body.push([]);
-  const has = (k: Action["t"]) => o?.legal.some((a) => a.t === k) ?? false;
-  if (has("ron")) body.push([sp("和了できます (y)", SGR.brightGreen)]);
-  if (has("pon")) body.push([sp("ポン可 (p)")]);
-  if (has("chi")) body.push([sp("チー可 (c)")]);
-  if (has("daiminkan")) body.push([sp("大明槓可 (n) — 道場ルールでは禁じ手", SGR.yellow)]);
+  if (has(ctx, "ron")) body.push([sp("和了できます (y)", SGR.brightGreen)]);
+  if (has(ctx, "pon")) body.push([sp("ポン可 (p)")]);
+  if (has(ctx, "chi")) body.push([sp("チー可 (c)")]);
+  if (has(ctx, "daiminkan")) {
+    body.push([sp("大明槓可 (n) — 道場ルールでは禁じ手", SGR.yellow)]);
+  }
   return body;
 }
 
-function kanLabel(a: Action, ctx: Ctx): Line {
-  if (a.t === "ankan") return [sp("暗槓 "), typeSpan(a.type, ctx.glyph)];
-  if (a.t === "kakan") return [sp("加槓 "), tileSpan(a.tile, ctx.glyph)];
-  if (a.t === "daiminkan") return [sp("大明槓 "), tileSpan(a.called, ctx.glyph)];
-  return [sp(a.t)];
+/** One row of a `pick` menu: a kan shape, or a call shape and the tile it eats. */
+function pickLabel(a: Action, ctx: Ctx): Line {
+  switch (a.t) {
+    case "ankan":
+      return [sp("暗槓 "), typeSpan(a.type, ctx.glyph)];
+    case "kakan":
+      return [sp("加槓 "), tileSpan(a.tile, ctx.glyph)];
+    case "daiminkan":
+      return [sp("大明槓 "), tileSpan(a.called, ctx.glyph, SGR.reverse)];
+    case "chi":
+    case "pon":
+      return [
+        ...a.tiles.map((t) => tileSpan(t, ctx.glyph)),
+        sp(" + ", DIM),
+        tileSpan(a.called, ctx.glyph, SGR.reverse),
+      ];
+    default:
+      return [sp(a.t)];
+  }
 }
 
 function dangerBody(ctx: Ctx): Line[] {
   const o = ctx.obs;
   if (!o || o.danger.size === 0) return [[sp("現在、警戒すべき相手はいません。", SGR.green)]];
   const body: Line[] = [];
-  const order = [...o.danger.entries()].sort((a, b) =>
-    rankLevel(b[1].level) - rankLevel(a[1].level) || a[0] - b[0]
-  );
-  for (const [type, d] of order) {
+  for (const [type, d] of dangerOrder(o)) {
     body.push([
       typeSpan(type, ctx.glyph),
       sp("  "),
@@ -635,7 +632,7 @@ function helpBody(): Line[] {
     ["", ""],
     [
       "河の記号",
-      `${MARK.tsumogiri} ツモ切り  ${MARK.riichi} リーチ宣言牌  ${MARK.called} 鳴かれた`,
+      `${MARK.tsumogiri.ch} ツモ切り  ${MARK.riichi.ch} リーチ宣言牌  ${MARK.called.ch} 鳴かれた`,
     ],
     ["牌の色", "萬=黄 筒=シアン 索=緑 字=白 赤5筒=赤"],
   ];

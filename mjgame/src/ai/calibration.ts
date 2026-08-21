@@ -161,7 +161,7 @@ export interface CalibRecord {
   o: CalibOpp[];
 }
 
-export interface CalibHeader {
+interface CalibHeader {
   v: number;
   kind: string;
   seats?: string;
@@ -330,7 +330,7 @@ export function buildCalibRecord(
 // ---------------------------------------------------------------------------
 
 /** The per-type `ShapeBase` array a record's eight mass strings encode. */
-export function basesFromRecord(o: CalibOpp): ShapeBase[] {
+function basesFromRecord(o: CalibOpp): ShapeBase[] {
   const gy = decode34(o.gy);
   const gd = decode34(o.gd);
   const gh = decode34(o.gh);
@@ -364,7 +364,7 @@ export function basesFromRecord(o: CalibOpp): ShapeBase[] {
  * expensive thing in an otherwise linear pass. Omitting it reads as "no dora on
  * the table", which is what a fixture without indicators actually means.
  */
-export function flagsFromRecord(o: CalibOpp, ty: number, dora?: readonly number[]): ShapeFlags {
+function flagsFromRecord(o: CalibOpp, ty: number, dora?: readonly number[]): ShapeFlags {
   return {
     valueHonor: ty >= 27 && ty <= 33 ? (o.vh & (1 << (ty - 27))) !== 0 : false,
     honitsuSuit: o.hs === 0 ? null : (["m", "p", "s"][o.hs - 1] as "m" | "p" | "s"),
@@ -558,7 +558,7 @@ function versionError(path: string, v: number): Error {
   );
 }
 
-export interface CalibFile {
+interface CalibFile {
   header: CalibHeader;
   records: CalibRecord[];
 }

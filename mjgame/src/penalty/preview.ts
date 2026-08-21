@@ -146,6 +146,9 @@ export function makePreview(
 
 // --- the guard ---------------------------------------------------------------
 
+/** The table a `guarded` call currently holds a snapshot of, if any. */
+let guardHolder: Table | null = null;
+
 /**
  * Two rules WRITE to the table when they fire (ドラ切り後の手出し arms
  * `tsumogiriLock`; 腰/見せ牌 close ron types). A hypothetical must not leave
@@ -153,13 +156,26 @@ export function makePreview(
  *
  * `ronBlocked` is only snapshotted when Tier B is live: 腰 and 見せ牌 are its
  * only writers, and copying four Sets per candidate discard is not free.
+ *
+ * NESTING. `previewCall`'s forced-discard lookahead runs a `previewDiscard` per
+ * escape route inside its own guard, and a snapshot taken there would only copy
+ * state the outer guard already holds and already restores. So a guard entered
+ * while one is open on the SAME table is a pass-through. That is exact, not an
+ * approximation: both writers are on the `on-call` side (the arming half of
+ * ドラ切り後の手出し, and 腰/見せ牌, all registered on `on-call` alone), so no
+ * hook a nested `previewDiscard` can reach writes to either channel and nothing
+ * leaks between sibling iterations. Previews are synchronous start to finish,
+ * so a module-level marker is enough to see the open guard.
  */
 function guarded<T>(t: Table, dojo: DojoConfig, fn: () => T): T {
+  if (guardHolder === t) return fn();
   const lock = [...t.tsumogiriLock];
   const blocked = dojo.tierB ? t.ronBlocked.map((s) => new Set(s)) : null;
+  guardHolder = t;
   try {
     return fn();
   } finally {
+    guardHolder = null;
     for (const s of SEATS) {
       t.tsumogiriLock[s] = lock[s];
       if (blocked) {
@@ -200,6 +216,9 @@ export function violationPoints(vs: readonly Violation[]): number {
  * tile on a tsumogiri (which is what a tsumogiri means) and to null otherwise —
  * a tedashi leaves the drawn tile IN the hand, and the rule declines to judge
  * that case anyway.
+ *
+ * `only` narrows the reading to one rule id, for a caller that wants exactly
+ * one verdict; the result is the full reading filtered by `v.rule === only`.
  */
 export function previewDiscard(
   t: Table,
@@ -208,6 +227,7 @@ export function previewDiscard(
   dojo: DojoConfig,
   oracle: WinOracle = ANY_WIN,
   drawn: Tile | null = null,
+  only?: string,
 ): Violation[] {
   const hand = t.hands[seat];
   const i = hand.lastIndexOf(action.tile);
@@ -232,8 +252,8 @@ export function previewDiscard(
     }
     try {
       const ctx = ctxOf(c, action, drawn ?? (action.tsumogiri ? action.tile : null));
-      const out = runHook("post-discard", ctx);
-      if (action.riichi) out.push(...runHook("on-riichi", ctx));
+      const out = runHook("post-discard", ctx, only);
+      if (action.riichi) out.push(...runHook("on-riichi", ctx, only));
       return out;
     } finally {
       river.pop();
@@ -247,8 +267,9 @@ export function previewDiscard(
 /**
  * 立直後カン見送り, the omission side: what declining the kan costs. It is a
  * discard rule (the tsumogiri that passed the kan up is the charged action), so
- * this is the discard preview with everything else filtered out — no second
- * reading of the predicate, just a narrower question.
+ * this is the discard preview asked of that one rule — no second reading of the
+ * predicate, just a narrower question (and the other seven predicates, whose
+ * answers this would have thrown away, are never run).
  */
 export function previewSkipKan(
   t: Table,
@@ -264,8 +285,7 @@ export function previewSkipKan(
     riichi: false,
     tsumogiri: true,
   };
-  return previewDiscard(t, seat, action, dojo, oracle, drawn)
-    .filter((v) => v.rule === "riichi-kan-skip");
+  return previewDiscard(t, seat, action, dojo, oracle, drawn, "riichi-kan-skip");
 }
 
 // --- calls -------------------------------------------------------------------

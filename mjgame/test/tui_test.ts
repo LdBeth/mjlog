@@ -48,7 +48,7 @@ Deno.test("width: ascii mode is also exactly 2 columns per tile", () => {
 });
 
 Deno.test("width: river markers and misc glyphs", () => {
-  for (const m of Object.values(MARK)) assertEquals(width(m), 1, `marker ${m}`);
+  for (const m of Object.values(MARK)) assertEquals(width(m.ch), 1, `marker ${m.ch}`);
   assertEquals(width("abc"), 3);
   assertEquals(width(""), 0);
   assertEquals(width("東1局"), 5); // 2 + 1 + 2
@@ -103,6 +103,8 @@ Deno.test("Screen: a wide glyph occupies two columns and blanks its partner", ()
   s.draw(0, 0, "㈤東");
   assertEquals(s.rowText(0).trimEnd(), "㈤東");
   s.flush();
+  // A flush swaps buffers, so a partial frame reopens on what is on screen.
+  s.retain();
   // Overwrite the second column of ㈤: the first column must be blanked too.
   s.draw(1, 0, "x");
   assertEquals(s.rowText(0).trimEnd(), " x東");

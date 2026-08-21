@@ -1,26 +1,28 @@
 #!/bin/sh
 # PPO self-play loop: collect on-policy rollouts, update, repeat.
 #
-#   usage: sh train/ppo_loop.sh <iters> [games-per-iter=400] [shards=4] [start-seed=50000]
+#   usage: sh train/ppo_loop.sh <iters> [games-per-iter=400] [jobs=4] [start-seed=50000]
 #
 # Run from the mjgame directory (the one holding src/, weights/, train/).
 #
-# Each iteration plays `games-per-iter` hanchan split across `shards` parallel
-# deno processes, all four seats driven by the CURRENT weights/ at --temp=1
-# (PPO's importance ratio is only valid if the rollouts were sampled from
-# exactly the policy that train/ppo.py loads as --init), then runs one PPO
-# update in place: --init weights --out weights.
+# Each iteration plays `games-per-iter` hanchan in ONE deno process using
+# `--jobs` worker threads (selfplay's output is byte-identical to a sequential
+# run with the same seed, so parallelism cannot perturb the data), all four
+# seats driven by the CURRENT weights/ at --temp=1 (PPO's importance ratio is
+# only valid if the rollouts were sampled from exactly the policy that
+# train/ppo.py loads as --init), then runs one PPO update in place:
+# --init weights --out weights.
 #
-# Seeds never overlap: seed = start + i*10000 + j*1000, and one shard consumes
-# at most `games-per-iter / shards` consecutive seeds, so the 1000-wide lanes
-# stay disjoint as long as a shard plays fewer than 1000 games.
+# Seeds never overlap: iteration i plays the consecutive seeds
+# start + i*10000 .. start + i*10000 + games - 1, so the 10000-wide iteration
+# lanes stay disjoint as long as games-per-iter stays under 10000.
 #
 # POSIX sh only -- no bashisms, no GNU-only flags.
 
 set -e
 
 usage() {
-    echo "usage: sh train/ppo_loop.sh <iters> [games-per-iter=400] [shards=4] [start-seed=50000]" >&2
+    echo "usage: sh train/ppo_loop.sh <iters> [games-per-iter=400] [jobs=4] [start-seed=50000]" >&2
     exit 2
 }
 
@@ -28,18 +30,16 @@ usage() {
 
 ITERS=$1
 GAMES=${2:-400}
-SHARDS=${3:-4}
+JOBS=${3:-4}
 START=${4:-50000}
 
-case "$ITERS$GAMES$SHARDS$START" in
+case "$ITERS$GAMES$JOBS$START" in
     *[!0-9]*) echo "ppo_loop: all arguments must be non-negative integers" >&2; usage ;;
 esac
 [ "$ITERS" -ge 1 ] || usage
-[ "$SHARDS" -ge 1 ] || usage
-
-PER=$((GAMES / SHARDS))
-[ "$PER" -ge 1 ] || { echo "ppo_loop: games-per-iter must be >= shards" >&2; exit 2; }
-[ "$PER" -lt 1000 ] || { echo "ppo_loop: games per shard must stay under 1000 (seed lane width)" >&2; exit 2; }
+[ "$JOBS" -ge 1 ] || usage
+[ "$GAMES" -ge 1 ] || usage
+[ "$GAMES" -lt 10000 ] || { echo "ppo_loop: games-per-iter must stay under 10000 (seed lane width)" >&2; exit 2; }
 
 PY=./train/.venv/bin/python
 
@@ -49,42 +49,37 @@ PY=./train/.venv/bin/python
 
 mkdir -p runs/ppo
 
-echo "=== ppo_loop: $ITERS iteration(s), $GAMES game(s)/iter over $SHARDS shard(s) ($PER each), start seed $START"
+echo "=== ppo_loop: $ITERS iteration(s), $GAMES game(s)/iter over $JOBS job(s), start seed $START"
 
 i=1
 while [ "$i" -le "$ITERS" ]; do
+    SEED=$((START + i * 10000))
     echo
-    echo "=== iter $i/$ITERS: collecting $GAMES game(s) with weights/ (temp=1)"
-    rm -f runs/ppo/iter$i.s*.jsonl
+    echo "=== iter $i/$ITERS: collecting $GAMES game(s) with weights/ (temp=1, jobs=$JOBS, seed $SEED)"
+    rm -f "runs/ppo/iter$i.jsonl"
 
-    j=0
-    while [ "$j" -lt "$SHARDS" ]; do
-        SEED=$((START + i * 10000 + j * 1000))
-        echo "--- iter $i shard $j: $PER game(s), seed $SEED -> runs/ppo/iter$i.s$j.jsonl"
-        deno run --allow-read --allow-write src/main.ts selfplay \
-            --games="$PER" \
-            --seed="$SEED" \
-            --seats=nnnn \
-            --weights=weights/manifest.json \
-            --temp=1 \
-            --record="runs/ppo/iter$i.s$j.jsonl" \
-            >"runs/ppo/iter$i.s$j.log" 2>&1 &
-        j=$((j + 1))
-    done
-    wait
+    # Same permissions as deno.json's `selfplay` task: without --allow-ffi
+    # (and the env var that gates it) every rollout falls back to the pure-TS
+    # forward and shanten -- the identical policy, just far slower.
+    deno run --allow-read --allow-write --allow-ffi --allow-env=MJGAME_NATIVE \
+        src/main.ts selfplay \
+        --games="$GAMES" \
+        --seed="$SEED" \
+        --jobs="$JOBS" \
+        --seats=nnnn \
+        --weights=weights/manifest.json \
+        --temp=1 \
+        --record="runs/ppo/iter$i.jsonl" \
+        >"runs/ppo/iter$i.log" 2>&1
 
-    j=0
-    while [ "$j" -lt "$SHARDS" ]; do
-        [ -s "runs/ppo/iter$i.s$j.jsonl" ] || {
-            echo "ppo_loop: shard $j produced no data -- see runs/ppo/iter$i.s$j.log" >&2
-            exit 1
-        }
-        j=$((j + 1))
-    done
+    [ -s "runs/ppo/iter$i.jsonl" ] || {
+        echo "ppo_loop: iteration $i produced no data -- see runs/ppo/iter$i.log" >&2
+        exit 1
+    }
 
     echo "=== iter $i/$ITERS: PPO update (weights -> weights)"
     "$PY" train/ppo.py \
-        --data "runs/ppo/iter$i.s*.jsonl" \
+        --data "runs/ppo/iter$i.jsonl" \
         --init weights \
         --out weights \
         --epochs 3

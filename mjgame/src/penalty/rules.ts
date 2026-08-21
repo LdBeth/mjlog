@@ -130,7 +130,8 @@ const notenDora: DojoRule = {
   check(ctx) {
     const { t, seat, action, cfg } = ctx;
     if (action.t !== "discard") return null;
-    if (shantenAfterDiscard(t, seat) <= 2) return null; // 2向聴以内 — allowed
+    const sh = shantenAfterDiscard(t, seat);
+    if (sh <= 2) return null; // 2向聴以内 — allowed
 
     const ty = tileType(action.tile);
     // 赤5筒 may be cut before tenpai; only indicator dora is restricted here.
@@ -140,7 +141,7 @@ const notenDora: DojoRule = {
     if (isHonor(ty) && tableVisible(t, ty) >= 2) return null;
     // 例外: オーラス conditions can justify it.
     if (isOrasu(t)) return null;
-    return [{ detail: `不聴のままドラを切った (向聴${shantenAfterDiscard(t, seat)})` }];
+    return [{ detail: `不聴のままドラを切った (向聴${sh})` }];
   },
 };
 
@@ -156,7 +157,7 @@ const doraCalledLock: DojoRule = {
     // discarder into tsumogiri for the rest of the round. This is the one rule
     // that carries state, so it sets the flag on the table itself.
     if (action.t === "pon" || action.t === "chi" || action.t === "daiminkan") {
-      const called = action.t === "daiminkan" ? action.called : action.called;
+      const called = action.called;
       const river = t.board.rivers;
       for (const s of SEATS) {
         const last = river[s][river[s].length - 1];
@@ -503,20 +504,29 @@ const yakumanRelated: DojoRule = {
     if (action.t !== "discard") return null;
     const ty = tileType(action.tile);
 
+    // 例外: you may cut it if you are yakuman-tenpai yourself. Approximated as
+    // "tenpai with an all-yaochu or single-suit hand" — the exact test needs the
+    // scorer, which the ledger deliberately does not depend on. The question is
+    // about OUR hand alone, so it does not vary with the watched seat: ask it at
+    // most once, and only if some watch actually triggered.
+    let exempt: boolean | null = null;
+    const selfYakumanTenpai = (): boolean => {
+      if (exempt === null) {
+        const info = analyze(t, seat, null, oracle);
+        const mine = [...t.hands[seat], ...t.melds[seat].flatMap((m) => m.tiles)].map(tileType);
+        exempt = info.tenpai &&
+          (mine.every(isYaochu) || new Set(mine.map(suitOfType)).size === 1);
+      }
+      return exempt;
+    };
+
     const out: Array<Partial<Violation>> = [];
     for (const s of SEATS) {
       if (s === seat) continue;
       const melds = t.melds[s];
       for (const w of YAKUMAN_WATCH) {
         if (!w.trigger(melds) || !w.related(melds).includes(ty)) continue;
-        // 例外: you may cut it if you are yakuman-tenpai yourself. Approximated
-        // as "tenpai with an all-yaochu or single-suit hand" — the exact test
-        // needs the scorer, which the ledger deliberately does not depend on.
-        const info = analyze(t, seat, null, oracle);
-        const mine = [...t.hands[seat], ...t.melds[seat].flatMap((m) => m.tiles)].map(tileType);
-        if (info.tenpai && (mine.every(isYaochu) || new Set(mine.map(suitOfType)).size === 1)) {
-          continue;
-        }
+        if (selfYakumanTenpai()) continue;
         out.push({ detail: `P${s} の${w.name}模様に対して関連牌を切った` });
       }
     }
@@ -544,7 +554,10 @@ const koshi: DojoRule = {
   label: "腰",
   tier: "B",
   points: PENALTY.light,
-  hooks: ["on-call", "post-discard"],
+  // 腰 is a call-time signal only: the body reads `action.called`, so a
+  // post-discard registration could never do anything but pay for a predicate
+  // call per candidate discard.
+  hooks: ["on-call"],
   check(ctx) {
     const { t, seat, timing } = ctx;
     const ms = timing?.callPromptMs;

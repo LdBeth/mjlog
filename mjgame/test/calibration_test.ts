@@ -45,7 +45,7 @@ import {
   WAIT_SHAPES,
   waitShapeWeights,
 } from "../src/ai/computed.ts";
-import { pairedRun } from "../src/main.ts";
+import { pairedRun } from "../src/paired.ts";
 import type { Observation } from "../src/observe.ts";
 import { AKA_5P } from "../src/tiles.ts";
 import { report } from "../scripts/calibrate_report.ts";

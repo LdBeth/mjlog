@@ -51,8 +51,8 @@ Deno.test("actionspace: an aka five indexes exactly like a plain five", () => {
   // Redness lives in plane 5 of the feature encoding, never in the action slot:
   // the two must collide or the trainer's mask would name a copy it cannot pick.
   const [aka, , plain] = tiles("0p0p5p"); // 52 (red), 53 (red), 54 (plain)
-  assertEquals(actionIndex(discard(aka), JANKI.akaIds), actionIndex(discard(plain), JANKI.akaIds));
-  assertEquals(actionIndex(discard(aka), JANKI.akaIds), tileType(plain));
+  assertEquals(actionIndex(discard(aka)), actionIndex(discard(plain)));
+  assertEquals(actionIndex(discard(aka)), tileType(plain));
 });
 
 Deno.test("actionspace: chi is indexed by where the called tile ranks in the run", () => {
@@ -259,12 +259,12 @@ class ProbePolicy implements SyncPolicy {
       const got = resolve(i, obs.legal, ctx);
       assert(got !== null, `slot ${i} masked but resolve returned null`);
       assert(obs.legal.includes(got), `slot ${i}: resolved action is not in legal (identity)`);
-      assertEquals(actionIndex(got, obs.akaIds), i, `slot ${i}: round trip landed elsewhere`);
+      assertEquals(actionIndex(got), i, `slot ${i}: round trip landed elsewhere`);
     }
 
     const mask = maskFor(obs.legal);
     for (const a of obs.legal) {
-      const i = actionIndex(a, obs.akaIds);
+      const i = actionIndex(a);
       assert(i >= 0 && i < ACTIONS, `${a.t} indexed out of range: ${i}`);
       assertEquals(mask[i], 1, `${a.t} is legal but its own slot ${i} is unmasked`);
     }

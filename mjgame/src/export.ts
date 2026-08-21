@@ -6,7 +6,11 @@
 // transcript, the snapshot/anchor MCP tools, the eval generator — works on your
 // own games with no changes:
 //
-//   cd mjrender && deno task render ../mjgame/games/seed42.xml
+//   deno task selfplay --games=1 --seed=42 --export=games/seed42
+//   cd ../mjrender && deno task render ../mjgame/games/seed42.xml
+//
+// `--export=PATH` (play / selfplay) is the CLI end of this; see `writeExport`
+// below for the naming convention.
 //
 // Two things Tenhou XML cannot carry, both written to a `.mjgame.json` sidecar
 // with the same basename: the second red 5-pin (aka is identified by tile id, and
@@ -15,6 +19,7 @@
 import type { Game, Meld, Round, Tile } from "mjrender/model.ts";
 import { tileType } from "mjrender/tiles.ts";
 import type { MatchResult } from "./match.ts";
+import { settlement } from "./rl/record.ts";
 import type { RuleConfig } from "./rules.ts";
 import type { RoundOutcome, Seat, Violation } from "./types.ts";
 import { SEATS } from "./types.ts";
@@ -80,12 +85,23 @@ function goType(cfg: RuleConfig): number {
   return n;
 }
 
-function roundXml(round: Round, outcome: RoundOutcome | undefined, dealerSeat: Seat): string {
+function roundXml(
+  round: Round,
+  outcome: RoundOutcome | undefined,
+  dealerSeat: Seat,
+  owari = "",
+): string {
   const parts: string[] = [];
+  // `Round.kyotaku` is LIVE while the round is played — the engine adds a stick
+  // to it on every accepted declaration — so by export time it holds the pot at
+  // the END. Tenhou splits the two: INIT's seed carries the pot AT THE DEAL
+  // (what was carried over), while AGARI's `ba` carries what the winner sweeps,
+  // which is the end value. The difference is exactly this round's own riichi.
+  const declared = round.events.filter((e) => e.t === "reach" && e.step === 2).length;
   const seed = [
     round.kyoku,
     round.honba,
-    round.kyotaku,
+    round.kyotaku - declared,
     round.dice[0],
     round.dice[1],
     round.firstDora,
@@ -120,9 +136,20 @@ function roundXml(round: Round, outcome: RoundOutcome | undefined, dealerSeat: S
     }
   }
 
+  // Tenhou's `sc` pairs each seat's score AT THE RESULT with its delta, and a
+  // riichi stick is already gone from that score by then — the engine's deltas
+  // agree (they hand the winner the whole pot, own stick included). Basing them
+  // on `startScores` instead would count every stick twice and drift a reader's
+  // running total by 1000 per declaration. The last accepted REACH carries the
+  // post-payment snapshot for all four seats; before any, the deal stands.
+  let scoreBase: readonly number[] = round.startScores;
+  for (const e of round.events) {
+    if (e.t === "reach" && e.step === 2 && e.scores) scoreBase = e.scores;
+  }
+
   if (outcome?.kind === "agari") {
     for (const w of outcome.wins) {
-      const sc = SEATS.flatMap((s) => [round.startScores[s], outcome.deltas[s] / 100]);
+      const sc = SEATS.flatMap((s) => [scoreBase[s], outcome.deltas[s] / 100]);
       const yaku = w.yaku.flatMap((y) => [y.id, y.han]).join(",");
       parts.push(
         `<AGARI ba="${round.honba},${round.kyotaku}" hai="${w.hand.join(",")}" ` +
@@ -134,7 +161,7 @@ function roundXml(round: Round, outcome: RoundOutcome | undefined, dealerSeat: S
       );
     }
   } else if (outcome?.kind === "ryuukyoku") {
-    const sc = SEATS.flatMap((s) => [round.startScores[s], outcome.deltas[s] / 100]);
+    const sc = SEATS.flatMap((s) => [scoreBase[s], outcome.deltas[s] / 100]);
     const type = outcome.draw === "exhaustive"
       ? ""
       : ` type="${
@@ -148,6 +175,16 @@ function roundXml(round: Round, outcome: RoundOutcome | undefined, dealerSeat: S
     parts.push(
       `<RYUUKYOKU${type} ba="${round.honba},${round.kyotaku}" sc="${sc.join(",")}"${hands}/>`,
     );
+  }
+  // 終局: Tenhou hangs the final standings off the LAST result element of the
+  // match rather than on an element of its own. It is the only place the
+  // settled scores appear — including the 供託 the top finisher sweeps up when
+  // a match ends on a draw, which no round's deltas ever mention — and without
+  // it a reader has no 終局 record at all (mjrender's ◆終局 block is this
+  // attribute, and nothing else).
+  const last = parts.length - 1;
+  if (owari && last >= 0 && /^<(AGARI|RYUUKYOKU)/.test(parts[last])) {
+    parts[last] = parts[last].replace(/\/>$/, ` owari="${owari}"/>`);
   }
   return parts.join("");
 }
@@ -163,11 +200,56 @@ export function toTenhouXml(m: MatchResult, cfg: RuleConfig): string {
       `dan="0,0,0,0" rate="1500,1500,1500,1500" sx="C,C,C,C"/>`,
   );
   parts.push(`<TAIKYOKU oya="0"/>`);
+  // Score in hundreds paired with the 精算点 — the same settlement the TUI's
+  // final table and the trainer's reward use, so a rendered transcript and the
+  // game that produced it never disagree about who won.
+  const net = settlement(m.scores, cfg);
+  const owari = SEATS.flatMap((s) => [m.scores[s] / 100, net[s]]).join(",");
   for (let i = 0; i < m.rounds.length; i++) {
-    parts.push(roundXml(m.rounds[i], m.outcomes[i], m.rounds[i].dealer as Seat));
+    parts.push(
+      roundXml(
+        m.rounds[i],
+        m.outcomes[i],
+        m.rounds[i].dealer as Seat,
+        i === m.rounds.length - 1 ? owari : "",
+      ),
+    );
   }
   parts.push(`</mjloggm>`);
   return parts.join("");
+}
+
+/**
+ * Where a `--export=PATH` lands. PATH is a BASENAME unless it already ends in
+ * `.xml`, so `--export=games/seed42` and `--export=games/seed42.xml` name the
+ * same pair — and the sidecar is always the same basename with `.mjgame.json`,
+ * which is what lets a reader find it from the XML alone.
+ *
+ * `suffix` is how a multi-game run numbers its output ("-0001"); it goes on the
+ * basename, before either extension, so the pair stays adjacent when sorted.
+ */
+export function exportPaths(path: string, suffix = ""): { xml: string; sidecar: string } {
+  const stem = path.endsWith(".xml") ? path.slice(0, -4) : path;
+  return { xml: `${stem}${suffix}.xml`, sidecar: `${stem}${suffix}.mjgame.json` };
+}
+
+/**
+ * Write one match as the XML/sidecar pair, creating the directory if it is not
+ * there yet — a run that played a hundred hanchan and then failed on a missing
+ * `runs/` would have thrown away the games it was asked to keep.
+ */
+export function writeExport(
+  m: MatchResult,
+  cfg: RuleConfig,
+  path: string,
+  suffix = "",
+): { xml: string; sidecar: string } {
+  const p = exportPaths(path, suffix);
+  const slash = p.xml.lastIndexOf("/");
+  if (slash > 0) Deno.mkdirSync(p.xml.slice(0, slash), { recursive: true });
+  Deno.writeTextFileSync(p.xml, toTenhouXml(m, cfg));
+  Deno.writeTextFileSync(p.sidecar, JSON.stringify(toSidecar(m, cfg), null, 2) + "\n");
+  return p;
 }
 
 export interface Sidecar {

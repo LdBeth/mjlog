@@ -26,7 +26,7 @@ import {
   oracleReads,
   parseChannels,
 } from "../src/ai/augmented.ts";
-import { pairedRun } from "../src/main.ts";
+import { pairedRun } from "../src/paired.ts";
 import { sfc32 } from "../src/rng.ts";
 import { observe } from "../src/observe.ts";
 import type { Observation } from "../src/observe.ts";
@@ -296,6 +296,7 @@ function riskCtx(map: Map<number, DangerAssessment>): Ctx {
     closed: true,
     doraTypes: new Set(),
     valueHonors: new Set(),
+    unseen: new Array<number>(34).fill(4),
     folding: false,
     canRiichi: false,
     eff: 1,

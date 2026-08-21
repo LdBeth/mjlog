@@ -11,24 +11,23 @@
 
 import type { Meld, Tile } from "mjrender/model.ts";
 import { roundName, tileType } from "mjrender/tiles.ts";
-import { renderSnapshot } from "mjrender/snapshot.ts";
 import type { Observation } from "../observe.ts";
 import type { Policy } from "../policy.ts";
 import type { SyncPolicy } from "../policy.ts";
 import type { MatchResult } from "../match.ts";
 import type { RuleConfig } from "../rules.ts";
-import type { Table } from "../table.ts";
+import { finalStandings } from "../score.ts";
 import type { Action, PublicEvent, RoundOutcome, Seat, Violation } from "../types.ts";
 import { SEATS } from "../types.ts";
-import { Screen, sp } from "./screen.ts";
+import { lineWidth, Screen, sp } from "./screen.ts";
 import type { Line } from "./screen.ts";
 import type { GlyphMode, GlyphOpts } from "./glyph.ts";
-import { REL_LABEL, tileText } from "./glyph.ts";
+import { REL_LABEL, tileText, WINDS } from "./glyph.ts";
 import * as W from "./widgets.ts";
 import type { Ctx, Overlay, Phase, TimerState } from "./widgets.ts";
 import { decodeKeys, isCtrlC, type KeyEvent, readKeys } from "./input.ts";
 import * as term from "./term.ts";
-import { padEnd, SGR, size, width } from "./term.ts";
+import { padEnd, SGR, type Size, size, width } from "./term.ts";
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -228,10 +227,17 @@ export class App {
   private introSkipped = false;
   private ticker: ReturnType<typeof setInterval> | null = null;
   private dirty = false;
+  /** A pending render that must rebuild the whole board, not just the clock. */
+  private dirtyFull = false;
+  /** True once a full board frame is on screen, so a header-only repaint of it
+   *  is meaningful. Cleared by anything that repaints something else. */
+  private headerOnlyOk = false;
   private scheduled = false;
   private stopped = false;
   private unResize: (() => void) | null = null;
-  private table: Table | null = null;
+  /** Terminal size, refreshed on SIGWINCH — `Deno.consoleSize()` is a syscall
+   *  and the timer ticks ten times a second. */
+  private termSize: Size;
 
   /** Live corrections for fields an Observation froze at decision time. */
   private liveRiichi = [false, false, false, false];
@@ -243,15 +249,10 @@ export class App {
   constructor(opts: AppOptions) {
     this.opts = opts;
     this.glyph = { mode: opts.glyphs, aka: opts.aka };
-    const { cols, rows } = size();
-    this.scr = new Screen(cols, rows, { write: opts.write });
+    this.termSize = size();
+    this.scr = new Screen(this.termSize.cols, this.termSize.rows, { write: opts.write });
     this.human = new HumanPolicy(opts.names[opts.humanSeat ?? 0] ?? "あなた", this);
     this.bankLeftMs = opts.timerBankMs;
-  }
-
-  /** A `Table` reference enables the richer `renderSnapshot` debug dump. */
-  setTable(t: Table): void {
-    this.table = t;
   }
 
   /** Block until the player dismisses the round-result overlay, if one is up. */
@@ -274,9 +275,9 @@ export class App {
   start(): void {
     term.enter();
     this.unResize = term.onResize(() => {
-      const { cols, rows } = size();
-      this.scr.resize(cols, rows);
-      this.scr.fullRepaint();
+      // `resize` already repaints in full, and no-ops when the size is the same.
+      this.termSize = size();
+      this.scr.resize(this.termSize.cols, this.termSize.rows);
       this.requestRender();
     });
     void this.inputLoop();
@@ -313,7 +314,6 @@ export class App {
       return !this.introSkipped && !this.stopped;
     };
 
-    const WINDS = ["東家", "南家", "西家", "北家"];
     const cfg = this.opts.cfg;
     const title = "雀  鬼  流";
     const card = [
@@ -325,7 +325,8 @@ export class App {
     ];
 
     const frame = (lines: Array<{ text: string; sgr?: string }>) => {
-      const { cols, rows } = size();
+      const { cols, rows } = this.termSize;
+      this.headerOnlyOk = false;
       this.scr.clear();
       const top = Math.max(0, Math.floor((rows - lines.length) / 2) - 2);
       lines.forEach((l, i) => {
@@ -349,7 +350,7 @@ export class App {
 
     // 2. Then the seating, one player at a time.
     const seats = SEATS.map((s) => ({
-      text: `${WINDS[s]}   ${this.opts.names[s] ?? `P${s}`}`,
+      text: `${WINDS[s]}家   ${this.opts.names[s] ?? `P${s}`}`,
       sgr: s === (this.opts.humanSeat ?? 0) ? SGR.brightGreen : SGR.gray,
     }));
     for (let n = 1; n <= seats.length; n++) {
@@ -557,14 +558,14 @@ export class App {
     return from;
   }
 
-  /** Resolve the pending decision. Refuses anything not in `obs.legal`. */
+  /**
+   * Resolve the pending decision. The `includes` guard is the hard safety rule
+   * from the file header: every key handler picks its action out of `obs.legal`,
+   * and anything that did not come from there is refused rather than played.
+   */
   private submit(action: Action | null): void {
     if (!action || !this.resolver || !this.obs) return;
-    if (!this.obs.legal.includes(action)) {
-      this.message = "不正な選択です";
-      this.requestRender();
-      return;
-    }
+    if (!this.obs.legal.includes(action)) return;
     const elapsed = Date.now() - this.startedAt;
     // Whatever ran past this turn's allowance comes out of the match bank.
     this.bankLeftMs = Math.max(0, this.bankLeftMs - Math.max(0, elapsed - this.opts.timerTurnMs));
@@ -614,7 +615,7 @@ export class App {
         );
         break;
       case "call":
-        this.pushLog(`P${e.meld.who} ${meldWord(e.meld)} ${this.meldText(e.meld)}`);
+        this.pushLog(`P${e.meld.who} ${W.MELD_LABEL[e.meld.kind]} ${this.meldText(e.meld)}`);
         break;
       case "riichi":
         if (e.step === 1) this.liveRiichi[e.who] = true;
@@ -819,7 +820,7 @@ export class App {
       case "k": {
         const kans = obs.legal.filter((a) => a.t === "ankan" || a.t === "kakan");
         if (kans.length === 0) this.message = "カンできません";
-        else this.overlayState = { kind: "kan", options: kans };
+        else this.overlayState = { kind: "pick", options: kans, title: "カン" };
         return;
       }
       case "a": {
@@ -854,19 +855,11 @@ export class App {
         if (k.name === "y") this.quit(0);
         else if (k.name === "escape" || k.name === "n") this.closeOverlay();
         break;
-      case "kan":
+      case "pick":
+        // Esc backs out one level: to the call prompt if that is what opened
+        // the menu, otherwise to the board.
         if (k.name === "escape") this.closeOverlay();
         else if (/^[1-9]$/.test(k.name)) {
-          const a = o.options[Number(k.name) - 1];
-          if (a) this.submit(a);
-        }
-        break;
-      case "chi":
-        if (k.name === "escape") {
-          this.overlayState = this.phase === "claim"
-            ? { kind: "call", openedAt: this.startedAt }
-            : null;
-        } else if (/^[1-9]$/.test(k.name)) {
           const a = o.options[Number(k.name) - 1];
           if (a) this.submit(a);
         }
@@ -888,7 +881,7 @@ export class App {
       } else if (opts.length === 1) {
         this.submit(opts[0]);
       } else {
-        this.overlayState = { kind: "chi", options: opts, title };
+        this.overlayState = { kind: "pick", options: opts, title };
       }
     };
     switch (k.name) {
@@ -932,16 +925,8 @@ export class App {
       : null;
   }
 
+  /** `runMatch` does not expose its Table, so this dumps what the seat can see. */
   private dumpSnapshot(): void {
-    const t = this.table;
-    if (t) {
-      for (const l of renderSnapshot(t.game, t.round, t.board, "TUI dump").split("\n")) {
-        this.pushLog(l);
-      }
-      return;
-    }
-    // `runMatch` does not expose its Table (it overwrites `onTable`), so fall
-    // back to a dump of what this seat can actually see.
     const o = this.obs;
     if (!o) return;
     this.pushLog(
@@ -959,7 +944,8 @@ export class App {
 
   private startTicker(): void {
     if (this.ticker !== null) return;
-    this.ticker = setInterval(() => this.requestRender(), 100);
+    // The clock is the only thing that moved, so only the clock is repainted.
+    this.ticker = setInterval(() => this.schedule(false), 100);
   }
 
   private stopTicker(): void {
@@ -969,13 +955,42 @@ export class App {
   }
 
   requestRender(): void {
+    this.schedule(true);
+  }
+
+  /**
+   * Coalesce render requests into one frame. `full` rebuilds every widget; a
+   * request that is not full only redraws the header clock — but if ANY full
+   * request lands in the same batch, the whole batch renders full.
+   */
+  private schedule(full: boolean): void {
     this.dirty = true;
+    if (full) this.dirtyFull = true;
     if (this.scheduled) return;
     this.scheduled = true;
     setTimeout(() => {
       this.scheduled = false;
-      if (this.dirty && !this.stopped) this.render();
+      if (!this.dirty || this.stopped) return;
+      const wasFull = this.dirtyFull;
+      this.dirtyFull = false;
+      if (wasFull || !this.headerOnlyOk) this.render();
+      else this.renderHeader();
     }, 0);
+  }
+
+  /**
+   * The tick fast path: overdraw the header row on the frame already on screen
+   * and flush. Only valid straight after a full board frame at the same size —
+   * `headerOnlyOk` tracks exactly that — and safe under an overlay, since the
+   * overlay box never reaches row 0.
+   */
+  private renderHeader(): void {
+    this.dirty = false;
+    const L = layout(this.termSize.cols, this.termSize.rows);
+    const c = this.ctx(L);
+    this.scr.retain();
+    this.scr.drawLine(L.x0 + 1, L.headerY, W.headerBar(c, L.inner - 2), L.inner - 2);
+    this.scr.flush();
   }
 
   private ctx(L: Layout): Ctx {
@@ -1011,7 +1026,8 @@ export class App {
 
   render(): void {
     this.dirty = false;
-    const { cols, rows } = size();
+    this.headerOnlyOk = false;
+    const { cols, rows } = this.termSize;
     if (cols !== this.scr.cols || rows !== this.scr.rows) this.scr.resize(cols, rows);
 
     if (cols < term.MIN_SIZE.cols || rows < term.MIN_SIZE.rows) {
@@ -1052,7 +1068,7 @@ export class App {
     W.seatPanel(c, 1, sideW).forEach((l, i) => this.scr.drawLine(rx, L.sideY + i, l, sideW));
 
     const box = W.centerBlock(c);
-    const boxW = Math.max(...box.map((l) => lineW(l)), 0);
+    const boxW = Math.max(...box.map(lineWidth), 0);
     const bx = L.x0 + Math.floor((L.inner - boxW) / 2);
     const by = L.sideY + Math.max(0, Math.floor((L.panelRows - box.length) / 2));
     box.forEach((l, i) => this.scr.drawLine(bx, by + i, l, boxW));
@@ -1075,6 +1091,8 @@ export class App {
 
     if (this.overlayState) this.drawOverlay(L, c, this.overlayState);
     this.scr.flush();
+    // A complete board is on screen: the next tick may repaint the clock alone.
+    this.headerOnlyOk = true;
   }
 
   private frame(L: Layout): void {
@@ -1099,7 +1117,7 @@ export class App {
     const contentW = Math.max(
       width(v.title) + 4,
       width(v.footer) + 4,
-      ...v.body.map((l) => lineW(l)),
+      ...v.body.map(lineWidth),
     );
     const boxW = Math.min(L.inner - 4, contentW + 4);
     const boxH = Math.min(L.rows - 4, v.body.length + 4);
@@ -1129,12 +1147,12 @@ export class App {
     // The last hand's 局結果 is still up; overwriting it would swallow the
     // result of the round that decided the match.
     await this.gate();
-    this.phase = "over";
+    this.phase = "idle";
     this.stopTicker();
     this.overlayState = {
       kind: "text",
       title: "最終結果",
-      body: finalStandings(result, this.opts.cfg, this.opts.names),
+      body: standingsBody(result, this.opts.cfg, this.opts.names),
       footer: "任意のキーで終了",
     };
     this.requestRender();
@@ -1144,55 +1162,44 @@ export class App {
   }
 }
 
-function lineW(l: Line): number {
-  let n = 0;
-  for (const s of l) n += width(s.text);
-  return n;
-}
-
 function fmtDelta(d: number): string {
   return d === 0 ? "±0" : d > 0 ? `+${d}` : String(d);
 }
 
-function meldWord(m: Meld): string {
-  return m.kind === "chi"
-    ? "チー"
-    : m.kind === "pon"
-    ? "ポン"
-    : m.kind === "ankan"
-    ? "暗槓"
-    : m.kind === "shouminkan"
-    ? "加槓"
-    : m.kind === "daiminkan"
-    ? "大明槓"
-    : "抜き";
-}
-
-/** 精算: (点数 − 返し点) / 1000 + ウマ, with sub-1000 truncation if configured. */
-export function finalStandings(
-  result: MatchResult,
-  cfg: RuleConfig,
-  names: string[],
-): Line[] {
-  const order = result.scores
-    .map((s, seat) => ({ seat, s }))
-    .sort((a, b) => b.s - a.s || a.seat - b.seat);
+/**
+ * 最終結果. The ranking is NOT recomputed here: it is read straight off
+ * `score.ts::finalStandings`, the engine's own settlement, so the screen and
+ * the match result cannot disagree. That matters because the dojo's headline
+ * rule is not a score sort — a seat carrying any ledger entry finishes below
+ * every clean seat, and equal scores break by 起家 proximity. 起家 is read from
+ * the first round's dealer rather than assumed to be seat 0.
+ */
+function standingsBody(result: MatchResult, cfg: RuleConfig, names: string[]): Line[] {
+  const east = (result.rounds[0]?.dealer ?? 0) as Seat;
+  const order = finalStandings(result.scores, east, result.ledger, cfg);
   const body: Line[] = [
-    [sp(padEnd("順位", 6), DIM), sp(padEnd("席", 6), DIM), sp(padEnd("点数", 10), DIM), sp("収支")],
+    [
+      sp(padEnd("順位", 6), DIM),
+      sp(padEnd("席", 14), DIM),
+      sp(padEnd("点数", 8), DIM),
+      sp(padEnd("収支", 8), DIM),
+      sp("違反", DIM),
+    ],
   ];
-  order.forEach((o, i) => {
-    const raw = o.s - cfg.returnScore;
-    const pts = cfg.truncateSub1000 ? Math.trunc(raw / 1000) : raw / 1000;
-    const net = pts + cfg.uma[i];
+  for (const st of order) {
     body.push([
-      sp(padEnd(`${i + 1}位`, 6), i === 0 ? SGR.brightYellow : ""),
-      sp(padEnd(`P${o.seat} ${names[o.seat] ?? ""}`, 6)),
-      sp(padEnd(String(o.s), 10)),
-      sp(fmtDelta(net), net >= 0 ? SGR.brightGreen : SGR.brightRed),
+      sp(padEnd(`${st.place}位`, 6), st.place === 1 ? SGR.brightYellow : ""),
+      sp(padEnd(`P${st.seat} ${names[st.seat] ?? ""}`, 14)),
+      sp(padEnd(String(st.score), 8)),
+      sp(padEnd(fmtDelta(st.points), 8), st.points >= 0 ? SGR.brightGreen : SGR.brightRed),
+      sp(st.clean ? "—" : `${st.violations}件`, st.clean ? DIM : "1;91"),
     ]);
-  });
+  }
   body.push([]);
   const vio = result.ledger.length;
   body.push([sp(`違反 ${vio}件`, vio ? SGR.yellow : DIM), sp(`   ${result.rounds.length}局`, DIM)]);
+  if (order.some((s) => !s.clean)) {
+    body.push([sp("※ 反則のある席は清廉な席より下に置かれる", SGR.yellow)]);
+  }
   return body;
 }

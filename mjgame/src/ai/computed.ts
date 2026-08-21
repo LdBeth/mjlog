@@ -66,9 +66,10 @@
 import type { Meld } from "mjrender/model.ts";
 import { doraFromIndicatorType, rankOfType, suitOfType, tileType } from "mjrender/tiles.ts";
 import type { Observation } from "../observe.ts";
+import { shapeMasses } from "../kernel.ts";
 import { zeros34 } from "../tiles.ts";
 import type { Reads, ReadsProvider } from "./augmented.ts";
-import { publicUnseen } from "./planner.ts";
+import { publicUnseen, valueHonorsOf } from "./planner.ts";
 
 /** The five primitive wait shapes, named as `mjrender/danger.ts` names them. */
 export type WaitShape = "リャンメン" | "カンチャン" | "ペンチャン" | "シャンポン" | "タンキ";
@@ -378,10 +379,6 @@ export const DEFAULT_COMPUTED: ComputedWeights = {
  * predictions were made with, and "the partial the CLI parsed" is not that.
  */
 export function mergeComputed(w?: Partial<ComputedWeights>): ComputedWeights {
-  return merge(w);
-}
-
-function merge(w?: Partial<ComputedWeights>): ComputedWeights {
   // Nested records are merged field-wise: a partial override that dropped a
   // shape would score every hand NaN, the same trap `HeuristicPolicy` documents.
   return {
@@ -859,7 +856,7 @@ function applyMeldRead(
  * across boards — the two functions below are what turn it into one, and they
  * differ precisely in how.
  */
-export function shapeMassOf(
+function shapeMassOf(
   ty: number,
   base: ShapeBase,
   f: ShapeFlags,
@@ -935,6 +932,294 @@ export function waitLikelihood(
   w: ComputedWeights = DEFAULT_COMPUTED,
 ): number {
   return waitLikelihoodFrom(ty, shapeBaseMasses(ty, ctx), shapeFlagsOf(ty, ctx), w);
+}
+
+// ---------------------------------------------------------------------------
+// the flat hot path: one opponent's whole row, without allocating
+// ---------------------------------------------------------------------------
+//
+// WHY THIS EXISTS AND WHY IT IS NOT THE REFERENCE. Everything above is the
+// definition — a `ShapeBase` object per (opponent, tile type), a
+// `Record<WaitShape, number>` per cell, and a `flagsOf(ty)` call per type — and
+// it is the shape a reader, a test and the offline fit all want. It is also
+// ~300 short-lived objects per DECISION, three quarters of what the 計算 seat
+// spends its time on, and self-play runs ~10^5 decisions.
+//
+// So the same arithmetic is written a second time, flat: the eight counts of a
+// `ShapeBase` become eight slots of a `Float64Array`, the five shape weights
+// become five locals, and the three `ShapeFlags` fields that cannot vary with
+// the tile type (`honitsuSuit`, `toitoi`, and — through the weight vector —
+// every multiplier) are read once per opponent instead of 34 times.
+//
+// BIT-EXACT, and that is a tested claim, not a hope: `test/computed_test.ts`
+// fuzzes this against `shapeBaseMasses` + `waitRowFrom` on random boards and
+// random weight vectors and demands element-for-element equality. Every
+// association is copied deliberately — `prK * kanchan / 16` really is
+// `(prK * kanchan) / 16` above while リャンメン really is `prR * (mass / 32)`,
+// and float multiplication is not associative. `scripts/calibrate_fit.ts`'s
+// `condRowInline` is the third copy of the same arithmetic, for the same
+// reason and under the same discipline.
+
+/** Doubles per tile type in a flat base row — the fields of `ShapeBase`. */
+const BF = 8;
+const B_RYANMEN = 0;
+const B_RYANMEN_DORA = 1;
+const B_RYANMEN_HALF = 2;
+const B_RYANMEN_FULL = 3;
+const B_KANCHAN = 4;
+const B_PENCHAN = 5;
+const B_SHANPON = 6;
+const B_TANKI = 7;
+
+/**
+ * Length of the buffer one row evaluation fills: the 34 wait likelihoods first,
+ * then the 34 × 8 parameter-free counts they were derived from. One buffer
+ * rather than two because the native kernel writes both in a single crossing,
+ * and because the counts are what a calibration trace wants back.
+ */
+export const SHAPE_ROW_LEN = 34 + 34 * BF;
+
+/** Per-type flag bits, as the kernel's `flags[]` argument packs them. */
+const F_GENBUTSU = 1;
+const F_VALUE_HONOR = 2;
+const F_DORA = 4;
+
+/** Slots of the packed weight vector the kernel reads. Mirrored in mjkernel.cc. */
+const SHAPE_W_LEN = 17;
+
+/**
+ * `ComputedWeights` as the flat vector the kernel takes. Packed ONCE per
+ * provider — these are constants of the seat, not of the decision.
+ *
+ * Slot 5 is `doraBridge − 1` rather than `doraBridge`: `combineShapes` forms
+ * that difference itself, and forming it here instead keeps the C side free of
+ * an arithmetic step the TypeScript would have to be trusted to match.
+ */
+function packShapeWeights(w: ComputedWeights): Float64Array {
+  const p = new Float64Array(SHAPE_W_LEN);
+  p[0] = w.shapePrior["リャンメン"];
+  p[1] = w.shapePrior["カンチャン"];
+  p[2] = w.shapePrior["ペンチャン"];
+  p[3] = w.shapePrior["シャンポン"];
+  p[4] = w.shapePrior["タンキ"];
+  p[5] = w.doraBridge - 1;
+  p[6] = w.sujiHalfSurvive;
+  p[7] = w.sujiFullSurvive;
+  p[8] = w.yakuhaiShanpon;
+  p[9] = w.doraPair;
+  p[10] = w.honitsuHot;
+  p[11] = w.honitsuCold;
+  p[12] = w.toitoiPair;
+  p[13] = w.toitoiRun;
+  p[14] = w.dealinScale;
+  p[15] = w.expWaitMass;
+  p[16] = w.waitNormalize ? 1 : 0;
+  return p;
+}
+
+/**
+ * Process-wide scratch for the kernel's two integer arguments.
+ *
+ * The same argument `src/kernel.ts` makes for its 34-byte count buffer: a row
+ * evaluation is a LEAF — the arrays are filled and handed straight to the FFI
+ * call, and nothing in between can re-enter this module — so a fresh pair per
+ * (opponent, decision) would be pure garbage, which is exactly what this path
+ * exists to stop producing.
+ */
+const scUnseen = new Int32Array(34);
+const scFlags = new Int32Array(34);
+
+/** 染め手 suit as the kernel encodes it: 0 なし, 1 m, 2 p, 3 s (and 0 = 字 for a tile). */
+function honitsuCode(s: "m" | "p" | "s" | null): number {
+  return s === null ? 0 : s === "m" ? 1 : s === "p" ? 2 : 3;
+}
+
+/**
+ * Fill `scUnseen` / `scFlags` from a context, or report that this context is
+ * outside the kernel's integer domain (a count that is not 0..4 — which the
+ * `publicUnseen` the seat feeds it never is, but a hand-built test context may
+ * be). Refusing is free: the caller simply takes the TypeScript path.
+ */
+function packShapeCtx(ctx: WaitContext): boolean {
+  const un = ctx.unseen;
+  const gen = ctx.genbutsu;
+  const vh = ctx.valueHonors;
+  const dr = ctx.dora;
+  for (let t = 0; t < 34; t++) {
+    const u = un[t] ?? 0;
+    if (!(u >= 0 && u <= 4) || u !== Math.floor(u)) return false;
+    scUnseen[t] = u;
+    scFlags[t] = (gen.has(t) ? F_GENBUTSU : 0) | (vh.has(t) ? F_VALUE_HONOR : 0) |
+      ((dr?.[t] ?? 0) > 0 ? F_DORA : 0);
+  }
+  return true;
+}
+
+/**
+ * The parameter-free counts of every tile type at once — `shapeBaseMasses`
+ * written flat, into `out[34 …]`. Reads nothing but public facts, exactly as
+ * the definition above does; see its doc comment for what each kill means.
+ */
+function shapeBasesFlat(ctx: WaitContext, out: Float64Array): void {
+  const un = ctx.unseen;
+  const gen = ctx.genbutsu;
+  const dr = ctx.dora;
+  const u = (t: number): number => (t < 0 || t > 33 ? 0 : (un[t] ?? 0));
+  const isDora = (t: number): boolean => (dr?.[t] ?? 0) > 0;
+
+  out.fill(0);
+  for (let ty = 0; ty < 34; ty++) {
+    if (gen.has(ty)) continue; // 現物 — furiten, so every shape is refuted
+    const o = 34 + ty * BF;
+    const uty = u(ty);
+    out[o + B_SHANPON] = uty < 2 ? 0 : (uty * (uty - 1)) / 2;
+    out[o + B_TANKI] = uty;
+    if (ty >= 27) continue; // 字牌: シャンポン/タンキ IS the whole mechanism
+    const r = (ty % 9) + 1; // rankOfType, inlined
+    const up = r <= 6; // the (ty+1, ty+2) bridge
+    const dn = r >= 4; // the (ty−1, ty−2) bridge
+    const upRef = up && gen.has(ty + 3);
+    const dnRef = dn && gen.has(ty - 3);
+    const full = (!up || upRef) && (!dn || dnRef); // 全スジ
+    if (up) {
+      const m = u(ty + 1) * u(ty + 2);
+      if (!upRef) {
+        out[o + B_RYANMEN] += m;
+        if (isDora(ty + 1) || isDora(ty + 2)) out[o + B_RYANMEN_DORA] += m;
+      } else if (full) out[o + B_RYANMEN_FULL] += m;
+      else out[o + B_RYANMEN_HALF] += m;
+    }
+    if (dn) {
+      const m = u(ty - 1) * u(ty - 2);
+      if (!dnRef) {
+        out[o + B_RYANMEN] += m;
+        if (isDora(ty - 1) || isDora(ty - 2)) out[o + B_RYANMEN_DORA] += m;
+      } else if (full) out[o + B_RYANMEN_FULL] += m;
+      else out[o + B_RYANMEN_HALF] += m;
+    }
+    if (r >= 2 && r <= 8) out[o + B_KANCHAN] = u(ty - 1) * u(ty + 1);
+    if (r === 3) out[o + B_PENCHAN] = u(ty - 1) * u(ty - 2);
+    if (r === 7) out[o + B_PENCHAN] = u(ty + 1) * u(ty + 2);
+  }
+}
+
+/**
+ * `combineShapes` + `applyMeldRead` + `waitRowFrom`, over the counts already in
+ * `out[34 …]`, writing the row into `out[0 … 33]`. The three type-invariant
+ * `ShapeFlags` fields and every weight are read before the loop; only
+ * `valueHonor` and `doraType` are per type, and both are single lookups.
+ */
+function shapeMassRowFlat(ctx: WaitContext, w: ComputedWeights, out: Float64Array): void {
+  const prR = w.shapePrior["リャンメン"];
+  const prK = w.shapePrior["カンチャン"];
+  const prP = w.shapePrior["ペンチャン"];
+  const prS = w.shapePrior["シャンポン"];
+  const prT = w.shapePrior["タンキ"];
+  const dB = w.doraBridge - 1;
+  const sH = w.sujiHalfSurvive;
+  const sF = w.sujiFullSurvive;
+  const hs = honitsuCode(ctx.read?.honitsuSuit ?? null);
+  const toitoi = ctx.read?.toitoi ?? false;
+  const run = toitoi ? w.toitoiRun : 1;
+  const pair = toitoi ? w.toitoiPair : 1;
+  const vh = ctx.valueHonors;
+  const dr = ctx.dora;
+
+  let total = 0;
+  for (let ty = 0; ty < 34; ty++) {
+    const o = 34 + ty * BF;
+    const ryanmen = out[o + B_RYANMEN] + dB * out[o + B_RYANMEN_DORA] +
+      sH * out[o + B_RYANMEN_HALF] + sF * out[o + B_RYANMEN_FULL];
+    const doraPair = (dr?.[ty] ?? 0) > 0 ? w.doraPair : 1;
+    let sRyan = prR * (ryanmen / 32);
+    let sKan = prK * out[o + B_KANCHAN] / 16;
+    let sPen = prP * out[o + B_PENCHAN] / 16;
+    let sSha = prS * (out[o + B_SHANPON] / 6) * (vh.has(ty) ? w.yakuhaiShanpon : 1) * doraPair;
+    let sTan = prT * (out[o + B_TANKI] / 4) * doraPair;
+    // `applyMeldRead`, shape by shape: a killed shape stays killed.
+    const suit = ty < 9 ? 1 : ty < 18 ? 2 : ty < 27 ? 3 : 0;
+    const flush = hs === 0 ? 1 : (suit === hs || suit === 0 ? w.honitsuHot : w.honitsuCold);
+    if (sRyan !== 0) sRyan *= flush * run;
+    if (sKan !== 0) sKan *= flush * run;
+    if (sPen !== 0) sPen *= flush * run;
+    if (sSha !== 0) sSha *= flush * pair;
+    if (sTan !== 0) sTan *= flush * pair;
+    const mass = sRyan + sKan + sPen + sSha + sTan;
+    out[ty] = mass;
+    total += mass;
+  }
+
+  if (!w.waitNormalize) {
+    const sc = w.dealinScale;
+    for (let ty = 0; ty < 34; ty++) out[ty] = Math.min(1, out[ty] * sc);
+    return;
+  }
+  if (total <= 0) {
+    for (let ty = 0; ty < 34; ty++) out[ty] = 0;
+    return;
+  }
+  const exp = w.expWaitMass;
+  for (let ty = 0; ty < 34; ty++) {
+    const m = out[ty];
+    out[ty] = m <= 0 ? 0 : Math.min(1, exp * (m / total));
+  }
+}
+
+/**
+ * The TypeScript reference of the flat path: counts, then row, no allocation
+ * beyond the two closures. This is what runs when the kernel is not loaded, and
+ * it is what the parity fuzz judges the kernel against.
+ */
+export function shapeRowTS(
+  ctx: WaitContext,
+  w: ComputedWeights,
+  out: Float64Array,
+): void {
+  shapeBasesFlat(ctx, out);
+  shapeMassRowFlat(ctx, w, out);
+}
+
+/** One opponent's row, filled into a `SHAPE_ROW_LEN` buffer. */
+export type ShapeRowFn = (ctx: WaitContext, out: Float64Array) => void;
+
+/**
+ * A prepared row evaluator for one weight vector: native when the kernel is
+ * loaded and the context is inside its integer domain, `shapeRowTS` otherwise.
+ * The choice is invisible — the two agree bit for bit, which is what
+ * `test/kernel_native_test.ts` fuzzes.
+ *
+ * `native: false` forces the TypeScript, for the parity test and for anyone who
+ * wants the reference on purpose.
+ */
+export function shapeRowEvaluator(w: ComputedWeights, native = true): ShapeRowFn {
+  const packed = native ? packShapeWeights(w) : null;
+  return (ctx: WaitContext, out: Float64Array): void => {
+    if (packed && packShapeCtx(ctx)) {
+      const suit = honitsuCode(ctx.read?.honitsuSuit ?? null);
+      const toi = ctx.read?.toitoi ? 1 : 0;
+      if (shapeMasses(scUnseen, scFlags, suit, toi, packed, out)) return;
+    }
+    shapeRowTS(ctx, w, out);
+  };
+}
+
+/** The 34 `ShapeBase` objects a filled row buffer carries, for a trace. */
+function basesFromRow(row: Float64Array): ShapeBase[] {
+  const out: ShapeBase[] = [];
+  for (let ty = 0; ty < 34; ty++) {
+    const o = 34 + ty * BF;
+    out.push({
+      ryanmen: row[o + B_RYANMEN],
+      ryanmenDora: row[o + B_RYANMEN_DORA],
+      ryanmenHalf: row[o + B_RYANMEN_HALF],
+      ryanmenFull: row[o + B_RYANMEN_FULL],
+      kanchan: row[o + B_KANCHAN],
+      penchan: row[o + B_PENCHAN],
+      shanpon: row[o + B_SHANPON],
+      tanki: row[o + B_TANKI],
+    });
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -1023,12 +1308,12 @@ function meldDora(obs: Observation, rel: number, dora: readonly number[]): numbe
  */
 export type YakuClass = 0 | 1 | 2; // 0 riichi, 1 open, 2 damaten
 
-export function yakuClassOf(riichi: boolean, open: boolean): YakuClass {
+function yakuClassOf(riichi: boolean, open: boolean): YakuClass {
   return riichi ? 0 : open ? 1 : 2;
 }
 
 /** P(the hand can actually declare a ron) for a class. */
-export function yakuFactorOf(w: ComputedWeights, cls: YakuClass): number {
+function yakuFactorOf(w: ComputedWeights, cls: YakuClass): number {
   return cls === 0 ? w.yakuFactor.riichi : cls === 1 ? w.yakuFactor.open : w.yakuFactor.damaten;
 }
 
@@ -1197,7 +1482,13 @@ export function computedReads(
   w?: Partial<ComputedWeights>,
   traceRef?: ComputedTraceRef,
 ): ReadsProvider {
-  const cw = merge(w);
+  const cw = mergeComputed(w);
+  // The weight vector is a constant of the seat, so the row evaluator is built
+  // once here rather than per decision — and with it the packed vector the
+  // kernel reads. The scratch row is the provider's own: it is filled and
+  // drained inside one iteration of the three-opponent loop below.
+  const shapeRow = shapeRowEvaluator(cw);
+  const row = new Float64Array(SHAPE_ROW_LEN);
 
   return (obs: Observation): Reads => {
     const unseen = publicUnseen(obs);
@@ -1216,7 +1507,7 @@ export function computedReads(
       const melds = obs.melds[rel];
       const open = melds.some((m) => m.kind !== "ankan");
       const riichi = obs.riichi[rel];
-      const valueHonors = new Set([obs.roundWind, seatWindOf(obs, rel), 31, 32, 33]);
+      const valueHonors = valueHonorsOf(obs.roundWind, seatWindOf(obs, rel));
       // What their melds are showing — a fact about the table right now, read the
       // same way for every seat that shows the same tiles.
       const read = meldReadOf(melds, valueHonors);
@@ -1260,14 +1551,14 @@ export function computedReads(
 
       const p = new Float32Array(34);
       const v = new Float32Array(34);
-      // The whole row is built before any of it is consumed: `waitRowFrom`
-      // normalizes over the row's own total when `waitNormalize` is on, so a
-      // per-type answer is not available until every type has been counted.
-      const bases: ShapeBase[] = [];
-      for (let ty = 0; ty < 34; ty++) bases.push(shapeBaseMasses(ty, ctx));
-      const wait = waitRowFrom(bases, (ty) => shapeFlagsOf(ty, ctx), cw);
+      // The whole row is built before any of it is consumed: the row form
+      // normalizes over its own total when `waitNormalize` is on, so a per-type
+      // answer is not available until every type has been counted. `shapeRow`
+      // is `shapeBaseMasses` + `waitRowFrom` written flat — same numbers, no
+      // allocation — and it is the kernel's entry point when one is loaded.
+      shapeRow(ctx, row);
       for (let ty = 0; ty < 34; ty++) {
-        const q = pT * yaku * wait[ty];
+        const q = pT * yaku * row[ty];
         if (q <= 0) continue;
         p[ty] = q;
         v[ty] = valueOnType(cw, value, dora[ty], obs.honba);
@@ -1288,7 +1579,9 @@ export function computedReads(
           dealer: rel === dealer,
           valueHonors,
           value,
-          base: bases,
+          // The trace's own copy: `row` is scratch and the next opponent
+          // overwrites it, so the counts are materialized here and nowhere else.
+          base: basesFromRow(row),
           dealinP: p,
         });
       }

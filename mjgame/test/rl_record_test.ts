@@ -8,7 +8,7 @@ import { assert, assertAlmostEquals, assertEquals, assertThrows } from "@std/ass
 import { RandomPolicy } from "../src/ai/random.ts";
 import { runMatchSync } from "../src/match.ts";
 import type { MatchResult } from "../src/match.ts";
-import { makeDojoHooks } from "../src/main.ts";
+import { makeDojoHooks } from "../src/dojo.ts";
 import { encodeOracle, encodeSeq, FEATURES, ORACLE_LEN, PLANE_LEN } from "../src/rl/features.ts";
 import type { Observation } from "../src/observe.ts";
 import type { SyncPolicy } from "../src/policy.ts";

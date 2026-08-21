@@ -118,7 +118,7 @@ function sigmaDiffOf(kyoku: number, w: StandingsWeights): number {
   return w.sigmaPerKyoku * Math.sqrt(2 * kyokuRemaining(kyoku, w));
 }
 
-export interface RankStats {
+interface RankStats {
   /** P(I finish above opponent j) for relative seats 1..3, in that order. */
   pBeat: number[];
   /** P(final placement is r+1), r = 0..3. Sums to 1. */
@@ -177,7 +177,7 @@ export function rankStats(
   return { pBeat, rankDist, expRank };
 }
 
-export interface StandingsScales {
+interface StandingsScales {
   /** Multiplier on how much this hand is worth pushing for. */
   gain: number;
   /** Multiplier on the price of danger. */
@@ -227,10 +227,11 @@ export function standingsScales(obs: Observation, w: StandingsWeights): Standing
   // touching what a deal-in costs.
   const winDelta = w.refWin + 1000 * obs.kyotaku + 300 * obs.honba;
 
-  /** −(expected placement + P(the rabbit finishes above me)). */
+  /** −(expected placement + P(the rabbit finishes above me)), given the placement. */
+  const euOf = (expRank: number, scores: number[], rabbit: number) =>
+    -(expRank + w.phantomWeight * phi((rabbit - scores[0]) / sigmaDiff));
   const eu = (scores: number[], rabbit: number) =>
-    -(rankStats(scores, kyoku, w).expRank +
-      w.phantomWeight * phi((rabbit - scores[0]) / sigmaDiff));
+    euOf(rankStats(scores, kyoku, w).expRank, scores, rabbit);
 
   const winFrom = (s: number[]) => {
     // Zero-sum on `refWin`: the reference value comes out of the other three
@@ -264,7 +265,12 @@ export function standingsScales(obs: Observation, w: StandingsWeights): Standing
   const rabbit = now[0] + w.phantomLead;
   const rabbitFlat = flat[0] + w.phantomLead;
 
-  const euNow = eu(now, rabbit);
+  // The honest expected placement RIGHT NOW: the reported `expRank`, and the
+  // first half of `euNow`. One `rankStats` for both — the two used to be
+  // computed separately, from identical arguments, at opposite ends of the
+  // function.
+  const expRank = rankStats(now, kyoku, w).expRank;
+  const euNow = euOf(expRank, now, rabbit);
   const euFlat = eu(flat, rabbitFlat);
 
   const rawGain = (eu(winFrom(now), rabbit) - euNow) /
@@ -283,5 +289,5 @@ export function standingsScales(obs: Observation, w: StandingsWeights): Standing
   // never discount it, no matter how little the placement model cares.
   if (obs.scores[0] - w.refLoss < 8000) risk = Math.max(risk, 1);
 
-  return { gain, risk, expRank: rankStats(now, kyoku, w).expRank, decisiveness };
+  return { gain, risk, expRank, decisiveness };
 }

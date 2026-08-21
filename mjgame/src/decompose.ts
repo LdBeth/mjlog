@@ -58,8 +58,15 @@ function cmpBlock(a: Block, b: Block): number {
   return a.type - b.type || (a.kind === b.kind ? 0 : a.kind === "run" ? -1 : 1);
 }
 
-function blockKey(b: Block): string {
-  return `${b.kind[0]}${b.type}${b.concealed ? "c" : "o"}${b.fromWho ?? ""}`;
+const KIND_CODE: Record<BlockKind, number> = { run: 0, triplet: 1, kan: 2, pair: 3 };
+
+/**
+ * An injective integer over (kind, type, concealed, fromWho) — the dedup key
+ * below is built from these rather than from per-block template strings, since
+ * it runs once per candidate reading inside the scorer's inner loop.
+ */
+function blockCode(b: Block): number {
+  return ((KIND_CODE[b.kind] * 34 + b.type) * 2 + (b.concealed ? 1 : 0)) * 5 + (b.fromWho ?? 4);
 }
 
 /** Set-slot blocks for the called melds, in call order. 抜き (sanma) is ignored. */
@@ -214,13 +221,7 @@ export function decomposeWin(
   counts34: number[],
   melds: Meld[],
   winTile: Tile,
-  tsumo: boolean,
 ): Decomposition[] {
-  // `tsumo` is part of the frozen signature so a future rule can distinguish
-  // tsumo-only readings (e.g. a 門前 fu variant); no current rule branches on
-  // it, so it is accepted and unused rather than silently dropped.
-  void tsumo;
-
   const slots = meldSlots(melds);
   const need = 4 - slots;
   if (need < 0) return [];
@@ -232,12 +233,11 @@ export function decomposeWin(
   const out: Decomposition[] = [];
   const seen = new Set<string>();
   const push = (d: Decomposition): void => {
-    const winKey = d.winBlock < 0 ? "-" : blockKey(d.blocks[d.winBlock]);
     // Keyed on block *contents*, not the winBlock index: two identical blocks
     // (e.g. 234m 234m both containing the winning 3m) are one reading.
-    const key = `${d.form}|${d.blocks.map(blockKey).join(",")}|${
-      blockKey(d.pair)
-    }|${winKey}|${d.wait}`;
+    let key = `${d.form}|${d.wait}|${blockCode(d.pair)}|` +
+      (d.winBlock < 0 ? -1 : blockCode(d.blocks[d.winBlock]));
+    for (const b of d.blocks) key += `,${blockCode(b)}`;
     if (seen.has(key)) return;
     seen.add(key);
     out.push(d);
@@ -305,7 +305,7 @@ export function isComplete(counts34: number[], openMelds: number): boolean {
   if (total(counts34) !== need * 3 + 2) return false;
   if (openMelds === 0 && (isChiitoi(counts34) || kokushiPairType(counts34) >= 0)) return true;
 
-  // Mutate-and-restore: `waitTypes` calls this 34 times per hand, so no copy.
+  // Mutate-and-restore rather than copy: callers probe this in tight loops.
   for (let p = 0; p < 34; p++) {
     if (counts34[p] < 2) continue;
     counts34[p] -= 2;
@@ -314,17 +314,4 @@ export function isComplete(counts34: number[], openMelds: number): boolean {
     if (ok) return true;
   }
   return false;
-}
-
-/** The tile types that would complete this hand (i.e. the waits) at tenpai. */
-export function waitTypes(counts34: number[], melds: Meld[]): number[] {
-  const openMelds = meldSlots(melds);
-  const out: number[] = [];
-  for (let t = 0; t < 34; t++) {
-    if (counts34[t] >= 4) continue; // all four copies already in hand
-    counts34[t]++;
-    if (isComplete(counts34, openMelds)) out.push(t);
-    counts34[t]--;
-  }
-  return out;
 }

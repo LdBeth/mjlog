@@ -85,9 +85,8 @@ Deno.test("finalize: leftover 供託 goes to the top finisher instead of evapora
 });
 
 Deno.test("finalize: the 供託 tiebreak is the settlement tiebreak (lower seat)", () => {
-  // `settlement` (src/rl/record.ts) and the TUI's `finalStandings` both sort by
-  // `b.s - a.s || a.seat - b.seat`, so the sticks must never land on a seat
-  // those two rank second.
+  // `settlement` (src/rl/record.ts) sorts by `b.s - a.s || a.seat - b.seat`,
+  // so the sticks must never land on a seat it ranks second.
   assertEquals(topFinisher([25000, 30000, 30000, 15000]), 1);
   assertEquals(topFinisher([30000, 30000, 30000, 30000]), 0);
   assertEquals(topFinisher([1000, 2000, 3000, 94000]), 3);

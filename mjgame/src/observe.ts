@@ -14,12 +14,13 @@ import type { Furiten } from "./table.ts";
 import { Table } from "./table.ts";
 import type { WinOracle } from "./legal.ts";
 import { ANY_WIN } from "./legal.ts";
+import type { RestingShape } from "./hand.ts";
 import { analyze } from "./hand.ts";
 import type { ActionPreview } from "./penalty/preview.ts";
 import { makePreview } from "./penalty/preview.ts";
 import type { DojoConfig } from "./rules.ts";
 import type { Action, Seat } from "./types.ts";
-import { relSeat, SEATS } from "./types.ts";
+import { SEATS } from "./types.ts";
 
 export interface Ukeire {
   type: number;
@@ -140,8 +141,13 @@ function discardInfoFor(
 
     const [lifted] = hand.splice(i, 1);
     try {
-      const sh = shanten(countsFromTiles(hand), open, closed);
-      const info = sh <= 0 ? analyze(t, seat, null, oracle) : null;
+      const counts = countsFromTiles(hand);
+      const sh = shanten(counts, open, closed);
+      // The shape is already in hand — `analyze` would otherwise recompute the
+      // very counts and shanten this line just paid for.
+      const info = sh <= 0
+        ? analyze(t, seat, null, oracle, { counts, open, closed, shanten: sh })
+        : null;
       out.set(a.tile, {
         shanten: sh,
         katagari: info?.katagari ?? false,
@@ -163,7 +169,11 @@ export function observe(
   claimTile: Tile | null = null,
   dojo?: DojoConfig,
 ): Observation {
-  const rel = <T>(pick: (s: Seat) => T): T[] => SEATS.map((s) => pick(((seat + s) % 4) as Seat));
+  // Seat indices in relative order, so every per-seat array below is one plain
+  // literal rather than a mapped closure.
+  const r1 = ((seat + 1) % 4) as Seat;
+  const r2 = ((seat + 2) % 4) as Seat;
+  const r3 = ((seat + 3) % 4) as Seat;
 
   const hand = [...t.hands[seat]];
   const open = t.melds[seat].length;
@@ -172,14 +182,19 @@ export function observe(
 
   // Resting-hand analysis is done on the 3n+1 shape: drop the drawn tile if we
   // are mid-turn, so shanten/ukeire mean "after discarding nothing yet".
-  const resting = drawn === null ? hand : hand.filter((_, i) => i !== hand.lastIndexOf(drawn));
+  const cut = drawn === null ? -1 : hand.lastIndexOf(drawn);
+  const resting = cut < 0 ? hand : hand.filter((_, i) => i !== cut);
   const counts = countsFromTiles(resting);
   const sh = shanten(counts, open, closed);
-  const waitTypes = sh <= 0 ? ukeireTypes(counts, open, closed, sh) : [];
-  const ukeire: Ukeire[] = ukeireTypes(counts, open, closed, sh).map((type) => ({
+  // One ukeire pass serves both fields: at shanten 0 the acceptance types ARE
+  // the waits, and above it there are no waits to report.
+  const accepts = ukeireTypes(counts, open, closed, sh);
+  const waitTypes = sh <= 0 ? accepts : [];
+  const ukeire: Ukeire[] = accepts.map((type) => ({
     type,
     live: Math.max(0, 4 - visible[type]),
   }));
+  const shape: RestingShape = { counts, open, closed, shanten: sh, waits: waitTypes };
 
   const threats = t.threats(seat);
   const furo = t.furoThreats(seat);
@@ -192,8 +207,13 @@ export function observe(
     }
   }
 
-  const here = analyze(t, seat, drawn, oracle);
-  const vio = SEATS.map((s) => t.ledger.filter((v) => v.seat === ((seat + s) % 4)).length);
+  const here = analyze(t, seat, drawn, oracle, shape);
+  const vio = [0, 0, 0, 0];
+  for (const v of t.ledger) vio[(v.seat - seat + 4) % 4]++;
+
+  // Built on first read, not on construction: an ActionPreview is an object plus
+  // four closures over the live Table, and most seats' policies never ask.
+  let preview: ActionPreview | undefined;
 
   return {
     seat,
@@ -205,11 +225,21 @@ export function observe(
     hand,
     drawn,
     claimTile,
-    melds: rel((s) => t.melds[s]),
-    rivers: rel((s) => t.board.rivers[s]),
-    scores: rel((s) => t.scores[s]),
-    riichi: rel((s) => t.riichi[s]),
-    riichiJunme: rel((s) => t.board.riichiJunme[s]),
+    melds: [t.melds[seat], t.melds[r1], t.melds[r2], t.melds[r3]],
+    rivers: [
+      t.board.rivers[seat],
+      t.board.rivers[r1],
+      t.board.rivers[r2],
+      t.board.rivers[r3],
+    ],
+    scores: [t.scores[seat], t.scores[r1], t.scores[r2], t.scores[r3]],
+    riichi: [t.riichi[seat], t.riichi[r1], t.riichi[r2], t.riichi[r3]],
+    riichiJunme: [
+      t.board.riichiJunme[seat],
+      t.board.riichiJunme[r1],
+      t.board.riichiJunme[r2],
+      t.board.riichiJunme[r3],
+    ],
     doraIndicators: [...t.indicators],
     seatWind: t.seatWindType(seat),
     roundWind: t.roundWindType,
@@ -229,8 +259,9 @@ export function observe(
     // Only when the driver said which rules are in force: a preview judged by a
     // different DojoConfig than the round is played under would steer the policy
     // away from moves nobody is charging for (and towards ones somebody is).
-    preview: dojo?.enabled ? makePreview(t, seat, dojo, oracle) : undefined,
+    get preview(): ActionPreview | undefined {
+      if (!dojo?.enabled) return undefined;
+      return preview ??= makePreview(t, seat, dojo, oracle);
+    },
   };
 }
-
-export { relSeat };

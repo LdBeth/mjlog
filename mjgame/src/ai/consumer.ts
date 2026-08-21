@@ -56,9 +56,9 @@ import type { CandidateEvidence, ContextEvidence, EvidenceVector } from "./evide
 export type CurveParams = [number, number, number, number];
 
 /** Four knot positions. Fixed metadata — never fitted. */
-export type Knots = readonly [number, number, number, number];
+type Knots = readonly [number, number, number, number];
 
-export type CurveMode = "clamp" | "linear";
+type CurveMode = "clamp" | "linear";
 
 /** Every curve in the model, in the order the score visits them. */
 export type CurveKey =
@@ -157,7 +157,7 @@ export function constTheta(c: number): CurveParams {
  * does, and float addition is not associative. Init-equivalence is asserted to
  * the last bit, so the ORDER of the additions is part of the specification.
  */
-export const ATK_GROUPS: readonly (readonly CurveSpec[])[] = [
+const ATK_GROUPS: readonly (readonly CurveSpec[])[] = [
   [{
     key: "shanten",
     field: "shantenAfter",
@@ -210,7 +210,7 @@ export const ATK_GROUPS: readonly (readonly CurveSpec[])[] = [
   }],
 ];
 
-export const DEF_SPECS: readonly CurveSpec[] = [
+const DEF_SPECS: readonly CurveSpec[] = [
   {
     key: "risk",
     field: "risk",
@@ -237,7 +237,7 @@ export const DEF_SPECS: readonly CurveSpec[] = [
   },
 ];
 
-export const FREE_SPECS: readonly CurveSpec[] = [
+const FREE_SPECS: readonly CurveSpec[] = [
   {
     key: "drawBonus",
     field: "drawBonus",
@@ -256,7 +256,7 @@ export const FREE_SPECS: readonly CurveSpec[] = [
   },
 ];
 
-export const CTX_ATK_SPECS: readonly CurveSpec[] = [
+const CTX_ATK_SPECS: readonly CurveSpec[] = [
   {
     key: "atkEff",
     field: "eff",
@@ -283,7 +283,7 @@ export const CTX_ATK_SPECS: readonly CurveSpec[] = [
   },
 ];
 
-export const CTX_DEF_SPECS: readonly CurveSpec[] = [
+const CTX_DEF_SPECS: readonly CurveSpec[] = [
   {
     key: "defScale",
     field: "def",
