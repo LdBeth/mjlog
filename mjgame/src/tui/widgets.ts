@@ -307,6 +307,9 @@ export function centerBlock(ctx: Ctx): Line[] {
 // ---------------------------------------------------------------------------
 
 /** Name/score/melds line, own river, hand line, and the cursor caret line. */
+/** JIS number row → hand slot 0..12, in screen order. `\\` is what most terminals send for ¥. */
+export const ROW_KEYS = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "-", "^", "¥"];
+
 export function ownPanel(ctx: Ctx, w: number): Line[] {
   const o = ctx.obs;
   if (!o) return [];
@@ -331,8 +334,12 @@ export function ownPanel(ctx: Ctx, w: number): Line[] {
   ];
 
   const hand: Line = [sp("手牌  ", DIM)];
+  // The key line doubles as the cursor: every slot shows the number-row key
+  // that discards it (a hand's width, 1-9 0 - ^ ¥, and t for the drawn tile),
+  // and the cursor slot shows its key highlighted instead of a caret.
   const caret: Line = [sp("      ")];
   const active = ctx.phase === "turn";
+  let hi = 0; // hand slots seen so far — the drawn tile is not on the row
   ctx.slots.forEach((id, i) => {
     if (i === ctx.drawnIndex) {
       hand.push(sp("│ ", DIM));
@@ -342,7 +349,13 @@ export function ownPanel(ctx: Ctx, w: number): Line[] {
     const sel = active && i === ctx.cursor;
     hand.push(tileSpan(id, ctx.glyph, sel ? SGR.reverse : dim));
     hand.push(sp(" "));
-    caret.push(sp(sel ? "^^" : "  ", sel ? (ctx.riichiArmed ? "1;91" : SGR.brightCyan) : ""));
+    const key = i === ctx.drawnIndex ? "t" : ROW_KEYS[hi++] ?? " ";
+    const keySgr = sel
+      ? (ctx.riichiArmed ? "1;91" : `${SGR.reverse};${SGR.brightCyan}`)
+      : active && ctx.selectable[i]
+      ? DIM
+      : SGR.dim;
+    caret.push(sp(active ? `${key} ` : "  ", keySgr));
     caret.push(sp(" "));
   });
   if (ctx.drawnIndex >= 0 && ctx.drawnIndex === ctx.slots.length) hand.push(sp("│ ", DIM));

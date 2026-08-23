@@ -188,8 +188,6 @@ export interface AppOptions {
   write?: (s: string) => void;
 }
 
-/** JIS number row → hand slot 0..12. `\\` is what most terminals send for ¥. */
-const ROW_KEYS = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "-", "^", "¥"];
 const ROW_ALIASES: Record<string, string> = { "\\": "¥" };
 
 export class App {
@@ -809,7 +807,7 @@ export class App {
         return;
       }
       default: {
-        const i = ROW_KEYS.indexOf(ROW_ALIASES[k.name] ?? k.name);
+        const i = W.ROW_KEYS.indexOf(ROW_ALIASES[k.name] ?? k.name);
         if (i >= 0) {
           this.rowKey(i);
           return;
