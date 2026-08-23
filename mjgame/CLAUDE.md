@@ -73,8 +73,10 @@ buffering seam). Flags a command would silently ignore are rejected by
   78-slot action space, trajectory recording (`TrajectoryWriter` has a
   buffering mode for workers; `RecordingPolicy` reuses `NeuralPolicy`'s
   `lastEncoding`).
-- **`src/tui/`**: term/input/screen/glyph/widgets/app. Human decision timing
-  feeds the dojo's 腰/長考 rules via the `timing` hook in `play`.
+- **`src/tui/`**: term/input/screen/glyph/widgets/app. The `--timer` countdown
+  is display-only pressure: nothing in the ledger prices the clock (see
+  Decisions). The JIS number row (`1-9 0 - ^ ¥`, `\` = ¥) discards hand slot
+  1–13 in one keystroke; `t` is the drawn tile; ←→/Enter remain.
 - **`native/`**: `mjkernel.cc` (ABI 2: `mj_shanten`, `mj_ukeire_mask`,
   `mj_shape_masses`) and `rlnet.c`. Built with `-ffp-contract=off` — required
   for bit-exact parity with TS.
@@ -96,6 +98,14 @@ buffering seam). Flags a command would silently ignore are rejected by
   deliberately, with the reason documented in the test.
 - **Reward philosophy**: violations are minimized as a byproduct of long-term
   reward — no per-decision penalty shaping.
+
+## Decisions
+
+- **長考/腰 (the time-based Tier-B penalties) were REMOVED 2026-08-23**: a
+  keyboard TUI cannot meet physical-table timing norms (3s / 1.2s), only the
+  human seat ever had a clock, and one ledger entry demotes the seat below
+  every clean seat for the whole hanchan under `finalStandings`. Do not re-add
+  without a timer-bank-based design.
 
 ## Training
 

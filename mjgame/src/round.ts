@@ -386,7 +386,7 @@ function* claimPhase(
     // 見逃し: letting a tile that COMPLETES your hand go by makes you
     // temporarily furiten — and permanently so if you are in riichi. Whether a
     // ron was actually offered is beside the point; it may have been suppressed
-    // because the shape is yakuless, because 見せ牌/腰 blocks the tile, or
+    // because the shape is yakuless, because 見せ牌 blocks the tile, or
     // because the seat is furiten already. This runs for the 槍槓 window too,
     // which comes through the same loop.
     if (a.t !== "ron" && completes) t.markPassedRon(s);

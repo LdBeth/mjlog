@@ -7,7 +7,7 @@
 //                 so it can never disagree with the transcript we export.
 //   Table       — everything BoardState has no concept of: the actual wall
 //                 (tile identity, not just a counter), full-point scores,
-//                 ippatsu/double-riichi, three-valued furiten, the 見せ牌/腰
+//                 ippatsu/double-riichi, three-valued furiten, the 見せ牌
 //                 ron blocks, 和了放棄 sanctions, and the violation ledger.
 //
 // Hands are NOT duplicated: `board.hands` is the single copy. Both objects are
@@ -68,7 +68,7 @@ export class Table {
     riichi: false,
   }));
 
-  /** Tile types this seat may not 出和了 on (見せ牌 exposes a suit, 腰 a tile+suji). */
+  /** Tile types this seat may not 出和了 on (見せ牌 exposes a whole suit). */
   readonly ronBlocked: Array<Set<number>> = SEATS.map(() => new Set<number>());
   /** Tile ids this seat has exposed (空ポン/空チー), driving the 見せ牌 block. */
   readonly exposed: Array<Set<Tile>> = SEATS.map(() => new Set<Tile>());

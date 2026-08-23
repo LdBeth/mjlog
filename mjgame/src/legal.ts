@@ -5,7 +5,7 @@
 // dora cut and a 地獄単騎 riichi are all enumerated here as perfectly legal
 // moves — the penalty ledger records them afterwards. What this module DOES
 // restrict is only:
-//   - win validity: furiten, 見せ牌/腰 ron blocks, 和了放棄 sanctions,
+//   - win validity: furiten, 見せ牌 ron blocks, 和了放棄 sanctions,
 //   - mechanics: 同巡内食い替え, the post-riichi discard lock, having the tiles.
 
 import type { Meld, Tile } from "mjrender/model.ts";

@@ -7,7 +7,7 @@ import type { Meld } from "mjrender/model.ts";
 import type { WinOracle } from "../src/legal.ts";
 import { ANY_WIN } from "../src/legal.ts";
 import { buildMeld } from "../src/legal.ts";
-import { runHook } from "../src/penalty/rules.ts";
+import { RULES, runHook } from "../src/penalty/rules.ts";
 import type { Hook, RuleCtx } from "../src/penalty/mod.ts";
 import { DOJO_DEFAULT, JANKI } from "../src/rules.ts";
 import { scorer } from "../src/score.ts";
@@ -493,22 +493,20 @@ Deno.test("片和了り: a split wait charges only once — the seat wins once",
   assertEquals(vs.filter((v) => v.rule === "katagari").length, 1);
 });
 
-Deno.test("長考: fires past the 3-second norm, escalates past 4", () => {
-  const t = makeTable();
-  const base = ctx(t, 0, { t: "discard", tile: 0, riichi: false, tsumogiri: true });
-  assertEquals(fire("post-discard", { ...base, timing: { elapsedMs: 1500 } }).length, 0);
-  const slow = fire("post-discard", { ...base, timing: { elapsedMs: 3500 } });
-  assert(ids("chouko", slow));
-  assertEquals(slow.find((v) => v.rule === "chouko")?.label, "長考");
-  const verySlow = fire("post-discard", { ...base, timing: { elapsedMs: 6000 } });
-  assertEquals(verySlow.find((v) => v.rule === "chouko")?.label, "大長考");
+Deno.test("no rule is charged for wall-clock time (長考/腰 were removed)", () => {
+  // Removed 2026-08-23: a keyboard TUI cannot meet the physical table's
+  // 3秒/1.2秒 norms, and only the human seat ever had a clock to be judged by.
+  assert(!RULES.some((r) => r.id === "chouko" || r.id === "koshi"));
 });
 
 Deno.test("Tier B can be switched off wholesale (for RL training)", () => {
-  const t = makeTable();
-  const c = ctx(t, 0, { t: "discard", tile: 0, riichi: false, tsumogiri: true });
-  const off = { ...c, dojo: { ...DOJO_DEFAULT, tierB: false }, timing: { elapsedMs: 9000 } };
-  assertEquals(fire("post-discard", off).filter((v) => v.tier === "B").length, 0);
+  // 一人浮きにする和了り: 南2局以降, two seats above the return line, the winner
+  // below it.
+  const t = makeTable({ kyoku: 5, scores: [15000, 45000, 45000, 15000] });
+  const c = ctx(t, 0, { t: "ron" });
+  assert(fire("on-win", c).some((v) => v.tier === "B"), "no Tier-B rule fired to switch off");
+  const off = { ...c, dojo: { ...DOJO_DEFAULT, tierB: false } };
+  assertEquals(fire("on-win", off).filter((v) => v.tier === "B").length, 0);
 });
 
 Deno.test("a rule that throws is contained, not fatal", () => {

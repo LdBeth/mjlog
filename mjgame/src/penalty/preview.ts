@@ -66,10 +66,6 @@
 //   atozuke                on-win         NO   same, handled the same way
 //                                              (`yakulessTenpai`).
 //   uki-crush              on-win     (B) NO   same — would require declining.
-//   koshi                  on-call    (B) NO   needs `timing.callPromptMs`,
-//                                              which only a human at a TUI
-//                                              produces. Never fires for a CPU.
-//   chouko                 (all)      (B) NO   needs `timing.elapsedMs`. Ditto.
 //   misehai                on-call    (B) NO   needs `Table.exposed`, filled by
 //                                              a 空ポン the engine cannot even
 //                                              represent as an Action.
@@ -151,18 +147,18 @@ let guardHolder: Table | null = null;
 
 /**
  * Two rules WRITE to the table when they fire (ドラ切り後の手出し arms
- * `tsumogiriLock`; 腰/見せ牌 close ron types). A hypothetical must not leave
+ * `tsumogiriLock`; 見せ牌 closes ron types). A hypothetical must not leave
  * those behind, so every preview runs inside this.
  *
- * `ronBlocked` is only snapshotted when Tier B is live: 腰 and 見せ牌 are its
- * only writers, and copying four Sets per candidate discard is not free.
+ * `ronBlocked` is only snapshotted when Tier B is live: 見せ牌 is its only
+ * writer, and copying four Sets per candidate discard is not free.
  *
  * NESTING. `previewCall`'s forced-discard lookahead runs a `previewDiscard` per
  * escape route inside its own guard, and a snapshot taken there would only copy
  * state the outer guard already holds and already restores. So a guard entered
  * while one is open on the SAME table is a pass-through. That is exact, not an
  * approximation: both writers are on the `on-call` side (the arming half of
- * ドラ切り後の手出し, and 腰/見せ牌, all registered on `on-call` alone), so no
+ * ドラ切り後の手出し, and 見せ牌, both registered on `on-call` alone), so no
  * hook a nested `previewDiscard` can reach writes to either channel and nothing
  * leaks between sibling iterations. Previews are synchronous start to finish,
  * so a module-level marker is enough to see the open guard.

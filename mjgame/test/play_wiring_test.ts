@@ -98,45 +98,15 @@ Deno.test("play wiring: tsumogiriLock is armed, and an Observation sees it", () 
 });
 
 // ---------------------------------------------------------------------------
-// The timing channel: the TUI's stopwatch, and the two Tier-B rules that are
-// unreachable without it (長考 reads `elapsedMs`, 腰 reads `callPromptMs`).
+// No rule may be reachable only through wall-clock timing: 長考 and 腰 were
+// removed on 2026-08-23 and nothing replaced their stopwatch.
 
-/** A hanchan in which one seat answers the stopwatch, as the human seat does. */
-function playTimed(seed: number, human: Seat, ms: number): Violation[] {
-  return runMatchSync(
-    SEATS.map((s) => new RandomPolicy(`R${s}`, seed * 4 + s)),
-    {
-      seed,
-      cfg: JANKI,
-      dojo: DOJO_DEFAULT,
-      scorer,
-      ...makeDojoHooks(
-        DOJO_DEFAULT,
-        // Exactly `cmdPlay`'s shape: the human's measurements, and nothing for a
-        // CPU — a policy that answers instantly has no time to be judged on.
-        (seat: Seat) => seat === human ? { elapsedMs: ms, callPromptMs: ms } : undefined,
-      ),
-    },
-  ).ledger;
-}
-
-Deno.test("play wiring: the TUI's stopwatch reaches 長考 and 腰", () => {
-  let chouko = 0;
-  let koshi = 0;
+Deno.test("play wiring: no ledger entry is charged for taking time", () => {
   for (let seed = 1; seed <= 6; seed++) {
-    // Untimed: the two rules cannot fire at all, whatever the seats do.
     for (const v of play(seed, true).ledger) {
-      assert(v.rule !== "chouko" && v.rule !== "koshi", "a timing rule fired without a stopwatch");
-    }
-    for (const v of playTimed(seed, 1, 9_000)) {
-      if (v.rule !== "chouko" && v.rule !== "koshi") continue;
-      assertEquals(v.seat, 1, "only the seat with a stopwatch can be judged on time");
-      if (v.rule === "chouko") chouko++;
-      else koshi++;
+      assert(v.rule !== "chouko" && v.rule !== "koshi", "a time-based rule is back in the ledger");
     }
   }
-  assert(chouko > 0, "9秒 の打牌が一度も長考にならなかった");
-  assert(koshi > 0, "9秒 の鳴き判断が一度も腰にならなかった");
 });
 
 // ---------------------------------------------------------------------------

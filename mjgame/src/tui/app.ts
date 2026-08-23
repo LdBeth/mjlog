@@ -116,19 +116,9 @@ function layout(cols: number, rows: number): Layout {
 /**
  * The seat the person at the keyboard plays. It owns no UI state; it hands the
  * observation to the App and returns the promise the key handler resolves.
- *
- * The timing fields exist for the dojo's 腰 rule (hesitating over a call) and
- * 長考 rule, which are *not* implemented here — the TUI only makes the timing
- * observable so the penalty registry can consume it later.
  */
 export class HumanPolicy implements Policy {
   readonly name: string;
-  /** Milliseconds the last call-prompt overlay stayed open (腰 evidence). */
-  lastCallPromptMs: number | null = null;
-  /** Milliseconds the last turn decision took (長考 evidence). */
-  lastDecisionMs: number | null = null;
-  onCallPrompt?: (ms: number, obs: Observation) => void;
-  onDecision?: (ms: number, obs: Observation) => void;
 
   #app: App;
 
@@ -182,7 +172,6 @@ export interface AppOptions {
   glyphs: GlyphMode;
   aka: ReadonlySet<Tile>;
   names: string[];
-  thinkLimitMs: number;
   /** Free allowance granted afresh at the start of every decision, ms. */
   timerTurnMs: number;
   /** One pool for the WHOLE match, drawn on only once the turn allowance is
@@ -198,6 +187,10 @@ export interface AppOptions {
   /** Where frames go. Defaults to stdout; tests pass a sink to stay quiet. */
   write?: (s: string) => void;
 }
+
+/** JIS number row → hand slot 0..12. `\\` is what most terminals send for ¥. */
+const ROW_KEYS = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "-", "^", "¥"];
+const ROW_ALIASES: Record<string, string> = { "\\": "¥" };
 
 export class App {
   readonly human: HumanPolicy;
@@ -438,10 +431,7 @@ export class App {
     const only = obs.legal.length === 1 ? obs.legal[0] : null;
     if (only && only.t === "discard" && only.tsumogiri) {
       this.phase = "idle";
-      // Contract: a forced move reports 0 ms — it took no thought, so a 長考
-      // consumer must never see the previous decision's time standing in for it.
-      this.human.lastDecisionMs = 0;
-      this.human.onDecision?.(0, obs);
+      // The clock is never started, so the move costs nothing from the bank.
       this.requestRender();
       const ms = await this.paceDelay();
       if (ms > 0) await sleep(ms);
@@ -452,7 +442,7 @@ export class App {
     this.startTicker();
 
     if (isClaim) {
-      this.overlayState = { kind: "call", openedAt: this.startedAt };
+      this.overlayState = { kind: "call" };
     } else {
       this.overlayState = null;
     }
@@ -501,8 +491,9 @@ export class App {
       bankMs: bank,
       turnLeftMs: Math.max(0, base - spent),
       bankLeftMs,
-      // Past base+bank the clock keeps running into the red. Nothing is forced:
-      // the dojo answer to slow play is the 長考 penalty, not a stolen turn.
+      // Past base+bank the clock keeps running into the red. Nothing is forced
+      // and nothing is charged: the countdown is pressure to look at, not a
+      // penalty and not a stolen turn.
       overMs: Math.max(0, overrun - this.bankLeftMs),
     };
   }
@@ -569,25 +560,13 @@ export class App {
     const elapsed = Date.now() - this.startedAt;
     // Whatever ran past this turn's allowance comes out of the match bank.
     this.bankLeftMs = Math.max(0, this.bankLeftMs - Math.max(0, elapsed - this.opts.timerTurnMs));
-    const wasClaim = this.phase === "claim";
-    const openedAt = this.overlayState?.kind === "call" ? this.overlayState.openedAt : null;
 
     const resolve = this.resolver;
-    const obs = this.obs;
     this.resolver = null;
     this.phase = "idle";
     this.riichiArmed = false;
     this.overlayState = null;
     this.stopTicker();
-
-    this.human.lastDecisionMs = elapsed;
-    this.human.onDecision?.(elapsed, obs);
-    if (wasClaim) {
-      // 腰: how long the player hovered over a call. Recorded, never punished here.
-      const ms = openedAt !== null ? Date.now() - openedAt : elapsed;
-      this.human.lastCallPromptMs = ms;
-      this.human.onCallPrompt?.(ms, obs);
-    }
 
     this.requestRender();
     resolve(action);
@@ -829,14 +808,38 @@ export class App {
         else this.message = "和了できません";
         return;
       }
-      default:
-        if (/^[0-9]$/.test(k.name)) {
-          const i = k.name === "0" ? this.drawnIndex : Number(k.name) - 1;
-          if (i >= 0 && i < this.slots.length && this.selectable[i]) this.cursor = i;
+      default: {
+        const i = ROW_KEYS.indexOf(ROW_ALIASES[k.name] ?? k.name);
+        if (i >= 0) {
+          this.rowKey(i);
           return;
         }
         this.idleKey(k);
+      }
     }
+  }
+
+  /**
+   * The number row, one keystroke per discard. JIS layout: 1-9, 0, -, ^, ¥
+   * are thirteen keys in a line, exactly a hand's width, read left to right
+   * like the tiles on screen; the drawn tile stays on `t`. The key DISCARDS
+   * rather than moving the cursor: cursor-then-Enter is what made the TUI
+   * slow to play, and Enter/←→ remain for anyone who wants to look first.
+   * A slot the referee would not let go (riichi armed, not a legal discard)
+   * says so instead of doing nothing.
+   */
+  private rowKey(i: number): void {
+    if (i >= this.slots.length || i === this.drawnIndex) {
+      this.message = "その位置に牌はありません (ツモ切りは t)";
+      return;
+    }
+    if (!this.selectable[i]) {
+      this.cursor = i;
+      this.message = this.riichiArmed ? "その牌ではリーチできません" : "その牌は切れません";
+      return;
+    }
+    this.cursor = i;
+    this.submit(this.findDiscard(this.slots[i]));
   }
 
   private overlayKey(k: KeyEvent): void {
@@ -920,9 +923,7 @@ export class App {
   private closeOverlay(): void {
     // Returning from an informational overlay during a claim must restore the
     // call prompt, or the player would be left with no way to answer it.
-    this.overlayState = this.phase === "claim" && this.resolver
-      ? { kind: "call", openedAt: this.startedAt }
-      : null;
+    this.overlayState = this.phase === "claim" && this.resolver ? { kind: "call" } : null;
   }
 
   /** `runMatch` does not expose its Table, so this dumps what the seat can see. */

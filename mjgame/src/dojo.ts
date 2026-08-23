@@ -13,17 +13,9 @@ import type { Table } from "./table.ts";
 import type { Action, RoundOutcome, Seat } from "./types.ts";
 import { SEATS } from "./types.ts";
 
-export interface Timing {
-  elapsedMs: number;
-  /** How long a call prompt sat open before being dismissed — the 腰 signal. */
-  callPromptMs?: number;
-}
-
 export interface DojoHooksOptions {
   dojo: DojoConfig;
   oracle?: WinOracle;
-  /** Supplied by the TUI; headless play has no timing signal, by design. */
-  timing?: (seat: Seat) => Timing | undefined;
 }
 
 function hooksFor(action: Action): Hook[] {
@@ -56,7 +48,6 @@ export function dojoHooks(opts: DojoHooksOptions) {
     cfg: t.cfg,
     dojo: opts.dojo,
     oracle,
-    timing: opts.timing?.(seat),
   });
 
   return {
@@ -85,9 +76,7 @@ export function dojoHooks(opts: DojoHooksOptions) {
  *
  * `dojo` is deliberately a parameter: it must be the same config the round is
  * run with, or the ledger would judge by rules the round was not played under.
- * `timing` is the TUI's stopwatch, and only the TUI has one — headless play
- * leaves it out and the Tier-B 長考/腰 rules stay silent, by design.
  */
-export function makeDojoHooks(dojo: DojoConfig, timing?: (seat: Seat) => Timing | undefined) {
-  return dojoHooks({ dojo, oracle: scorer, timing });
+export function makeDojoHooks(dojo: DojoConfig) {
+  return dojoHooks({ dojo, oracle: scorer });
 }

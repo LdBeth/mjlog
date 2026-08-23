@@ -18,7 +18,6 @@ import {
   GREEN_TYPES,
   isHonor,
   isYaochu,
-  sujiTypes,
   TERMINAL_TYPES,
   WIND_TYPES,
 } from "../tiles.ts";
@@ -549,53 +548,10 @@ const underEightThousand: DojoRule = {
 
 // --- Tier B -----------------------------------------------------------------
 
-const koshi: DojoRule = {
-  id: "koshi",
-  label: "腰",
-  tier: "B",
-  points: PENALTY.light,
-  // 腰 is a call-time signal only: the body reads `action.called`, so a
-  // post-discard registration could never do anything but pay for a predicate
-  // call per candidate discard.
-  hooks: ["on-call"],
-  check(ctx) {
-    const { t, seat, timing } = ctx;
-    const ms = timing?.callPromptMs;
-    if (ms === undefined || ms < ctx.dojo.koshiMs) return null;
-    // The information leak the rule punishes is real here: the caller visibly
-    // considered the tile. Block ron on it and its suji for the round.
-    const tile = ctx.action.t === "pon" || ctx.action.t === "chi"
-      ? tileType(ctx.action.called)
-      : null;
-    if (tile === null) return null;
-    for (const ty of [tile, ...sujiTypes(tile)]) t.ronBlocked[seat].add(ty);
-    return [{
-      detail: `鳴きの判断に ${ms}ms 掛かった。当該牌とそのスジは出和了不可`,
-      confidence: 0.7,
-    }];
-  },
-};
-
-const chouko: DojoRule = {
-  id: "chouko",
-  label: "長考",
-  tier: "B",
-  points: PENALTY.light,
-  hooks: ["post-discard", "on-call", "on-kan", "on-riichi"],
-  check(ctx) {
-    const ms = ctx.timing?.elapsedMs;
-    if (ms === undefined || ms <= ctx.dojo.thinkLimitMs) return null;
-    const hard = ms > ctx.dojo.thinkHardMs;
-    return [{
-      label: hard ? "大長考" : "長考",
-      points: hard ? PENALTY.medium : PENALTY.light,
-      detail: `打牌に ${(ms / 1000).toFixed(1)}秒 掛かった (規範 ${
-        ctx.dojo.thinkLimitMs / 1000
-      }秒)`,
-      confidence: 1,
-    }];
-  },
-};
+// 長考 (`chouko`) and 腰 (`koshi`) used to live here. Removed 2026-08-23: both
+// priced wall-clock hesitation, which only a human at the TUI could ever
+// produce, and a keyboard interface cannot meet a physical table's 3秒/1.2秒
+// norms. See CLAUDE.md before considering a re-add.
 
 const ukiCrush: DojoRule = {
   id: "uki-crush",
@@ -661,8 +617,6 @@ export const RULES: DojoRule[] = [
   hikkakeRiichi,
   yakumanRelated,
   underEightThousand,
-  koshi,
-  chouko,
   ukiCrush,
   misehai,
 ];

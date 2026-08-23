@@ -1,6 +1,7 @@
 // The decision countdown: a fresh allowance each turn, plus one match bank.
-// It is informational — running out costs 評価点 (the 長考 penalty), never the
-// turn itself. A single-player game must not have moves taken away from it.
+// It is informational — running out costs nothing at all (no rule prices
+// the clock) and never costs the turn itself. A single-player game must not
+// have moves taken away from it.
 
 import { assert, assertEquals } from "@std/assert";
 import type { Tile } from "mjrender/model.ts";
@@ -17,7 +18,6 @@ function app(turnMs: number, bankMs: number): App {
     glyphs: "ascii",
     aka: JANKI.akaIds,
     names: ["あなた", "CPU東", "CPU南", "CPU西"],
-    thinkLimitMs: 3000,
     timerTurnMs: turnMs,
     timerBankMs: bankMs,
     cpuDelayMs: 0,
@@ -202,25 +202,22 @@ Deno.test("timer: a forced move plays itself and costs no time", async () => {
   a.stop();
 });
 
-Deno.test("timer: a forced move reports 0ms, never the previous decision's time", async () => {
-  const a = app(60, 200);
-  const seen: number[] = [];
-  a.human.onDecision = (ms) => seen.push(ms);
-
-  // A real decision first, so there is a stale time to be inherited.
+Deno.test("timer: a forced move after a slow one still costs nothing", async () => {
+  const a = app(20, 200);
+  // A real, deliberately overlong decision first, so there is a spent clock the
+  // forced move could wrongly inherit.
   const p = a.awaitDecision(turnObs());
-  await sleep(40);
+  await sleep(60);
   a.feed("t");
   await p;
-  assert(a.human.lastDecisionMs! > 0, "a real decision takes real time");
+  const spent = 200 - a.bankRemainingMs();
+  assert(spent > 0, "an overlong decision draws on the bank");
 
   const obs = turnObs();
   const only = obs.legal.find((x) => x.t === "discard" && x.tile === obs.drawn)!;
   await a.awaitDecision({ ...obs, riichi: [true, false, false, false], legal: [only] });
 
-  assertEquals(a.human.lastDecisionMs, 0, "a forced move takes no thought");
-  assertEquals(seen.length, 2, "the forced move is still reported to the timing consumer");
-  assertEquals(seen[1], 0);
+  assertEquals(a.bankRemainingMs(), 200 - spent, "the forced move spent nothing of its own");
   a.stop();
 });
 

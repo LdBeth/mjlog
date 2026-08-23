@@ -9,7 +9,6 @@
 // users, so this module deliberately re-exports nothing.
 
 import type { Tile } from "mjrender/model.ts";
-import { rankOfType } from "mjrender/tiles.ts";
 
 /**
  * 雀鬼会 aka set: 赤5筒 ×2. 5p is type 13, so its four copies are ids 52..55;
@@ -57,19 +56,6 @@ export const YAOCHU_TYPES: readonly number[] = [
 ];
 /** 緑一色 tiles: 2,3,4,6,8 sou + 發. */
 export const GREEN_TYPES: readonly number[] = [19, 20, 21, 23, 25, 32];
-
-/**
- * Suji partners of a tile type: the tiles 3 ranks away in the same suit.
- * Honors have none. Used by the 即引っかけ and 腰 penalty rules.
- */
-export function sujiTypes(type: number): number[] {
-  if (isHonor(type)) return [];
-  const r = rankOfType(type);
-  const out: number[] = [];
-  if (r > 3) out.push(type - 3);
-  if (r < 7) out.push(type + 3);
-  return out;
-}
 
 /** 34-length zero vector. */
 export function zeros34(): number[] {

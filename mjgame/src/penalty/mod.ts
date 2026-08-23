@@ -35,8 +35,6 @@ export interface RuleCtx {
   cfg: RuleConfig;
   dojo: DojoConfig;
   oracle: WinOracle;
-  /** Wall-clock the seat took to decide; only present for a human at a TUI. */
-  timing?: { elapsedMs: number; callPromptMs?: number };
 }
 
 export interface DojoRule {

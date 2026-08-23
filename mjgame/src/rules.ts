@@ -91,7 +91,7 @@ export const JANKI: RuleConfig = {
 
 /** 評価点マイナス weight classes. The real dojo's schedule is not published. */
 export const PENALTY = {
-  light: 1, // 長考, 第一打字牌切り
+  light: 1, // 第一打字牌切り, 見せ牌
   medium: 3, // 不聴時ドラ切り, 後付け, 明槓
   heavy: 5, // 立直禁止違反, 役満関連牌切り
   forfeit: 10, // 和了放棄
@@ -101,12 +101,6 @@ export interface DojoConfig {
   enabled: boolean;
   /** Run the approximate (judgment-requiring) rules. Off for RL training. */
   tierB: boolean;
-  /** 打牌 norm; over this is 長考. */
-  thinkLimitMs: number;
-  /** Over this is 大長考. */
-  thinkHardMs: number;
-  /** Hesitating this long over a call prompt counts as 腰. */
-  koshiMs: number;
   /** Whether the CPU policies try to play dojo-clean. */
   aiObeysRules: boolean;
   /** Per-rule 評価点 overrides, keyed by RuleId. */
@@ -116,14 +110,11 @@ export interface DojoConfig {
 export const DOJO_DEFAULT: DojoConfig = {
   enabled: true,
   tierB: true,
-  thinkLimitMs: 3000,
-  thinkHardMs: 4000,
-  koshiMs: 1200,
   aiObeysRules: true,
   weights: {},
 };
 
-/** Config for headless self-play: deterministic rules only, no timing signals. */
+/** Config for headless self-play: exact rules only, no judgment calls. */
 export const DOJO_HEADLESS: DojoConfig = {
   ...DOJO_DEFAULT,
   tierB: false,

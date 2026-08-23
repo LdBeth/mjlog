@@ -24,7 +24,7 @@ export type Overlay =
   /** A numbered menu: kan shapes, or a disambiguation between equally-shaped
    *  calls (chi shapes, or pon pairs differing only in an aka five). */
   | { kind: "pick"; options: Action[]; title: string }
-  | { kind: "call"; openedAt: number }
+  | { kind: "call" }
   | { kind: "quit" }
   | { kind: "text"; title: string; body: Line[]; footer: string };
 
@@ -493,6 +493,7 @@ export function actionBar(ctx: Ctx, w: number): Line {
   const parts = [
     "←→ 選択",
     "Enter 打牌",
+    "1-9 0-^¥ 即打牌",
     "t ツモ切り",
     canRiichi ? "r リーチ" : "",
     canKan ? "k カン" : "",
@@ -617,7 +618,7 @@ function dangerBody(ctx: Ctx): Line[] {
 function helpBody(): Line[] {
   const rows: Array<[string, string]> = [
     ["← → / h l", "手牌カーソル移動"],
-    ["1-9 0", "位置を直接指定 (0 = ツモ牌)"],
+    ["1-9 0 - ^ ¥", "その位置の牌を即打牌 (数字列の左から13枚; JIS配列の一列)"],
     ["Enter / Space", "カーソルの牌を打牌"],
     ["t", "ツモ切り"],
     ["r", "リーチ宣言を準備 (Esc で解除)"],

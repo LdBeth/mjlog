@@ -20,7 +20,6 @@ function app(noIntro: boolean, sink: string[]): App {
     glyphs: "ascii",
     aka: JANKI.akaIds,
     names: ["あなた", "CPU東", "CPU南", "CPU西"],
-    thinkLimitMs: 3000,
     timerTurnMs: 3_000, // the shipping defaults: 3s a turn, 10s for the match
     timerBankMs: 10_000,
     cpuDelayMs: 0,

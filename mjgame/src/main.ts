@@ -12,7 +12,6 @@ import type { Args } from "./cli/args.ts";
 import { die } from "./cli/die.ts";
 import { USAGE } from "./cli/usage.ts";
 import { makeDojoHooks } from "./dojo.ts";
-import type { Timing } from "./dojo.ts";
 import { writeExport } from "./export.ts";
 import { headless, headlessParallel, makePolicy } from "./harness.ts";
 import type { HeadlessOptions, RunReport, SeatPolicy } from "./harness.ts";
@@ -88,7 +87,6 @@ async function cmdPlay(a: Args): Promise<void> {
     glyphs: a.glyphs,
     aka: JANKI.akaIds,
     names,
-    thinkLimitMs: DOJO_DEFAULT.thinkLimitMs,
     timerTurnMs: a.timerTurn,
     timerBankMs: a.timerBank,
     cpuDelayMs: Math.max(0, a.speed),
@@ -111,22 +109,6 @@ async function cmdPlay(a: Args): Promise<void> {
     return new PacedPolicy(cpu.policy, () => app.paceDelay());
   });
 
-  /**
-   * The dojo's stopwatch. The TUI is the only driver that HAS one — it measures
-   * how long the human sat on a decision (長考) and how long a call prompt stayed
-   * open before being dismissed (腰) — and a CPU has nothing to answer with, so
-   * the Tier-B rules simply never fire on the other three seats.
-   *
-   * Both numbers belong to the decision just committed: `App.submit` writes them
-   * before resolving the action, and the hooks run on that same action.
-   */
-  const timing = (seat: Seat): Timing | undefined => {
-    if (seat !== humanSeat) return undefined;
-    const elapsedMs = app.human.lastDecisionMs;
-    if (elapsedMs === null) return undefined;
-    return { elapsedMs, callPromptMs: app.human.lastCallPromptMs ?? undefined };
-  };
-
   // Written after the alt-screen is gone, so the path (or the failure to write
   // it) is still on screen when the process exits.
   let result: MatchResult | undefined;
@@ -142,7 +124,7 @@ async function cmdPlay(a: Args): Promise<void> {
       // Every public event, including each `violation` the hooks below file,
       // reaches the UI here — that is what fills the 違反台帳 panel.
       sink: (e) => app.onEvent(e),
-      ...makeDojoHooks(DOJO_DEFAULT, timing),
+      ...makeDojoHooks(DOJO_DEFAULT),
     });
     await app.showFinal(result);
   } finally {
