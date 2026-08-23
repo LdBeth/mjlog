@@ -690,6 +690,24 @@ export class AugmentedHeuristic extends HeuristicPolicy {
     return p;
   }
 
+  /**
+   * WHO is ready, per seat, instead of the rule of thumb — the per-seat mirror
+   * of the `pressureOf` override above, and there for M11: the own-hand value
+   * model's survival term asks how much of the table is tenpai, and `tenpaiP` is
+   * that answer by construction. A declared riichi is a public fact and outranks
+   * any estimate, exactly as in `pressureOf`; absent `tenpaiP` the base policy's
+   * riichi/副露 reading stands, which is what keeps an un-read seat identical.
+   */
+  protected override threatOf(obs: Observation): number[] {
+    const tenpaiP = this.reads?.tenpaiP;
+    if (!tenpaiP) return super.threatOf(obs);
+    const out = [0, 0, 0];
+    for (let i = 0; i < 3; i++) {
+      out[i] = clamp(Math.max(tenpaiP[i], obs.riichi[i + 1] ? 1 : 0), 0, 1);
+    }
+    return out;
+  }
+
   /** The 8000点 buffer measured against what a deal-in would ACTUALLY cost. */
   protected override bufferScale(obs: Observation, expectedLoss = ASSUMED_LOSS): number {
     const tenpaiP = this.reads?.tenpaiP;

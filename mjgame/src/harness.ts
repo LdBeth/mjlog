@@ -31,6 +31,9 @@ import { computedReads } from "./ai/computed.ts";
 import type { ComputedTraceRef, ComputedWeights } from "./ai/computed.ts";
 import { parseConsumerParams } from "./ai/consumer.ts";
 import type { ConsumerParams } from "./ai/consumer.ts";
+import type { HandCalibrationWriter, HandSample } from "./ai/handcalib.ts";
+import { mergeHand } from "./ai/handvalue.ts";
+import type { HandWeights } from "./ai/handvalue.ts";
 import { DEFAULT_STANDINGS_WEIGHTS } from "./ai/standings.ts";
 import { die } from "./cli/die.ts";
 import { makeDojoHooks } from "./dojo.ts";
@@ -45,7 +48,7 @@ import { DOJO_HEADLESS, JANKI } from "./rules.ts";
 import { scorer } from "./score.ts";
 import type { Table } from "./table.ts";
 import { SEATS } from "./types.ts";
-import type { Seat } from "./types.ts";
+import type { RoundOutcome, Seat } from "./types.ts";
 
 /** Where `--weights` points by default: what the trainer writes. */
 export const DEFAULT_WEIGHTS = "weights/manifest.json";
@@ -74,6 +77,13 @@ export interface KTune {
   heuristic?: Partial<HeuristicWeights>;
   augment?: Partial<AugmentedWeights>;
   computed?: Partial<ComputedWeights>;
+  /**
+   * M11's 手牌価値 scalars. ABSENT means the model is off and the heuristic
+   * family plays the game it has always played — so this section, unlike the
+   * three above, is what SWITCHES a behaviour on rather than retuning one.
+   * `scripts/hand_fit.ts` writes a file whose only key is this one.
+   */
+  hand?: Partial<HandWeights>;
 }
 
 /**
@@ -94,11 +104,13 @@ export function loadKtune(path: string, flag = "--ktune"): KTune {
     return die(`${flag} のJSONが壊れています: ${path}\n${e instanceof Error ? e.message : e}`);
   }
   if (typeof json !== "object" || json === null || Array.isArray(json)) {
-    die(`${flag} はオブジェクト {heuristic, augment, computed} である必要があります: ${path}`);
+    die(
+      `${flag} はオブジェクト {heuristic, augment, computed, hand} である必要があります: ${path}`,
+    );
   }
   // Sections only — the contents pass through verbatim.
   const k = json as KTune;
-  return { heuristic: k.heuristic, augment: k.augment, computed: k.computed };
+  return { heuristic: k.heuristic, augment: k.augment, computed: k.computed, hand: k.hand };
 }
 
 /**
@@ -155,6 +167,12 @@ export interface MakePolicyOptions {
   curriculum?: number;
   /** M10a: where a "k" seat's calibration records go. */
   calibrate?: (rec: CalibRecord) => void;
+  /**
+   * M11: where this seat's 手牌価値 samples go. Unlike `calibrate` it needs no
+   * tap on the Table — the prediction is a function of the Observation, and the
+   * LABEL arrives later, from the round outcome, through the writer.
+   */
+  handSink?: (rec: HandSample) => void;
 }
 
 /**
@@ -209,6 +227,13 @@ export function makePolicy(o: MakePolicyOptions): SeatPolicy {
   // seat is allowed to (see `headless`), because a layer applied to every seat at
   // once would move both sides of a paired measurement.
   const rank = o.standings ? { standings: DEFAULT_STANDINGS_WEIGHTS } : undefined;
+  // M11 手牌価値. The one `--ktune` section that reaches an "h" seat as well as a
+  // "k" one, deliberately: it is not a 感性 vector but a decision MODEL, and the
+  // thing it replaces (the push table, the linear dora term) is code both seat
+  // kinds share — so withholding it from "h" would leave the model untestable
+  // against the baseline it is meant to beat. Absent (no `hand` section in the
+  // file) it stays undefined and neither seat kind changes by a single bit.
+  const hand = o.ktune?.hand && mergeHand(o.ktune.hand);
   if (kind === "r") return reseeded(new RandomPolicy(name, seed));
   if (kind === "k") {
     // 計算. The same consumption terms as an "o" seat, fed by exact counting
@@ -273,6 +298,8 @@ export function makePolicy(o: MakePolicyOptions): SeatPolicy {
         // decides what the evidence says (`riskOf`'s ladder, the fold scales,
         // the 計算 reader's own constants).
         consumer: o.consumer,
+        hand,
+        handSink: o.handSink,
       }));
   }
   if (kind === "o") {
@@ -308,7 +335,14 @@ export function makePolicy(o: MakePolicyOptions): SeatPolicy {
     // The one seat kind that holds memory the process does not free on its own.
     return { policy: p, reset: (s) => p.reset(s), close: () => p.close() };
   }
-  return reseeded(new HeuristicPolicy(name, seed, { weights: rank, consumer: o.consumer }));
+  return reseeded(
+    new HeuristicPolicy(name, seed, {
+      weights: rank,
+      consumer: o.consumer,
+      hand,
+      handSink: o.handSink,
+    }),
+  );
 }
 
 export interface HeadlessOptions {
@@ -395,6 +429,19 @@ export interface HeadlessOptions {
    * `record` follows.
    */
   calibrate?: CalibrationWriter;
+  /**
+   * M11: SEAT 0's 手牌価値 recorder, one file for the whole run.
+   *
+   * A WRITER and not a path, for `calibrate`'s reason (a path would truncate at
+   * every seed of a `paired` run) plus one of its own: a sample is only half a
+   * record when the policy emits it. The label — did that hand cash, for how
+   * much, did it deal in instead — is written by `endRound`, so the writer has
+   * to be the object that spans the decision AND the outcome.
+   *
+   * Honoured for a "k" OR an "h" seat 0, unlike `calibrate`: the model is
+   * heuristic-family code, and the pre-fit lane is played by plain `hhhh`.
+   */
+  handCalib?: HandCalibrationWriter;
 }
 
 /**
@@ -418,6 +465,8 @@ export interface Arm {
   readonly tableRef: { t: Table | null } | undefined;
   /** Set only when seat 0 is a "k" seat under a calibration run. */
   readonly calibrate: CalibrationWriter | undefined;
+  /** Set only when seat 0 is a heuristic-family seat under a 手牌価値 lane. */
+  readonly handCalib: HandCalibrationWriter | undefined;
 }
 
 export function openArm(seats: string, opts: HeadlessOptions = {}): Arm {
@@ -436,6 +485,9 @@ export function openArm(seats: string, opts: HeadlessOptions = {}): Arm {
   const curriculumOn = opts.curriculum !== undefined && seats[0] === "k";
   // …and so does the calibration recorder, for the truth half of its records.
   const calibrateOn = opts.calibrate !== undefined && seats[0] === "k";
+  // M11's lane. No tap needed — the writer reads the Table through `onRoundEnd`
+  // — and "h" qualifies as well as "k": the pre-fit lane is plain `hhhh`.
+  const handCalibOn = opts.handCalib !== undefined && (seats[0] === "k" || seats[0] === "h");
   const wiring: OracleWiring = {
     get: () => ref.t,
     channels: opts.oracle ?? new Set(),
@@ -458,6 +510,7 @@ export function openArm(seats: string, opts: HeadlessOptions = {}): Arm {
       consumer: seat === 0 ? opts.consumer : undefined,
       curriculum: seat === 0 ? opts.curriculum : undefined,
       calibrate: calibrateOn && seat === 0 ? opts.calibrate!.record : undefined,
+      handSink: handCalibOn && seat === 0 ? opts.handCalib!.record : undefined,
     })
   );
   // Record ONLY neural seats: ppo.py recomputes behavior logp from --init, so a
@@ -479,6 +532,7 @@ export function openArm(seats: string, opts: HeadlessOptions = {}): Arm {
     ref,
     tableRef: writer || oracleSeats || curriculumOn || calibrateOn ? ref : undefined,
     calibrate: calibrateOn ? opts.calibrate : undefined,
+    handCalib: handCalibOn ? opts.handCalib : undefined,
   };
 }
 
@@ -489,16 +543,31 @@ export function openArm(seats: string, opts: HeadlessOptions = {}): Arm {
  */
 export function playGame(arm: Arm, seed: number): MatchResult {
   arm.calibrate?.beginGame(seed);
+  arm.handCalib?.beginGame(seed);
   for (const seat of SEATS) arm.built[seat].reset(seed * 4 + seat);
   // Without the hooks the ledger is always empty and the stats line would
   // report "違反 0件" no matter what actually happened.
+  const hooks = makeDojoHooks(DOJO_HEADLESS);
+  // M11's labels are attached at the end of the 局, and `onRoundEnd` is the one
+  // seam that sees it — so the recorder is COMPOSED onto the dojo's hook rather
+  // than replacing it, and strictly after it: the ledger entries the referee
+  // adds there are part of the outcome the samples are labelled against.
+  const handCalib = arm.handCalib;
   const r = runMatchSync(arm.policies, {
     seed,
     cfg: JANKI,
     dojo: DOJO_HEADLESS,
     scorer,
     tableRef: arm.tableRef,
-    ...makeDojoHooks(DOJO_HEADLESS),
+    ...hooks,
+    ...(handCalib
+      ? {
+        onRoundEnd: (t: Table, outcome: RoundOutcome) => {
+          hooks.onRoundEnd(t, outcome);
+          handCalib.endRound(t, outcome);
+        },
+      }
+      : {}),
   });
   // Round and match lines close the match out: a policy never sees a result, so
   // only the driver can write them.
@@ -588,7 +657,7 @@ export function headless(
  */
 export type ArmSpec = Omit<
   HeadlessOptions,
-  "record" | "writer" | "calibrate" | "ktuneB" | "consumerB"
+  "record" | "writer" | "calibrate" | "handCalib" | "ktuneB" | "consumerB"
 >;
 
 /** The one message a worker receives: its arm, and the games it owns. */
@@ -664,7 +733,9 @@ function launchShard(
  *
  * `opts.calibrate` is NOT accepted (the CLI refuses the combination): the
  * recorder is a live writer fed from inside a decision, and there is no
- * per-game seam to buffer it at.
+ * per-game seam to buffer it at. `opts.handCalib` is refused for the same
+ * reason, and for one more: its samples are only labelled at `onRoundEnd`, so
+ * even a per-game buffer would have to cross the worker boundary half-written.
  */
 export async function headlessParallel(
   games: number,
@@ -674,8 +745,17 @@ export async function headlessParallel(
   opts: HeadlessOptions = {},
 ): Promise<RunReport> {
   if (opts.calibrate) throw new Error("headlessParallel: --calibrate cannot be sharded");
+  if (opts.handCalib) throw new Error("headlessParallel: --handcalib cannot be sharded");
   const n = Math.max(1, Math.min(Math.floor(jobs), games));
-  const { record, writer: _w, calibrate: _c, ktuneB: _kb, consumerB: _cb, ...spec } = opts;
+  const {
+    record,
+    writer: _w,
+    calibrate: _c,
+    handCalib: _hc,
+    ktuneB: _kb,
+    consumerB: _cb,
+    ...spec
+  } = opts;
   const results: MatchResult[] = new Array(games);
   // The trajectory file is opened HERE, once, and written in game order.
   const writer = record ? new TrajectoryWriter(record) : null;

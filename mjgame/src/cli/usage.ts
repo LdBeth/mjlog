@@ -97,6 +97,19 @@ export const USAGE = `mjgame — 雀鬼流ルールの4人麻雀 (人間1 + CPU3
                       集合/打点。パラメータを変えた再評価は再対局なしで閉じた式で
                       できる。読むのは scripts/calibrate_report.ts。
                       1半荘あたり約220KB (判断190行) — 出力先は作業用ディレクトリに
+  --handcalib=PATH    M11: 席0 (k席 か h席) の自摸番ごとに「手牌価値の読み」と
+                      「その局の結末」を対にした較正記録を JSONL で書き出す。
+                      --calibrate の裏返し — あちらは他家3人について読んだことを、
+                      こちらは自分の手について信じたことを採点する。
+                      selfplay / paired 専用で、paired では A腕だけ。打牌は一切
+                      変わらない (記録は out-param)。
+                      1行1自摸番: 選んだ13枚形の HandFacts (向聴・受入・未見枚数・
+                      ドラ・役牌・他家の聴牌読み …すべてパラメータ非依存) と
+                      handOutlook の答え、そして局の結末 (和了/放銃/流局・実収支・
+                      終局巡目)。札は局単位なので記録は局末までバッファされる。
+                      1半荘あたり約30KB (自摸番120行)。
+                      読むのは scripts/hand_report.ts、当てはめは scripts/hand_fit.ts。
+                      --jobs とは併用不可
   --export=PATH       打った半荘を天鳳形式の牌譜XMLで書き出す (play / selfplay 専用)。
                       PATH は拡張子なしの基底名 (.xml で終えればそのまま使う)。
                       同じ基底名で .mjgame.json も並べて書く — 天鳳XMLに載らない
@@ -110,7 +123,8 @@ export const USAGE = `mjgame — 雀鬼流ルールの4人麻雀 (人間1 + CPU3
                       軌跡JSONL・--export の牌譜・表示される表はすべて
                       --jobs=1 とバイト単位で同一 (違うのは所要時間の行だけ)。
                       --games より大きい N は --games に丸める。
-                      --record / --export とは併用可、--calibrate とは併用不可
+                      --record / --export とは併用可、
+                      --calibrate / --handcalib とは併用不可
   --json              paired の結果を1行のJSONで出す (表の代わり)。
                       scripts/tune.ts が読む機械可読出力
   --weights=PATH      n席が読む manifest.json (既定 weights/manifest.json)。

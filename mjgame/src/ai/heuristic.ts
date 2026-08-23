@@ -37,6 +37,9 @@ import type { ConsumerParams } from "./consumer.ts";
 import { scoreDiscard as consumeEvidence } from "./consumer.ts";
 import type { ContextEvidence, EvidenceHooks } from "./evidence.ts";
 import { assembleCandidate, assembleContext } from "./evidence.ts";
+import type { HandSample } from "./handcalib.ts";
+import type { HandFacts, HandOutlook, HandWeights } from "./handvalue.ts";
+import { DEFAULT_HAND, handOutlook } from "./handvalue.ts";
 import { doraTypesOf, publicUnseen, valueHonorsOf } from "./planner.ts";
 import type { StandingsWeights } from "./standings.ts";
 import { standingsScales } from "./standings.ts";
@@ -138,6 +141,46 @@ export interface HeuristicOptions {
    * paths agree exactly.
    */
   consumer?: ConsumerParams;
+  /**
+   * M11. 手牌価値 — the own-hand value model of `handvalue.ts`, already merged.
+   * ABSENT BY DEFAULT, and absent means every number below is the one this class
+   * has always produced, bit for bit: the push table, the dealer nudge, the
+   * late-junme zeroing and the linear dora term only step aside for a `hand`
+   * block. Present, it replaces exactly two things — what the push/fold gate
+   * calls "how much this hand is worth carrying forward", and the value half of
+   * the discard score — with `pwin × points` computed by ONE function that the
+   * offline fit also calls.
+   */
+  hand?: HandWeights;
+  /**
+   * M11's recorder, one sample per turn decision (`handcalib.ts` labels them
+   * from the outcome of the 局).
+   *
+   * DELIBERATELY INDEPENDENT of `hand`: the lane that fits the model has to be
+   * played by the seat that ships, which — before the first fit — is the seat
+   * with no `hand` block at all. So the sink watches a policy it does not move,
+   * and the samples it emits are evaluated under `DEFAULT_HAND` when no weights
+   * were given, which is exactly the header a writer records.
+   */
+  handSink?: (rec: HandSample) => void;
+}
+
+/**
+ * What `outlookOf`'s caller already knows about the shape it is asking about.
+ *
+ * Exported because the hook is protected and a subclass cannot name its
+ * parameter type otherwise.
+ */
+export interface OutlookOpts {
+  /**
+   * The discard that produced the 13-tile shape. It is the per-decision cache
+   * key, and the way to `discardInfo` — which is where 後付け (a tenpai nobody
+   * can ron) is recorded. Absent at the fold gate of a claim decision, where the
+   * resting shape is simply the hand.
+   */
+  tile?: Tile;
+  /** The live ukeire count and its breadth, when the caller has already paid for them. */
+  ukeire?: { live: number; types: number };
 }
 
 /**
@@ -205,6 +248,42 @@ interface DecisionMemo {
   buffer?: number;
   standings?: { gain: number; risk: number };
   fold?: boolean;
+  /** M11: `threatOf`, the per-seat half of `pressure`. */
+  threat?: number[];
+  /** M11: the board facts every `HandFacts` of this decision is built from. */
+  basis?: HandBasis;
+  /** M11: one entry per resting shape, keyed by the discard that produced it. */
+  outlooks?: Map<number, HandEntry>;
+}
+
+/**
+ * M11. Everything a `HandFacts` needs that is a property of the BOARD rather
+ * than of the candidate discard, assembled once per decision — the fold gate and
+ * every discard candidate ask the same questions of it.
+ *
+ * Four of these fields shadow `Ctx`'s, and that is not an oversight: the gate is
+ * one of the two callers and runs BEFORE a `Ctx` exists, since `Ctx.folding` is
+ * precisely what the gate decides. Built lazily, so a policy with no `hand` and
+ * no `handSink` never pays for a line of it.
+ */
+interface HandBasis {
+  /** Melds INCLUDING ankan — what `shanten`/`ukeireTypes` count. */
+  melds: number;
+  /** Melds EXCLUDING ankan — what "open" means to the value model. */
+  open: number;
+  closed: boolean;
+  doraTypes: Set<number>;
+  valueHonors: Set<number>;
+  unseen: number[];
+  unseenTotal: number;
+  /** Dora (aka included) sitting in our own melds: constant across candidates. */
+  meldDora: number;
+}
+
+/** M11: one resting shape's facts, and the model's verdict on them. */
+interface HandEntry {
+  facts: HandFacts;
+  out: HandOutlook;
 }
 
 export class HeuristicPolicy implements SyncPolicy {
@@ -217,6 +296,15 @@ export class HeuristicPolicy implements SyncPolicy {
   private rng: Rng;
   /** M9's learned consumer, or null for the hand-written score. */
   private consumer: ConsumerParams | null;
+  /** M11's model, or null for the push table and the linear dora term. */
+  private hand: HandWeights | null;
+  /**
+   * The weights the RECORDER evaluates under. Identical to `hand` when one was
+   * given; `DEFAULT_HAND` when none was, so a lane recorded off an unmodified
+   * seat still carries a well-defined prediction to fit against.
+   */
+  private handW: HandWeights;
+  private handSink: ((rec: HandSample) => void) | null;
   private memo: DecisionMemo | null = null;
 
   constructor(name: string, seed: number, opts: HeuristicOptions = {}) {
@@ -233,6 +321,9 @@ export class HeuristicPolicy implements SyncPolicy {
     this.dojo = opts.dojo ?? true;
     this.epsilon = opts.epsilon ?? 0;
     this.consumer = opts.consumer ?? null;
+    this.hand = opts.hand ?? null;
+    this.handW = opts.hand ?? DEFAULT_HAND;
+    this.handSink = opts.handSink ?? null;
     this.rng = sfc32(seed);
   }
 
@@ -277,6 +368,12 @@ export class HeuristicPolicy implements SyncPolicy {
   private buffer(obs: Observation): number {
     const m = this.cache(obs);
     return m.buffer ??= this.bufferScale(obs);
+  }
+
+  /** `threatOf`, once per decision. */
+  private threat(obs: Observation): number[] {
+    const m = this.cache(obs);
+    return m.threat ??= this.threatOf(obs);
   }
 
   decide(obs: Observation): Action {
@@ -416,12 +513,29 @@ export class HeuristicPolicy implements SyncPolicy {
     const pressure = this.pressure(obs);
     if (pressure === 0) return false;
 
-    let push = obs.shanten <= 0 ? 1.0 : obs.shanten === 1 ? 0.45 : obs.shanten === 2 ? 0.15 : 0;
-    push += 0.12 * obs.doraCount;
-    // Late and far from tenpai is not a hand worth defending with.
-    if (obs.shanten >= 2 && obs.junme >= 10) push = 0;
-    // A dealer has more to lose by folding (連荘) — nudge, don't override.
-    if (obs.seatWind === 27) push += 0.08;
+    let push: number;
+    if (this.hand) {
+      // M11. The table below is a four-step guess at exactly what `handOutlook`
+      // computes — P(this hand cashes) × what it cashes for — so with the model
+      // wired the guess goes and the EV comes in, divided by `pushScale` to land
+      // back in the units the comparison against `pressure` is written in.
+      //
+      // THE TWO ADJUSTMENTS GO WITH IT, and not because they were wrong: both
+      // are inside the model now, and continuously rather than as cliffs. 親 is
+      // `valueDealer` on the value; "late and far from tenpai" is `turnsLeft`
+      // (few own draws left to climb three levels) meeting `oppGrowth` (a table
+      // that has grown ready), which prices 3向聴 on 9巡目 too instead of
+      // switching at 10.
+      const r = this.restingShape(obs);
+      push = this.outlookOf(obs, r.rest, r.sh, { tile: r.tile }).ev / this.hand.pushScale;
+    } else {
+      push = obs.shanten <= 0 ? 1.0 : obs.shanten === 1 ? 0.45 : obs.shanten === 2 ? 0.15 : 0;
+      push += 0.12 * obs.doraCount;
+      // Late and far from tenpai is not a hand worth defending with.
+      if (obs.shanten >= 2 && obs.junme >= 10) push = 0;
+      // A dealer has more to lose by folding (連荘) — nudge, don't override.
+      if (obs.seatWind === 27) push += 0.08;
+    }
 
     push *= this.buffer(obs);
 
@@ -467,6 +581,218 @@ export class HeuristicPolicy implements SyncPolicy {
     }
     p += 0.5 * furoSeats.size;
     return p;
+  }
+
+  /**
+   * Threat volume BROKEN OUT PER SEAT, in relative order: 1 for a declared
+   * riichi, 0.5 for an open hand the assessor decided was a real threat, 0 for
+   * everyone else. The same two facts `pressureOf` sums, kept separate.
+   *
+   * HOOK, and it exists because M11 needs the vector rather than the scalar: the
+   * survival term asks, per own turn, whether the TABLE ends the hand first, and
+   * the answer is a function of how much of the table is ready — Σ over this,
+   * grown per turn — not of a single loudness number that also carries value.
+   * `AugmentedHeuristic` overrides it with `tenpaiP` for the same reason it
+   * overrides `pressureOf`.
+   */
+  protected threatOf(obs: Observation): number[] {
+    const out = [0, 0, 0];
+    for (let i = 0; i < 3; i++) if (obs.riichi[i + 1]) out[i] = 1;
+    // `ThreatDetail.seat` is ABSOLUTE — mjrender's assessor knows nothing of
+    // this file's relative indexing — while `obs.riichi` is relative. This is
+    // the conversion, the same one `observe.ts` makes for the ledger counts.
+    for (const d of obs.danger.values()) {
+      for (const detail of d.details) {
+        if (detail.kind !== "furo") continue;
+        const i = (detail.seat - obs.seat + 4) % 4 - 1;
+        if (i >= 0 && out[i] < 0.5) out[i] = 0.5;
+      }
+    }
+    return out;
+  }
+
+  // ------------------------------------------------------------ 手牌価値 (M11)
+
+  /** M11's per-decision board facts. Built on demand; never when M11 is off. */
+  private basisOf(obs: Observation): HandBasis {
+    const m = this.cache(obs);
+    if (m.basis) return m.basis;
+    const unseen = publicUnseen(obs);
+    let unseenTotal = 0;
+    for (const n of unseen) unseenTotal += n;
+    const doraTypes = doraTypesOf(obs);
+    let meldDora = 0;
+    for (const meld of obs.melds[0]) {
+      for (const t of meld.tiles) {
+        if (doraTypes.has(tileType(t))) meldDora++;
+        if (obs.akaIds.has(t)) meldDora++;
+      }
+    }
+    return m.basis = {
+      melds: obs.melds[0].length,
+      open: obs.melds[0].filter((x) => x.kind !== "ankan").length,
+      closed: obs.melds[0].every((x) => x.kind === "ankan"),
+      doraTypes,
+      valueHonors: valueHonorsOf(obs.roundWind, obs.seatWind),
+      unseen,
+      unseenTotal,
+      meldDora,
+    };
+  }
+
+  /**
+   * The model's verdict on one resting 13-tile shape, and the facts behind it.
+   *
+   * Memoized per decision and keyed by the discard that produced the shape (−1
+   * for the hand as it already rests, on a claim decision): the gate asks about
+   * the tsumogiri shape and then the score loop asks about it again, and the
+   * recorder asks a third time about whichever shape won.
+   */
+  private handEntry(obs: Observation, rest: Tile[], sh: number, opts: OutlookOpts): HandEntry {
+    const m = this.cache(obs);
+    const cache = m.outlooks ??= new Map<number, HandEntry>();
+    const key = opts.tile ?? -1;
+    const hit = cache.get(key);
+    if (hit) return hit;
+    const facts = this.handFacts(obs, rest, sh, opts);
+    const entry: HandEntry = { facts, out: handOutlook(facts, this.handW) };
+    cache.set(key, entry);
+    return entry;
+  }
+
+  /**
+   * `HandFacts` for the 13-tile shape `rest`. The ONE place they are assembled —
+   * the live seat and the offline fit must never be able to disagree about what
+   * a hand looked like, so the recorder writes down this object verbatim rather
+   * than re-deriving anything (the honesty rule `calibration.ts` states).
+   */
+  private handFacts(obs: Observation, rest: Tile[], sh: number, opts: OutlookOpts): HandFacts {
+    const b = this.basisOf(obs);
+    const counts = countsFromTiles(rest);
+    // A 13-tile shape is never complete, so the clamp only ever catches a caller
+    // that handed in the 14-tile reading by mistake.
+    const shape = sh < 0 ? 0 : sh;
+
+    let live = opts.ukeire?.live ?? 0;
+    let types = opts.ukeire?.types ?? 0;
+    if (!opts.ukeire) {
+      // Correctness over the micro-cost. The base score counts ukeire only for
+      // the tiles holding the best shanten (`wideOpen`), which is sound when the
+      // shanten term dominates — but the model's first term IS the ukeire, and a
+      // candidate priced with a zero there is priced as a dead shape.
+      const tys = ukeireTypes(counts, b.melds, b.closed, shape);
+      types = tys.length;
+      for (const ty of tys) live += b.unseen[ty];
+    }
+
+    let dora = b.meldDora;
+    for (const t of rest) {
+      if (b.doraTypes.has(tileType(t))) dora++;
+      if (obs.akaIds.has(t)) dora++;
+    }
+
+    let yakuhaiTriplets = 0;
+    let yakuhaiPairs = 0;
+    for (let ty = 0; ty < 34; ty++) {
+      if (!b.valueHonors.has(ty)) continue;
+      if (counts[ty] >= 3) yakuhaiTriplets++;
+      else if (counts[ty] === 2) yakuhaiPairs++;
+    }
+    for (const meld of obs.melds[0]) {
+      if (meld.kind === "chi") continue;
+      if (b.valueHonors.has(tileType(meld.tiles[0]))) yakuhaiTriplets++;
+    }
+
+    const furiten = obs.furiten.permanent || obs.furiten.temporary;
+    // 後付け, as the referee sees it: `discardInfo` already ran the real scorer
+    // over this exact shape. Without a discard to look up (a claim decision) the
+    // resting hand's own reading is the same answer.
+    const yakuless = opts.tile !== undefined
+      ? (obs.discardInfo.get(opts.tile)?.yakuless ?? false)
+      : obs.shanten <= 0 && obs.ronnable.length === 0;
+
+    return {
+      shanten: shape,
+      ukeire: live,
+      ukeireTypes: types,
+      unseenTotal: b.unseenTotal,
+      turnsLeft: Math.floor(obs.wallRemaining / 4),
+      junme: obs.junme,
+      dora,
+      open: b.open,
+      closed: b.closed,
+      riichi: obs.riichi[0],
+      yakuhaiTriplets,
+      yakuhaiPairs,
+      honitsu: this.honitsuShape(obs, rest),
+      // Above tenpai every wait is still hypothetical, so the shape is assumed
+      // curable; at tenpai a closed hand only needs to not be furiten (riichi
+      // supplies the yaku), while an open one needs a wait that actually scores.
+      ronnable: shape > 0 ? true : b.closed ? !furiten : !yakuless,
+      furiten,
+      dealer: obs.seatWind === 27,
+      oppTenpai: this.threat(obs),
+      honba: obs.honba,
+      kyotaku: obs.kyotaku,
+    };
+  }
+
+  /**
+   * 混一色/清一色模様 — the reading `hasYakuProspect` makes of an open shape,
+   * generalized to a hand that may have no melds at all: every non-honor tile
+   * outside the dominant suit is a stray, and two strays are still curable.
+   * Honors are welcome, so an all-honor shape counts.
+   */
+  private honitsuShape(obs: Observation, rest: Tile[]): boolean {
+    const bySuit = [0, 0, 0];
+    let n = 0;
+    const add = (t: Tile) => {
+      const ty = tileType(t);
+      if (isHonor(ty)) return;
+      bySuit[(ty / 9) | 0]++;
+      n++;
+    };
+    for (const t of rest) add(t);
+    for (const meld of obs.melds[0]) for (const t of meld.tiles) add(t);
+    return n - Math.max(bySuit[0], bySuit[1], bySuit[2]) <= 2;
+  }
+
+  /**
+   * M11's verdict on the 13-tile shape `rest`.
+   *
+   * HOOK. A policy that can price its own hand better than a closed form over
+   * public counts overrides this; everything downstream — the gate, the discard
+   * score, the recorder — reads the model through here.
+   *
+   * DEVIATION from the M11 brief, deliberate: the first parameter is an
+   * `Observation` and not a `Ctx`. The push/fold gate is one of the two callers
+   * and runs before any `Ctx` exists — `Ctx.folding` is what the gate decides —
+   * so a `Ctx`-taking hook could serve the discard score and nothing else, which
+   * is half the model. Nothing in `HandFacts` needs more than the Observation
+   * and the per-decision `HandBasis` anyway.
+   */
+  protected outlookOf(
+    obs: Observation,
+    rest: Tile[],
+    sh: number,
+    opts: OutlookOpts = {},
+  ): HandOutlook {
+    return this.handEntry(obs, rest, sh, opts).out;
+  }
+
+  /**
+   * The 13 tiles this seat is resting on right now: the hand minus the drawn
+   * tile on a turn decision, and the hand itself on a claim decision (where the
+   * shape is already at rest and `obs.shanten` describes it).
+   */
+  private restingShape(obs: Observation): { rest: Tile[]; sh: number; tile?: Tile } {
+    const drawn = obs.drawn;
+    if (drawn === null) return { rest: obs.hand, sh: obs.shanten };
+    const rest = [...obs.hand];
+    rest.splice(rest.lastIndexOf(drawn), 1);
+    const known = obs.discardInfo.get(drawn)?.shanten;
+    const b = this.basisOf(obs);
+    return { rest, sh: known ?? shanten(countsFromTiles(rest), b.melds, b.closed), tile: drawn };
   }
 
   // ---------------------------------------------------------------- discard
@@ -517,6 +843,22 @@ export class HeuristicPolicy implements SyncPolicy {
         bestScore = score;
         bestTile = tile;
       }
+    }
+
+    // M11's lane. One sample per TURN decision, for the shape the policy
+    // actually chose — never for the candidates it rejected, because the label
+    // the fit needs (did this hand cash, and for how much) is a property of the
+    // 局 that followed, and only the chosen shape had one. The riichi question
+    // below cannot move it: `HandFacts.riichi` is the declaration already
+    // standing, not the one about to be made.
+    if (this.handSink && ctx.obs.drawn !== null) {
+      const e = this.handEntry(
+        ctx.obs,
+        this.handWithout(ctx, bestTile),
+        shantenAfter.get(bestTile)!,
+        { tile: bestTile },
+      );
+      this.handSink({ facts: e.facts, pwin: e.out.pwin, value: e.out.value });
     }
 
     const group = byTile.get(bestTile)!;
@@ -624,21 +966,40 @@ export class HeuristicPolicy implements SyncPolicy {
 
     let eff = -sh * this.w.shanten;
 
+    // Hoisted out of the `wideOpen` branch so M11 can be handed the count this
+    // block already paid for instead of enumerating the 34 probes a second time.
+    let live = 0;
+    let types = 0;
     if (wideOpen) {
-      const types = ukeireTypes(counts, ctx.open, ctx.closed, sh);
-      let live = 0;
-      for (const ty of types) live += ctx.unseen[ty];
-      eff += live * this.w.ukeire + types.length * this.w.ukeireType;
+      const tys = ukeireTypes(counts, ctx.open, ctx.closed, sh);
+      types = tys.length;
+      for (const ty of tys) live += ctx.unseen[ty];
+      eff += live * this.w.ukeire + types * this.w.ukeireType;
     }
 
-    // Value kept. Melded dora is constant across candidates, so hand-only is
-    // enough to rank them.
-    let dora = 0;
-    for (const t of rest) {
-      if (ctx.doraTypes.has(tileType(t))) dora++;
-      if (obs.akaIds.has(t)) dora++;
+    if (this.hand) {
+      // M11. The dora count is a stand-in for "what is this shape worth if it
+      // lands" — one term of a value model, priced linearly, and with no opinion
+      // at all on whether the hand will land. The model computes the whole
+      // product, dora included; `evWeight` converts its points into the score
+      // units the rest of this sum is written in. Everything else here —
+      // shanten, ukeire, the 役牌 pair, the lone honor — is unchanged, because
+      // those are counting terms and the model is a valuation term.
+      eff += this.hand.evWeight *
+        this.outlookOf(obs, rest, sh, {
+          tile,
+          ukeire: wideOpen ? { live, types } : undefined,
+        }).ev;
+    } else {
+      // Value kept. Melded dora is constant across candidates, so hand-only is
+      // enough to rank them.
+      let dora = 0;
+      for (const t of rest) {
+        if (ctx.doraTypes.has(tileType(t))) dora++;
+        if (obs.akaIds.has(t)) dora++;
+      }
+      eff += dora * this.w.dora;
     }
-    eff += dora * this.w.dora;
 
     for (let ty = 0; ty < 34; ty++) {
       if (counts[ty] >= 2 && ctx.valueHonors.has(ty)) eff += this.w.yakuhaiPair;

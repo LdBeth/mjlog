@@ -136,7 +136,7 @@ export function pairedRun(
   // calibrated — its decisions would interleave into arm A's records under the
   // same seed. Stripped structurally rather than overridden, so a field added to
   // `HeadlessOptions` later cannot reintroduce them by being spread.
-  const { record: _record, calibrate: _calibrate, ...shared } = opts;
+  const { record: _record, calibrate: _calibrate, handCalib: _handCalib, ...shared } = opts;
   const armB: Arm = incumbent
     ? openArm(seats, {
       ...shared,

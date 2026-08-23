@@ -5,6 +5,8 @@
 
 import { CalibrationWriter } from "./ai/calibration.ts";
 import { mergeComputed } from "./ai/computed.ts";
+import { HandCalibrationWriter } from "./ai/handcalib.ts";
+import { mergeHand } from "./ai/handvalue.ts";
 import { parseArgs } from "./cli/args.ts";
 import type { Args } from "./cli/args.ts";
 import { die } from "./cli/die.ts";
@@ -192,6 +194,34 @@ function calibrationReport(a: Args, cal?: CalibrationWriter): void {
   console.log(`較正 ${a.calibrate}: 判断 ${st.rows}行  (半荘 ${st.games})`);
 }
 
+/**
+ * The hand-value recorder for a run, or nothing — the mirror of the above.
+ *
+ * The header states the weight vector the predictions were made with, and it is
+ * the SAME merge `makePolicy` performs for the seat (`DEFAULT_HAND` when the
+ * `--ktune` file carries no `hand` block, which is exactly the bootstrap case:
+ * record under the defaults, then fit them).
+ */
+function makeHandCalibWriter(a: Args): HandCalibrationWriter | undefined {
+  if (!a.handcalib) return undefined;
+  return new HandCalibrationWriter(a.handcalib, {
+    seats: a.seats,
+    seed: a.seed,
+    games: a.games,
+    w: mergeHand(a.ktune?.hand),
+  });
+}
+
+/** What a hand-recording run wrote, dropped samples included (see the writer). */
+function handCalibReport(a: Args, cal?: HandCalibrationWriter): void {
+  if (!cal) return;
+  const st = cal.stats();
+  console.log(
+    `手牌価値 ${a.handcalib}: 自摸番 ${st.rows}行  (半荘 ${st.games})` +
+      (st.dropped > 0 ? `  未決着のゆえ破棄 ${st.dropped}行` : ""),
+  );
+}
+
 /** Everything one seat's rows of the two tables below are counted from. */
 interface SeatTally {
   /** Finishes in each place, 1位 first. */
@@ -219,9 +249,11 @@ interface SeatTally {
 
 async function cmdSelfplay(a: Args): Promise<void> {
   const calibrate = makeCalibrationWriter(a);
+  const handCalib = makeHandCalibWriter(a);
   try {
     const opts: HeadlessOptions = {
       calibrate,
+      handCalib,
       weights: a.weights,
       temp: a.temp,
       record: a.record || undefined,
@@ -244,8 +276,10 @@ async function cmdSelfplay(a: Args): Promise<void> {
     reportSelfplay(a, run);
   } finally {
     calibrate?.close();
+    handCalib?.close();
   }
   calibrationReport(a, calibrate);
+  handCalibReport(a, handCalib);
 }
 
 /**
@@ -365,18 +399,26 @@ function reportSelfplay(a: Args, { results, ms, traj }: RunReport): void {
 
 function cmdPaired(a: Args): void {
   const calibrate = makeCalibrationWriter(a);
+  const handCalib = makeHandCalibWriter(a);
   try {
-    cmdPairedInner(a, calibrate);
+    cmdPairedInner(a, calibrate, handCalib);
   } finally {
     calibrate?.close();
+    handCalib?.close();
   }
   calibrationReport(a, calibrate);
+  handCalibReport(a, handCalib);
 }
 
-function cmdPairedInner(a: Args, calibrate?: CalibrationWriter): void {
+function cmdPairedInner(
+  a: Args,
+  calibrate?: CalibrationWriter,
+  handCalib?: HandCalibrationWriter,
+): void {
   if (a.games < 1) die("--games は1以上");
   const st = pairedRun(a.games, a.seed, a.seats, {
     calibrate,
+    handCalib,
     weights: a.weights,
     temp: a.temp,
     oracle: a.oracle,

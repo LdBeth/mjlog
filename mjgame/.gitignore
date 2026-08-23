@@ -1,7 +1,10 @@
 games/
-weights/
+weights/*
 train/.venv/
 *.traj.jsonl
 runs/
 native/*.dylib
 native/*.so
+!weights/champion.json
+!weights/computed-calibrated.json
+!weights/hand-calibrated.json

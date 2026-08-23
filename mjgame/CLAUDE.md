@@ -13,6 +13,7 @@ deno task bench       # timing subset of selfplay
 deno task check       # typecheck src/ + scripts/
 deno task test        # full suite (~555 tests, ~50s; compiles native libs via clang)
 deno task tune        # 感性 vector tuning via paired runs
+# champion seat: --seats=khhh --ktune=weights/champion.json (計算 calibrated + hand block)
 deno task build-kernel  # native/mjkernel  (shanten/ukeire/shape-mass)
 deno task build-native  # native/librlnet  (policy net via Accelerate)
 ```
@@ -50,7 +51,19 @@ buffering seam). Flags a command would silently ignore are rejected by
   `computed.ts` the 計算 engine (flat scratch-row hot path backed by the
   `mj_shape_masses` kernel); `planner.ts` C7 targets; `augmented.ts`
   Reads providers + the subclass; `consumer.ts` 感性 curves; `standings.ts`
-  順位効用; `calibration.ts` offline-fit records.
+  順位効用; `calibration.ts` offline-fit records (opponent deal-in model);
+  `handvalue.ts` the M11 own-hand model (P(win) counting chain × value, ~15
+  scalars fitted against actual hand outcomes) consumed by the fold gate and
+  the discard score when a `--ktune` file carries a `hand` block — absent ⇒
+  bit-identical to before; `handcalib.ts` its recorder (`--handcalib=PATH`,
+  labels written at round end). Fit: `scripts/hand_fit.ts`, check:
+  `scripts/hand_report.ts`. Consumption scalars `pushScale`/`evWeight` are
+  set by paired sweeps, not by the fit (see `runs/hand/SWEEP.md`). FIT ONLY
+  on a lane played WITHOUT the hand block: labels recorded under the folding
+  policy are censored by its own folds, and a refit on them measured +0.11
+  WORSE. `weights/champion.json` (tracked; the only files under weights/ in
+  git are the three ktune JSONs) is the shipped baseline, pinned by
+  `test/champion_test.ts` — a deliberate change regenerates the pins there.
 - **`src/penalty/`**: `rules.ts` predicates, `preview.ts` the speculative
   referee (same `runHook`, guarded mutate-and-rollback). `heuristic.ts`
   keeps deliberate hand copies of a few predicates at a *different pricing

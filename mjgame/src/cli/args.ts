@@ -99,6 +99,16 @@ export interface Args {
    */
   calibrate: string;
   /**
+   * `--handcalib=PATH`: seat 0 (a "k" or "h" seat) writes one hand-value record
+   * per TURN decision to PATH — `handOutlook`'s two predictions for the resting
+   * shape it chose, labelled after the fact with how the round ended for it.
+   * The mirror image of `--calibrate`: that one grades what we read about the
+   * other three, this one grades what we believe about ourselves. The seat plays
+   * EXACTLY as it would without the flag (the sink is an out-param, see
+   * `src/ai/handcalib.ts`). `paired` records the A arm only.
+   */
+  handcalib: string;
+  /**
    * `--export=PATH`: write the played match(es) as Tenhou mjlog XML plus a
    * `.mjgame.json` sidecar, so ../mjrender can render and comment our own games.
    * PATH is a basename unless it already ends in `.xml`; a selfplay run of more
@@ -146,6 +156,7 @@ export function parseArgs(argv: string[]): Args {
     consumerPath: "",
     consumerBPath: "",
     calibrate: "",
+    handcalib: "",
     exportPath: "",
     json: false,
     jobs: 1,
@@ -201,6 +212,9 @@ export function parseArgs(argv: string[]): Args {
     } else if (arg.startsWith("--calibrate=")) {
       a.calibrate = arg.slice(12);
       if (!a.calibrate) die("--calibrate には書き出し先のパスが要ります");
+    } else if (arg.startsWith("--handcalib=")) {
+      a.handcalib = arg.slice(12);
+      if (!a.handcalib) die("--handcalib には書き出し先のパスが要ります");
     } else if (arg.startsWith("--export=")) {
       a.exportPath = arg.slice(9);
       if (!a.exportPath) die("--export には書き出し先のパス (拡張子なしでも可) が要ります");
@@ -232,6 +246,7 @@ export function parseArgs(argv: string[]): Args {
 /** The subset of `Args` the cross-flag rules below actually read. */
 export type ArgCheck =
   & Pick<Args, "cmd" | "seats" | "calibrate">
+  & Partial<Pick<Args, "handcalib">>
   & Partial<
     Pick<
       Args,
@@ -317,6 +332,25 @@ export function argError(a: ArgCheck): string | null {
       // calibration measures the computed answer against truth. Recording under
       // a curriculum would grade a seat nobody ships.
       return "--calibrate と --curriculum は併用できません (較正するのは素の計算の読みです)";
+    }
+  }
+  // The hand recorder needs far less than the deal-in one — no oracle tap, since
+  // the label is the round's own result — but it still needs a seat that HAS a
+  // hand-value model and a driver that plays whole rounds to label against.
+  if (a.handcalib) {
+    if (a.cmd !== "selfplay" && a.cmd !== "paired") {
+      return "--handcalib は selfplay / paired 専用です (局の結末で札を貼るので、通しで打つ駆動が要ります)";
+    }
+    if (a.seats[0] !== "k" && a.seats[0] !== "h") {
+      return `--handcalib は席0が k席 (計算) か h席 (発見的) のときだけ使えます: --seats=${a.seats}\n` +
+        "手牌価値の読みを持たない席 (n / r / o) には記録するものがありません。";
+    }
+    if ((a.jobs ?? 1) > 1) {
+      // Same seam problem as `--calibrate`, one layer worse: a hand record is
+      // buffered until its round ends, so a sharded run would have four
+      // independent buffers flushing into one file in wall-clock order. Refused
+      // rather than shipped with an ordering nobody can reproduce.
+      return "--handcalib と --jobs は併用できません (手牌価値の記録は1スレッドで書きます)";
     }
   }
   return null;
