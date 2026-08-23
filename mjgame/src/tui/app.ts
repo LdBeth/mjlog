@@ -11,6 +11,7 @@
 
 import type { Meld, Tile } from "mjrender/model.ts";
 import { roundName, tileType } from "mjrender/tiles.ts";
+import type { HeuristicPolicy } from "../ai/heuristic.ts";
 import type { Observation } from "../observe.ts";
 import type { Policy } from "../policy.ts";
 import type { SyncPolicy } from "../policy.ts";
@@ -24,7 +25,7 @@ import type { Line } from "./screen.ts";
 import type { GlyphMode, GlyphOpts } from "./glyph.ts";
 import { REL_LABEL, tileText, WINDS } from "./glyph.ts";
 import * as W from "./widgets.ts";
-import type { Ctx, Overlay, Phase, TimerState } from "./widgets.ts";
+import type { Advice, Ctx, Overlay, Phase, TimerState } from "./widgets.ts";
 import { decodeKeys, isCtrlC, type KeyEvent, readKeys } from "./input.ts";
 import * as term from "./term.ts";
 import { padEnd, SGR, type Size, size, width } from "./term.ts";
@@ -53,7 +54,7 @@ interface Layout {
   handY: number;
   caretY: number;
   metricsY: number;
-  dangerY: number;
+  adviceY: number;
   ledgerHdrY: number;
   ledgerY: number;
   logHdrY: number;
@@ -75,8 +76,8 @@ function layout(cols: number, rows: number): Layout {
   const handY = ownRiverY + 1;
   const caretY = handY + 1;
   const metricsY = caretY + 1;
-  const dangerY = metricsY + 1;
-  const ledgerHdrY = dangerY + 1;
+  const adviceY = metricsY + 1;
+  const ledgerHdrY = adviceY + 1;
   const ledgerY = ledgerHdrY + 1;
   const logHdrY = ledgerY + 1;
   const logY = logHdrY + 1;
@@ -98,7 +99,7 @@ function layout(cols: number, rows: number): Layout {
     handY,
     caretY,
     metricsY,
-    dangerY,
+    adviceY,
     ledgerHdrY,
     ledgerY,
     logHdrY,
@@ -184,6 +185,12 @@ export interface AppOptions {
   humanSeat?: Seat;
   /** Skip the opening sequence. */
   noIntro?: boolean;
+  /**
+   * A 計算 seat asked, on every human decision, what IT would play from the
+   * same Observation. Its answer fills the 助言 row and the `d` overlay. It is
+   * never a seat at the table: it sees exactly what the player sees.
+   */
+  advisor?: HeuristicPolicy;
   /** Where frames go. Defaults to stdout; tests pass a sink to stay quiet. */
   write?: (s: string) => void;
 }
@@ -197,6 +204,7 @@ export class App {
   private glyph: GlyphOpts;
 
   private obs: Observation | null = null;
+  private advice: Advice | null = null;
   private resolver: ((a: Action) => void) | null = null;
   private phase: Phase = "idle";
   private slots: Tile[] = [];
@@ -402,6 +410,7 @@ export class App {
     if (this.overlayState?.kind === "text") this.closeOverlay();
 
     this.obs = obs;
+    this.advice = this.consult(obs);
     this.message = "";
     this.riichiArmed = false;
     this.liveRiichi = [false, false, false, false];
@@ -494,6 +503,20 @@ export class App {
       // penalty and not a stolen turn.
       overMs: Math.max(0, overrun - this.bankLeftMs),
     };
+  }
+
+  /** The advisor's opinion of `obs`. Its failure must never cost the game. */
+  private consult(obs: Observation): Advice | null {
+    const adv = this.opts.advisor;
+    if (!adv || obs.legal.length < 2) return null;
+    try {
+      adv.lastTrace = null;
+      const action = adv.decide(obs);
+      return { action, trace: adv.lastTrace };
+    } catch (e) {
+      this.log.push(`助言エラー: ${e instanceof Error ? e.message : String(e)}`);
+      return null;
+    }
   }
 
   private buildSlots(obs: Observation): void {
@@ -738,7 +761,7 @@ export class App {
         this.overlayState = { kind: "help" };
         break;
       case "d":
-        this.overlayState = { kind: "danger" };
+        this.overlayState = { kind: "advice" };
         break;
       case "s":
         this.dumpSnapshot();
@@ -844,7 +867,7 @@ export class App {
     const o = this.overlayState!;
     switch (o.kind) {
       case "help":
-      case "danger":
+      case "advice":
         this.closeOverlay();
         break;
       case "text":
@@ -907,7 +930,7 @@ export class App {
         this.submit(obs.legal.find((a) => a.t === "pass") ?? null);
         break;
       case "d":
-        this.overlayState = { kind: "danger" };
+        this.overlayState = { kind: "advice" };
         break;
       case "?":
         this.overlayState = { kind: "help" };
@@ -1020,6 +1043,7 @@ export class App {
       message: this.message,
       riverRows: L.riverRows,
       claim: this.lastDiscard,
+      advice: this.advice,
     };
   }
 
@@ -1079,7 +1103,7 @@ export class App {
     this.scr.drawLine(L.x0, L.handY, own[2], L.inner);
     this.scr.drawLine(L.x0, L.caretY, own[3], L.inner);
     this.scr.drawLine(L.x0, L.metricsY, W.metricsLine(c, L.inner), L.inner);
-    this.scr.drawLine(L.x0, L.dangerY, W.dangerRow(c, L.inner), L.inner);
+    this.scr.drawLine(L.x0, L.adviceY, W.adviceRow(c, L.inner), L.inner);
 
     // ledger + log
     W.ledgerPanel(c, L.inner).forEach((l, i) => this.scr.drawLine(L.x0, L.ledgerY + i, l, L.inner));

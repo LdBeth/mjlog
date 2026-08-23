@@ -300,7 +300,6 @@ export function argError(a: ArgCheck): string | null {
   if (a.cmd === "play") {
     if (a.standings) return "--standings は selfplay / bench / paired 専用です";
     if (a.consumerPath) return "--consumer は selfplay / bench / paired 専用です";
-    if (a.ktunePath) return "--ktune は selfplay / bench / paired 専用です";
     if (a.temp) return "--temp は selfplay / bench / paired 専用です (play の n席は常に決定的)";
     if (a.record || a.recordAll) return "--record / --record-all は selfplay 専用です";
   }

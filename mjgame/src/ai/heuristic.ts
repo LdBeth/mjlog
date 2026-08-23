@@ -286,7 +286,26 @@ interface HandEntry {
   out: HandOutlook;
 }
 
+/**
+ * What the last `decide` weighed when it chose a discard. Purely a RECORD of
+ * the scoring that happened anyway (no extra probes, nothing the choice reads
+ * back), kept so a driver can show the seat's reasoning — the TUI's 助言 row
+ * renders the advisor seat's trace. Null until a discard has been scored.
+ */
+export interface DiscardTrace {
+  /** Defensive mode: the push/fold gate said to abandon the hand. */
+  folding: boolean;
+  /** Every candidate the filter let through, best first. */
+  candidates: Array<{ tile: Tile; shanten: number; score: number }>;
+  chosen: Tile;
+  riichi: boolean;
+  /** 片和了り cure: riichi was forced by the dojo, not chosen on merit. */
+  mustCure: boolean;
+}
+
 export class HeuristicPolicy implements SyncPolicy {
+  /** See `DiscardTrace`. Overwritten by every decision that scores discards. */
+  lastTrace: DiscardTrace | null = null;
   readonly name: string;
   readonly sync = true;
   protected w: HeuristicWeights;
@@ -834,11 +853,13 @@ export class HeuristicPolicy implements SyncPolicy {
 
     let bestTile = candidates[0];
     let bestScore = -Infinity;
+    const ranked: DiscardTrace["candidates"] = [];
     for (const tile of candidates) {
       const sh = shantenAfter.get(tile)!;
       // Ukeire is the expensive part (34 shanten probes); only the tiles that
       // actually hold the best shanten can win on it.
       const score = this.scoreDiscard(ctx, tile, sh, sh === best, run);
+      ranked.push({ tile, shanten: sh, score });
       if (score > bestScore || (score === bestScore && tile < bestTile)) {
         bestScore = score;
         bestTile = tile;
@@ -864,12 +885,24 @@ export class HeuristicPolicy implements SyncPolicy {
     const group = byTile.get(bestTile)!;
     const plain = group.find((d) => !d.riichi);
     const riichi = group.find((d) => d.riichi);
+    const trace: DiscardTrace = {
+      folding: ctx.folding,
+      candidates: ranked.sort((a, b) => b.score - a.score || a.tile - b.tile),
+      chosen: bestTile,
+      riichi: false,
+      mustCure: false,
+    };
+    this.lastTrace = trace;
     if (riichi && !this.riichiBanned(ctx, bestTile) && this.riichiClean(ctx, riichi)) {
       // A split wait must not be left damaten. Riichi is the cure and the
       // dojo's own prescription (役なしなら即リーチ), so it overrides the
       // ordinary "is this worth declaring" judgement — but never a 禁じ手.
       const mustCure = this.dojo && (ctx.obs.discardInfo.get(bestTile)?.katagari ?? false);
-      if (mustCure || this.wantRiichi(ctx, bestTile)) return riichi;
+      if (mustCure || this.wantRiichi(ctx, bestTile)) {
+        trace.riichi = true;
+        trace.mustCure = mustCure;
+        return riichi;
+      }
     }
     return plain ?? group[0];
   }

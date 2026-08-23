@@ -6,7 +6,8 @@ export const USAGE = `mjgame — 雀鬼流ルールの4人麻雀 (人間1 + CPU3
   deno run --allow-read --allow-write src/main.ts <command> [options]
 
 コマンド:
-  play       半荘を1回プレイする (端末UI)
+  play       半荘を1回プレイする (端末UI)。手牌の下の「助言」行は、同じ盤面を
+             見た k席 (計算) の打牌選択。d キーで候補の評価順を表示
   selfplay   CPU同士の対局を回して着順統計を出す
   paired     同一牌山で --seats と hhhh を2回ずつ回し、席0の対応差を出す
   bench      同上、半荘/秒だけを出す
@@ -62,8 +63,9 @@ export const USAGE = `mjgame — 雀鬼流ルールの4人麻雀 (人間1 + CPU3
                       --oracle= で読ませるチャネルを選ぶ。selfplay/bench/paired 専用。
                       学習用: 消費曲線を鍛えるとき、読みの精度だけを連続に劣化させる
   --ktune=PATH        k席の感性ベクトル {heuristic, augment, computed} のJSON。
-                      selfplay / bench / paired のみ。paired では A腕の k席
-                      だけに効き、対照の B腕 (hhhh) には決して渡らない。
+                      paired では A腕の k席だけに効き、対照の B腕 (hhhh) には
+                      決して渡らない。play では k席と助言席 (既定は
+                      weights/champion.json) に効く。
                       scripts/tune.ts が書き出す形式
   --ktune-b=PATH      paired の対照 (B腕) にも感性ベクトルを積む。B腕は hhhh ではなく
                       A腕と同じ席種・同じ読み・同じ曲線のまま、--ktune の file だけ

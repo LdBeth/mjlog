@@ -13,7 +13,8 @@ import { die } from "./cli/die.ts";
 import { USAGE } from "./cli/usage.ts";
 import { makeDojoHooks } from "./dojo.ts";
 import { writeExport } from "./export.ts";
-import { headless, headlessParallel, makePolicy } from "./harness.ts";
+import { headless, headlessParallel, loadKtune, makePolicy } from "./harness.ts";
+import type { HeuristicPolicy } from "./ai/heuristic.ts";
 import type { HeadlessOptions, RunReport, SeatPolicy } from "./harness.ts";
 import { pairedJson, pairedRun } from "./paired.ts";
 import { runMatch } from "./match.ts";
@@ -83,6 +84,16 @@ async function cmdPlay(a: Args): Promise<void> {
       ? "あなた"
       : `${cpuKindAt(a.seats, humanSeat, s) === "n" ? "AI" : "CPU"}${WINDS[s]}`
   );
+  // The 助言 seat: a 計算 CPU consulted on the human's own Observation, under
+  // the shipped champion vector unless `--ktune` names another. Forked seed so
+  // it never shares a stream with a seat that actually plays.
+  const advisor = makePolicy({
+    kind: "k",
+    name: "助言",
+    seed: a.seed * 4 + 4,
+    plan: a.plan,
+    ktune: a.ktune ?? loadKtune(new URL("../weights/champion.json", import.meta.url).pathname),
+  });
   const app = new App({
     glyphs: a.glyphs,
     aka: JANKI.akaIds,
@@ -93,6 +104,7 @@ async function cmdPlay(a: Args): Promise<void> {
     cfg: JANKI,
     humanSeat,
     noIntro: a.noIntro,
+    advisor: advisor.policy as HeuristicPolicy,
   });
 
   const cpus: SeatPolicy[] = [];
@@ -132,6 +144,7 @@ async function cmdPlay(a: Args): Promise<void> {
     app.stop();
     term.leave();
     for (const c of cpus) c.close();
+    advisor.close();
   }
   exportMatches(a, result ? [result] : []);
 }

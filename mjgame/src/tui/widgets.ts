@@ -4,9 +4,9 @@
 
 import type { Meld, Tile } from "mjrender/model.ts";
 import type { RiverEntry } from "mjrender/state.ts";
-import type { DangerAssessment, DangerLevel } from "mjrender/danger.ts";
 import { roundName } from "mjrender/tiles.ts";
 import { doraFromIndicatorType, tileType } from "mjrender/tiles.ts";
+import type { DiscardTrace } from "../ai/heuristic.ts";
 import type { Observation } from "../observe.ts";
 import { anyFuriten } from "../table.ts";
 import type { Action, Seat, Violation } from "../types.ts";
@@ -20,7 +20,7 @@ export type Phase = "idle" | "turn" | "claim";
 
 export type Overlay =
   | { kind: "help" }
-  | { kind: "danger" }
+  | { kind: "advice" }
   /** A numbered menu: kan shapes, or a disambiguation between equally-shaped
    *  calls (chi shapes, or pon pairs differing only in an aka five). */
   | { kind: "pick"; options: Action[]; title: string }
@@ -48,6 +48,15 @@ export interface Ctx {
   /** How many 6-tile rows each river gets at the current terminal height. */
   riverRows: number;
   claim: { tile: Tile; from: Seat } | null;
+  /** What the 計算 advisor seat would do from this very Observation. */
+  advice: Advice | null;
+}
+
+/** The advisor's answer for the decision on screen. */
+export interface Advice {
+  action: Action;
+  /** The discard ranking behind `action`, when the decision scored discards. */
+  trace: DiscardTrace | null;
 }
 
 /** Countdown state: a per-turn allowance, then the one match-long bank. */
@@ -74,13 +83,6 @@ function timerText(t: TimerState): Line {
 const DIM = SGR.gray;
 const SEP = sp(" │ ", DIM);
 
-const LEVEL_SGR: Record<DangerLevel, string> = {
-  "安全": SGR.green,
-  "危険度低": SGR.brightWhite,
-  "危険度中": SGR.yellow,
-  "危険度高": "1;91",
-};
-
 export const MELD_LABEL: Record<Meld["kind"], string> = {
   chi: "チー",
   pon: "ポン",
@@ -97,14 +99,6 @@ export const MELD_LABEL: Record<Meld["kind"], string> = {
 /** Is `k` on offer right now? The one question every prompt asks of `legal`. */
 function has(ctx: Ctx, k: Action["t"]): boolean {
   return ctx.obs?.legal.some((a) => a.t === k) ?? false;
-}
-
-/** Danger entries, most dangerous first, ties by tile type. Shared so the
- *  one-line row and the evidence overlay can never disagree on the order. */
-function dangerOrder(obs: Observation): Array<[number, DangerAssessment]> {
-  return [...obs.danger.entries()].sort((a, b) =>
-    rankLevel(b[1].level) - rankLevel(a[1].level) || a[0] - b[0]
-  );
 }
 
 /** 1-based placements for a relative score array; ties break by absolute seat. */
@@ -403,37 +397,58 @@ export function metricsLine(ctx: Ctx, w: number): Line {
   return padLine(line, w);
 }
 
-export function dangerRow(ctx: Ctx, w: number): Line {
+/** The advisor's verdict in one word, plus the tile it acts on. */
+function adviceVerb(a: Action, ctx: Ctx): Line {
+  switch (a.t) {
+    case "discard":
+      return [
+        sp(a.riichi ? "リーチ " : "打 ", a.riichi ? "1;91" : SGR.bold),
+        tileSpan(a.tile, ctx.glyph),
+      ];
+    case "tsumo":
+      return [sp("ツモ和了", "1;91")];
+    case "ron":
+      return [sp("ロン", "1;91")];
+    case "pon":
+    case "chi":
+    case "daiminkan":
+    case "ankan":
+      return [sp(MELD_LABEL[a.t], SGR.yellow)];
+    case "kakan":
+      return [sp(MELD_LABEL.shouminkan, SGR.yellow)];
+    case "pass":
+      return [sp("見送り", DIM)];
+    default:
+      return [sp((a as Action).t)];
+  }
+}
+
+/** One line: what the 計算 seat would play, and its runners-up. */
+export function adviceRow(ctx: Ctx, w: number): Line {
   const o = ctx.obs;
   if (!o) return [];
-  if (o.danger.size === 0) {
-    return padLine([sp("危険  ", DIM), sp("リーチ・副露なし — 全牌安全", SGR.green)], w);
+  const line: Line = [sp("助言  ", DIM)];
+  const adv = ctx.advice;
+  if (!adv) {
+    line.push(sp("—", DIM));
+    return padLine(line, w);
   }
-  const line: Line = [sp("危険  ", DIM)];
-  for (const [type, d] of dangerOrder(o)) {
-    const note = d.details[0]?.notes[0];
-    const cell: Line = [
-      typeSpan(type, ctx.glyph),
-      sp(":", DIM),
-      sp(note ? `${note}・` : "", DIM),
-      sp(shortLevel(d.level), LEVEL_SGR[d.level]),
-      sp("  "),
-    ];
-    if (lineWidth(line) + lineWidth(cell) > w - 4) {
-      line.push(sp("…", DIM));
-      break;
+  line.push(...adviceVerb(adv.action, ctx));
+  const tr = adv.trace;
+  if (tr) {
+    if (tr.folding) line.push(sp("  降り", SGR.yellow));
+    if (tr.mustCure) line.push(sp("  片和了り回避", SGR.yellow));
+    const rest = tr.candidates.filter((c) => c.tile !== tr.chosen).slice(0, 4);
+    if (rest.length > 0) {
+      line.push(sp("  次点 ", DIM));
+      for (const c of rest) {
+        const cell: Line = [tileSpan(c.tile, ctx.glyph), sp(" ")];
+        if (lineWidth(line) + lineWidth(cell) > w - 4) break;
+        line.push(...cell);
+      }
     }
-    line.push(...cell);
   }
   return padLine(line, w);
-}
-
-function rankLevel(l: DangerLevel): number {
-  return l === "危険度高" ? 3 : l === "危険度中" ? 2 : l === "危険度低" ? 1 : 0;
-}
-
-function shortLevel(l: DangerLevel): string {
-  return l === "安全" ? "安全" : l.replace("危険度", "");
 }
 
 // ---------------------------------------------------------------------------
@@ -495,7 +510,7 @@ export function actionBar(ctx: Ctx, w: number): Line {
     return [sp(padEnd(t, w), "1;97;41")];
   }
   if (ctx.phase === "claim") {
-    const parts = [...claimParts(ctx, "y/Enter"), "d 危険", "? ヘルプ"];
+    const parts = [...claimParts(ctx, "y/Enter"), "d 助言", "? ヘルプ"];
     return [sp(padEnd(" " + parts.join("  "), w), "1;30;103")];
   }
   if (ctx.phase !== "turn") {
@@ -511,7 +526,7 @@ export function actionBar(ctx: Ctx, w: number): Line {
     canRiichi ? "r リーチ" : "",
     canKan ? "k カン" : "",
     has(ctx, "tsumo") ? "a ツモ和了" : "",
-    "d 危険",
+    "d 助言",
     "s 記録",
     "? ヘルプ",
   ].filter((s) => s);
@@ -532,8 +547,8 @@ export function overlay(ctx: Ctx, o: Overlay): OverlayView {
   switch (o.kind) {
     case "help":
       return { title: "ヘルプ", body: helpBody(), footer: "任意のキーで閉じる" };
-    case "danger":
-      return { title: "危険牌の根拠", body: dangerBody(ctx), footer: "任意のキーで閉じる" };
+    case "advice":
+      return { title: "助言の根拠", body: adviceBody(ctx), footer: "任意のキーで閉じる" };
     case "pick":
       return {
         title: o.title,
@@ -602,28 +617,31 @@ function pickLabel(a: Action, ctx: Ctx): Line {
   }
 }
 
-function dangerBody(ctx: Ctx): Line[] {
-  const o = ctx.obs;
-  if (!o || o.danger.size === 0) return [[sp("現在、警戒すべき相手はいません。", SGR.green)]];
-  const body: Line[] = [];
-  for (const [type, d] of dangerOrder(o)) {
+function adviceBody(ctx: Ctx): Line[] {
+  const adv = ctx.advice;
+  if (!ctx.obs || !adv) return [[sp("助言はありません。", DIM)]];
+  const body: Line[] = [[sp("計算席なら: ", DIM), ...adviceVerb(adv.action, ctx)]];
+  const tr = adv.trace;
+  if (!tr) return body;
+  body.push([
+    sp(
+      tr.folding ? "降り (押し引き判定: 降り)" : "押し (押し引き判定: 押し)",
+      tr.folding ? SGR.yellow : SGR.green,
+    ),
+    sp(tr.mustCure ? "  片和了り回避のため即リーチ" : "", SGR.yellow),
+  ]);
+  body.push([]);
+  body.push([sp(padEnd("  牌", 8), DIM), sp(padEnd("向聴", 6), DIM), sp("評価", DIM)]);
+  const top = tr.candidates[0]?.score ?? 0;
+  for (const c of tr.candidates) {
+    const chosen = c.tile === tr.chosen;
     body.push([
-      typeSpan(type, ctx.glyph),
-      sp("  "),
-      sp(d.level, LEVEL_SGR[d.level]),
-      sp(`   対象 ${d.seats.map((s) => "P" + s).join(",")}`, DIM),
+      sp(chosen ? "▶ " : "  ", SGR.brightCyan),
+      tileSpan(c.tile, ctx.glyph),
+      sp("    "),
+      sp(padEnd(String(c.shanten), 6), chosen ? SGR.bold : DIM),
+      sp((c.score - top).toFixed(0).padStart(7), chosen ? SGR.bold : DIM),
     ]);
-    for (const det of d.details) {
-      const tag = det.kind === "furo"
-        ? `P${det.seat}副露${det.openMeldCount ?? 0}`
-        : `P${det.seat}`;
-      body.push([
-        sp("   ┗ ", DIM),
-        sp(tag + " ", SGR.brightCyan),
-        sp(det.level + " ", LEVEL_SGR[det.level]),
-        sp(det.notes.join("・"), DIM),
-      ]);
-    }
   }
   return body;
 }
@@ -637,7 +655,7 @@ function helpBody(): Line[] {
     ["r", "リーチ宣言を準備 (Esc で解除)"],
     ["k", "カンメニュー"],
     ["a", "ツモ和了 / ロン"],
-    ["d", "危険牌の根拠を表示"],
+    ["d", "助言 (計算席の打牌選択) の根拠を表示"],
     ["s", "現局面をログ欄にダンプ"],
     ["?", "このヘルプ"],
     ["q / Ctrl-C", "終了"],

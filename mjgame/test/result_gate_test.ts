@@ -181,6 +181,7 @@ function ctxWith(entries: RiverEntry[]): Ctx {
     message: "",
     riverRows: 2,
     claim: null,
+    advice: null,
   };
 }
 
