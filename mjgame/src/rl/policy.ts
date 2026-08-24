@@ -9,10 +9,11 @@
 // reproduces exactly like a greedy one given the same seed.
 
 import type { Observation } from "../observe.ts";
+import { pickLesserEvil, violationPoints } from "../penalty/preview.ts";
 import type { SyncPolicy } from "../policy.ts";
 import type { Rng } from "../rng.ts";
 import { sfc32 } from "../rng.ts";
-import type { Action } from "../types.ts";
+import type { Action, Violation } from "../types.ts";
 import { actionIndex, ACTIONS, resolve } from "./actionspace.ts";
 import type { CachedEncoding, EncodingCache } from "./features.ts";
 import { encode, encodeSeq, flatten, INPUT_LEN } from "./features.ts";
@@ -22,16 +23,111 @@ import { closeNet, forward, loadNet, SEQ_INPUT_LEN, seqInput } from "./net.ts";
 export interface PolicyOptions {
   /** 0 (default) = argmax; >0 = softmax sampling, larger being flatter. */
   temperature?: number;
+  /**
+   * Whether the dojo's veto applies to this seat's action set (default true).
+   * Mirrors `HeuristicOptions.dojo`: off, the seat plays straight from
+   * `obs.legal` and pays for whatever the ledger charges.
+   */
+  dojo?: boolean;
 }
 
 /** What a v3 net's `seqInput` is handed and ignores. */
 const NO_SEQ = new Int8Array(0);
+
+/**
+ * The actions the dojo referee would let this seat make — `obs.legal` minus
+ * everything the ledger would charge for.
+ *
+ * This is the veto `HeuristicPolicy` has always had (`compliant`,
+ * `mandatoryKan`, `compliantDiscards`), given to the learned seat: the net
+ * learns what SCORES, and roughly 60% of its violations were fouls the
+ * speculative referee could have named before the action was taken. Pricing
+ * them is not an option here — a net has no ledger term to outbid — so the
+ * foul is simply removed from the support.
+ *
+ * TWO INVARIANTS the caller depends on. The list is never empty: when every
+ * legal action is charged the full `obs.legal` comes back, because a filter
+ * must never leave a seat unable to act (the heuristic's fallthrough pricing
+ * is its analogue). And the list this returns is the SUPPORT the decision is
+ * made over, which is what the trajectory's `mask` records — PPO's importance
+ * ratio is only a ratio if the recorded mask is the distribution the action
+ * was sampled from.
+ *
+ * Pure in the Observation: the preview reads the live Table, but only ever
+ * hypothetically (mutate-and-rollback under `guarded`).
+ */
+export function compliantActions(obs: Observation): Action[] {
+  const pv = obs.preview;
+  // No dojo wired, or nothing to choose between: the filter cannot change the
+  // decision, and asking the referee costs a table mutation apiece.
+  if (!pv || obs.legal.length < 2) return obs.legal;
+
+  // 立直後カン見送り is the one rule that fires on an OMISSION: in riichi,
+  // passing up a kan that leaves the wait alone is itself the foul. So when
+  // declining is charged, the only question is whether accepting is charged
+  // more — the cheaper option wins, ties going to declining, which is
+  // `pickLesserEvil` called with the decline first. Same reading as
+  // `HeuristicPolicy.mandatoryKan`.
+  if (obs.riichi[0] && obs.drawn !== null) {
+    const skip = pv.skipKan(obs.drawn);
+    if (skip.length > 0) {
+      let best: { a: Action; vs: Violation[] } | null = null;
+      for (const a of obs.legal) {
+        if (a.t !== "ankan") continue;
+        const vs = pv.kan(a, obs.drawn);
+        if (!best || violationPoints(vs) < violationPoints(best.vs)) best = { a, vs };
+      }
+      // A single-element support, deliberately: it flows through the ordinary
+      // pick path below, so a sampling seat still draws exactly one rng float.
+      if (best && pickLesserEvil(skip, best.vs) === "b") return [best.a];
+    }
+  }
+
+  const closed = obs.melds[0].every((m) => m.kind === "ankan");
+  const ok: Action[] = [];
+  for (const a of obs.legal) {
+    // Everything the switch does not name — tsumo, ron, pass — is kept: nothing
+    // previewable charges for taking a win or for standing pat, and declining a
+    // win would only be 見逃し, which the engine's own rules punish harder.
+    switch (a.t) {
+      case "discard": {
+        if (pv.discard(a, obs.drawn).length !== 0) continue;
+        const info = obs.discardInfo.get(a.tile);
+        // 片和了り and 後付け are charged at WIN time, so the preview cannot
+        // see them — but the discard that walks into them is right here.
+        // A split wait must not be left damaten: with riichi on offer the
+        // declaring variant survives and the plain one does not (the
+        // heuristic spells the same thing as `mustCure`).
+        if (info?.katagari && !a.riichi) continue;
+        // 後付け: only an OPEN hand is stuck with a yakuless tenpai; a closed
+        // one can still cure the same shape by declaring.
+        if (info?.yakuless && !closed) continue;
+        break;
+      }
+      case "pon":
+      case "chi":
+        if (pv.call(a).length !== 0) continue;
+        break;
+      case "daiminkan":
+        if (pv.call(a).length !== 0 || pv.kan(a, obs.drawn).length !== 0) continue;
+        break;
+      case "ankan":
+      case "kakan":
+        if (pv.kan(a, obs.drawn).length !== 0) continue;
+        break;
+    }
+    ok.push(a);
+  }
+  return ok.length > 0 ? ok : obs.legal;
+}
 
 export class NeuralPolicy implements SyncPolicy, EncodingCache {
   readonly name: string;
   readonly sync = true;
   readonly net: Net;
   readonly temperature: number;
+  /** Whether `decide` picks from `compliantActions(obs)` or from `obs.legal`. */
+  readonly dojo: boolean;
   private rng: Rng;
 
   /**
@@ -72,6 +168,7 @@ export class NeuralPolicy implements SyncPolicy, EncodingCache {
     this.rng = sfc32(seed);
     this.net = typeof net === "string" ? loadNet(net) : net;
     this.temperature = opts.temperature ?? 0;
+    this.dojo = opts.dojo ?? true;
   }
 
   reset(seed: number): void {
@@ -170,23 +267,35 @@ export class NeuralPolicy implements SyncPolicy, EncodingCache {
     flatten(enc, this.buf);
     const input = seqInput(this.net, this.flat, seq ?? NO_SEQ, this.buf);
     const logits = forward(this.net, input);
+
+    // The dojo's veto, applied to the SUPPORT rather than to the choice: a
+    // 禁じ手 the referee would name is not offered to the argmax or to the
+    // sampler at all. `legal` — not `obs.legal` — is therefore what every line
+    // below reads, `resolve` included: two actions can share one slot and
+    // differ in compliance (tedashi vs tsumogiri of the same type, aka vs
+    // plain copy), and resolving against the unfiltered list would quietly
+    // hand back the foul variant of the slot the net just picked. It is also
+    // what `lastEncoding` offers the recorder, because PPO's importance ratio
+    // needs the recorded mask to be the support the action was sampled from.
+    const legal = this.dojo ? compliantActions(obs) : obs.legal;
+
     // Offered to a recording wrapper; see `lastEncoding`. `enc`/`seq` are this
     // call's own arrays — `this.buf` is not part of the offer.
-    this.lastEncoding = { obs, planes: enc.planes, scalars: enc.scalars, seq };
+    this.lastEncoding = { obs, planes: enc.planes, scalars: enc.scalars, seq, legal };
 
     // Legality is enforced by the mask, not by the network — and the mask is
-    // `obs.legal` itself, walked once. A slot no legal action names can never
+    // `legal` itself, walked once. A slot no legal action names can never
     // win, which is what the −∞ scatter into a 78-wide vector used to say; a
     // slot the NET drove to −∞ cannot win either, exactly as before (the old
     // ascending scan started at −∞ with a strict `>`).
     let best = -1;
     if (this.temperature > 0) {
-      best = this.sample(logits, this.collectSlots(obs.legal));
+      best = this.sample(logits, this.collectSlots(legal));
     } else {
       // Ties go to the LOWEST slot: the ascending scan spelled that as a strict
       // `>`, and out of order it is `>` on the logit and `<` on the index.
       let bestVal = -Infinity;
-      for (const a of obs.legal) {
+      for (const a of legal) {
         const i = actionIndex(a);
         if (i < 0 || i >= ACTIONS) continue;
         const v = logits[i];
@@ -196,10 +305,10 @@ export class NeuralPolicy implements SyncPolicy, EncodingCache {
         }
       }
     }
-    if (best < 0) return obs.legal[0];
+    if (best < 0) return legal[0];
 
-    const picked = resolve(best, obs.legal, { drawn: obs.drawn, akaIds: obs.akaIds });
+    const picked = resolve(best, legal, { drawn: obs.drawn, akaIds: obs.akaIds });
     // `resolve` only returns null for an unmasked slot, which `best` never is.
-    return picked ?? obs.legal[0];
+    return picked ?? legal[0];
   }
 }

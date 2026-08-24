@@ -23,7 +23,7 @@ import type { Policy } from "./policy.ts";
 import { sfc32 } from "./rng.ts";
 import { DOJO_DEFAULT, JANKI } from "./rules.ts";
 // Real yaku + fu scoring.
-import { scorer } from "./score.ts";
+import { finalStandings, scorer } from "./score.ts";
 import { SEATS } from "./types.ts";
 import type { Seat } from "./types.ts";
 import { App, PacedPolicy } from "./tui/app.ts";
@@ -280,7 +280,8 @@ async function cmdSelfplay(a: Args): Promise<void> {
 /**
  * The two tables and the three lines around them. Everything it reads comes out
  * of `results` in GAME ORDER, so a sharded run prints exactly what the
- * sequential one does — the training scripts grep these rows.
+ * sequential one does. No machine consumer in-repo parses these rows; the
+ * format is kept stable across runs so two runs can be eyeballed side by side.
  */
 function reportSelfplay(a: Args, { results, ms, traj }: RunReport): void {
   const seats: SeatTally[] = SEATS.map(() => ({
@@ -297,10 +298,18 @@ function reportSelfplay(a: Args, { results, ms, traj }: RunReport): void {
     dealPts: 0,
     dealN: 0,
   }));
+  // 道場順位の合計。違反持ちは全員クリーンな席の下、という道場の順位付け
+  // (`score.ts::finalStandings`) をそのまま席ごとに積む。
+  const dojoSum = [0, 0, 0, 0];
   let rounds = 0;
   let draws = 0;
   for (const r of results) {
     rounds += r.rounds.length;
+    // 起家は第1局から読む (`paired.ts::dojoRankOfSeat0` と同じ約束)。
+    const east = (r.rounds[0]?.dealer ?? 0) as Seat;
+    for (const st of finalStandings(r.scores, east, r.ledger, JANKI)) {
+      dojoSum[st.seat] += st.place;
+    }
     for (const v of r.ledger) seats[v.seat].vio++;
     for (const s of SEATS) {
       seats[s].riichis += (r.riichis ?? [0, 0, 0, 0])[s];
@@ -349,21 +358,26 @@ function reportSelfplay(a: Args, { results, ms, traj }: RunReport): void {
   console.log(`局数 ${rounds}  平均 ${(rounds / a.games).toFixed(2)} 局/半荘  流局 ${draws}`);
   console.log(`違反 ${seats.reduce((x, t) => x + t.vio, 0)}件`);
   console.log("");
-  console.log("席     1位   2位   3位   4位   平均順位   平均点    和了率  放銃率  聴牌率  違反");
+  console.log(
+    "席     1位   2位   3位   4位   平均順位   道場順位   平均点    和了率  放銃率  聴牌率  違反",
+  );
   for (const s of SEATS) {
     const t = seats[s];
     const avgRank = t.place.reduce((acc, n, i) => acc + n * (i + 1), 0) / a.games;
+    const avgDojo = dojoSum[s] / a.games;
     const avgPts = t.total / a.games;
     const cells = t.place.map((n) => String(n).padStart(5)).join(" ");
     console.log(
       `${a.seats[s]}P${s} ${cells}   ${avgRank.toFixed(3).padStart(8)}   ` +
+        `${avgDojo.toFixed(3).padStart(8)}   ` +
         `${avgPts.toFixed(0).padStart(7)}   ${pct(t.wins, rounds).padStart(6)}  ` +
         `${pct(t.deals, rounds).padStart(6)}  ${pct(t.tenpai, draws).padStart(6)}  ` +
         `${String(t.vio).padStart(4)}`,
     );
   }
-  // Second table, appended rather than folded into the first: the rows above are
-  // grepped by the training scripts and must stay byte-identical.
+  // Second table, appended rather than folded into the first: no machine
+  // consumer in-repo reads either table, but the first one stays narrow enough
+  // to scan, so the slower-moving averages live down here.
   const mean = (sum: number, n: number) => n === 0 ? "-" : String(Math.round(sum / n));
   console.log("");
   console.log("席     リーチ率  副露率  平均和了打点  平均放銃打点");
@@ -377,8 +391,9 @@ function reportSelfplay(a: Args, { results, ms, traj }: RunReport): void {
     );
   }
   console.log("");
-  // Placement here is by raw score. The dojo's own ranking puts every violator
-  // below every clean player, so read the 違反 column alongside 平均順位.
+  // 平均順位 is placement by raw score; 道場順位 is `score.ts::finalStandings`'
+  // own ranking — every violator below every clean seat, 起家 tie-break — and is
+  // the primary number to read, the same settlement paired's 順位差(道場) reports.
   console.log(`所要 ${(ms / 1000).toFixed(2)}s  (${(a.games / (ms / 1000)).toFixed(1)} 半荘/秒)`);
   if (traj) {
     console.log(

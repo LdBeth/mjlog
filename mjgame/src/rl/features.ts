@@ -46,7 +46,7 @@ import { doraFromIndicatorType, tileType } from "mjrender/tiles.ts";
 import { countsFromTiles, shanten } from "../kernel.ts";
 import type { Observation } from "../observe.ts";
 import type { Table } from "../table.ts";
-import type { Seat } from "../types.ts";
+import type { Action, Seat } from "../types.ts";
 import { SEATS } from "../types.ts";
 
 export const FEATURES = {
@@ -106,6 +106,14 @@ export interface CachedEncoding {
   planes: Int8Array;
   scalars: Float32Array;
   seq: Int8Array | null;
+  /**
+   * The support `decide` actually chose from — `obs.legal` after the dojo
+   * compliance filter (`compliantActions`). This, not `obs.legal`, is what the
+   * recorded `mask` must equal: the trainer's masked softmax has to reproduce
+   * the distribution the action was sampled from, or the importance ratio it
+   * computes is a ratio between two different distributions.
+   */
+  legal: Action[];
 }
 
 /**

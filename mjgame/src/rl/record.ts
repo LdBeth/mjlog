@@ -6,7 +6,8 @@
 //    "planes":"<base64 of the 1632 Int8 bytes>",
 //    "scalars":"<base64 of the 42 little-endian float32 = 168 bytes>",
 //    "seq":"<base64 of the 4×L packed river tokens, L ≤ 96>",
-//    "mask":[legal action indices],"a":<chosen index>,
+//    "mask":[slot indices the action was sampled from — legal minus the
+//            compliance filter's vetoes],"a":<chosen index>,
 //    "o":"<base64 of the 170 oracle Int8 bytes>","sh":[3 opponent shanten]}
 //   {"k":"r","kyoku":0,"honba":0,
 //    "deltas":[4 point deltas, ABSOLUTE seats],"outcome":"agari"|"draw",
@@ -276,6 +277,13 @@ export class RecordingPolicy implements SyncPolicy {
     // here (`toBase64` and `f32leBytes` both copy) and the line is written
     // before this method returns, so nothing survives into the next decision.
     // Whatever scratch buffers the encoders reuse are therefore invisible.
+    //
+    // The offer also carries the SUPPORT the decision was made over, which for
+    // a neural seat is `obs.legal` after its dojo compliance filter — and that
+    // is what `mask` must record, since PPO reweights by a ratio taken against
+    // the distribution the action was actually sampled from. A heuristic inner
+    // offers nothing, so the full legal mask is recorded for it: its own veto
+    // lives in the choice it makes, not in the distribution behind it.
     const offered = (this.inner as Partial<EncodingCache>).lastEncoding ?? null;
     const cached = offered !== null && offered.obs === obs ? offered : null;
     const { planes, scalars } = cached ?? encode(obs);
@@ -290,7 +298,7 @@ export class RecordingPolicy implements SyncPolicy {
       planes: toBase64(new Uint8Array(planes.buffer, planes.byteOffset, planes.byteLength)),
       scalars: toBase64(f32leBytes(scalars)),
       seq: toBase64(new Uint8Array(seq.buffer, seq.byteOffset, seq.byteLength)),
-      mask: maskIndices(obs.legal),
+      mask: maskIndices(cached?.legal ?? obs.legal),
       a: actionIndex(a),
     };
     if (this.oracle) {
