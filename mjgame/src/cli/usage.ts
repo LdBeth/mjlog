@@ -22,7 +22,8 @@ export const USAGE = `mjgame — 雀鬼流ルールの4人麻雀 (人間1 + CPU3
                       毎打の3秒を超えると持ち時間を消費し、使い切ると
                       マイナス表示になる。表示だけの目安で、打牌は強制されず、
                       遅くても罰則は一切ない
-  --seats=hrrn        CPUの種類: h=手作り評価関数, r=ランダム,
+  --seats=hrrn        CPUの種類: h=凍結基準席 (2026-08-25 時点の既定 k席の凍結
+                      コピー。設定は一切受け付けない), r=ランダム,
                       n=学習済みニューラルポリシー, o=オラクル増補,
                       k=計算 (公開情報だけの組合せ読み) (既定 hhhh)。
                       短く書くと最後の文字を繰り返す ("hr" ⇒ "hrrr")。
@@ -40,8 +41,8 @@ export const USAGE = `mjgame — 雀鬼流ルールの4人麻雀 (人間1 + CPU3
                       平場 (全員25000) 比の2つの倍率にして押し引きに掛ける。
                       雀鬼流の補正として「順位−1の仮想プレイヤー」を常に自分の
                       8000点上に置くので、独走トップでも打つのを止めない。
-                      h席・k席に効き、対照の B腕 (hhhh) には決して渡らない。
-                      selfplay / bench / paired 専用
+                      席0の k席に効き、対照の B腕 (hhhh) には決して渡らない
+                      (h席は凍結済み・2026-08-25)。selfplay / bench / paired 専用
   --oracle=C1,C2,C3   o席が読んでよい情報チャネル (既定 C1,C2,C3)。
                       C1=放銃真値 C2=聴牌真値 C3=打点真値 C4=次のツモ
                       C5=次の槓ドラ C6=リーチ者の次のツモ。none で全部切る
@@ -62,11 +63,40 @@ export const USAGE = `mjgame — 雀鬼流ルールの4人麻雀 (人間1 + CPU3
                       E=0 は純オラクル席と、E=1 は素の k席とビット単位で同一。
                       --oracle= で読ませるチャネルを選ぶ。selfplay/bench/paired 専用。
                       学習用: 消費曲線を鍛えるとき、読みの精度だけを連続に劣化させる
-  --ktune=PATH        k席の感性ベクトル {heuristic, augment, computed} のJSON。
+  --table=PATH        卓の完全な記述: 4席ぶんの SeatSpec を並べた JSON。席ごとに
+                      kind (h/k/o/n/r) と、その席だけの ktune (path か inline)・
+                      plan・standings・consumer (path)・curriculum・weights・temp
+                      を書く。ktune 等のパスは table file からの相対。例:
+                        {"seats": [
+                          {"kind":"k", "ktune":"champion.json", "plan":true},
+                          {"kind":"k", "ktune":"other.json"},
+                          {"kind":"h", "ktune":{"hand":{}}},
+                          {"kind":"h"} ]}
+                      同じ部品の別重み・別構成を4席に同時に座らせられる (モジュラー
+                      構成の本形)。--seats/--ktune/--ktune-opp/--plan/--standings/
+                      --consumer/--curriculum/--weights/--temp とは併用不可 (卓が
+                      全てを決める)。--oracle/--noise/--record 等の配線は併用可。
+                      selfplay / bench / paired 専用。paired では --table-b も必須
+                      (対照腕を暗黙の hhhh にしない — 環境一致検査のため)
+  --table-b=PATH      paired の対照 (B腕) を明示的な卓にする。--table が必要で、
+                      席1-3 (環境) は --table と完全一致しなければ拒否される —
+                      両腕は席0だけが異なる、が対照実験の定義 (M11 の交絡の教訓)。
+                      --ktune-b / --consumer-b とは併用不可
+  --ktune=PATH        k席の感性ベクトル {heuristic, augment, computed, hand,
+                      riichi} のJSON。k席だけに効く (h席は凍結済み・2026-08-25 —
+                      hand/riichi の決定モデル節も k席専用になった)。
                       paired では A腕の k席だけに効き、対照の B腕 (hhhh) には
                       決して渡らない。play では k席と助言席 (既定は
                       weights/champion.json) に効く。
                       scripts/tune.ts が書き出す形式
+  --ktune-opp=PATH    相手3席 (席1-3) の感性ベクトル。席0の --ktune とは別の file を
+                      積めるので、二つ目の対戦相手集団を組める (当てはめた
+                      パラメータが他の相手にも効くかを測るのに要る)。ベクトルは
+                      その席の完全な記述なので hand 節も相手側の file のものになる。
+                      未指定なら従来どおり全席が --ktune を共有 (ビット単位で同一)。
+                      paired では相手は「環境」なので A腕・B腕の両方に同じものが
+                      渡り、--ktune-b でも上書きされない。
+                      selfplay / bench / paired 専用
   --ktune-b=PATH      paired の対照 (B腕) にも感性ベクトルを積む。B腕は hhhh ではなく
                       A腕と同じ席種・同じ読み・同じ曲線のまま、--ktune の file だけ
                       こちらになる。つまり測るのは「候補 − 現行」であって

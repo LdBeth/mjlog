@@ -9,6 +9,8 @@ import type { OracleChannel } from "../ai/augmented.ts";
 import type { ConsumerParams } from "../ai/consumer.ts";
 import { DEFAULT_WEIGHTS, loadConsumer, loadKtune } from "../harness.ts";
 import type { KTune } from "../harness.ts";
+import { kindString, loadTable } from "../spec.ts";
+import type { TableSpec } from "../spec.ts";
 import type { GlyphMode } from "../tui/glyph.ts";
 import { die } from "./die.ts";
 
@@ -24,7 +26,8 @@ export interface Args {
   timerBank: number;
   noIntro: boolean;
   /**
-   * CPU kinds, "h" heuristic, "r" random, "n" neural, "o" oracle-augmented or
+   * CPU kinds, "h" the frozen baseline (a 2026-08-25 snapshot of the default
+   * "k" — see `ai/frozen.ts`), "r" random, "n" neural, "o" oracle-augmented or
    * "k" 計算 (the combinatorial reader).
    * selfplay/bench read one char per absolute seat (seat 0 first). play deals
    * the first three chars to the CPU seats in seat order, skipping wherever the
@@ -33,6 +36,31 @@ export interface Args {
    * — it reads nothing the player at the table cannot count for themselves.
    */
   seats: string;
+  /** Whether `--seats` was typed (as opposed to the "hhhh" default). */
+  seatsGiven: boolean;
+  /** Whether `--weights` / `--temp` were typed (they have defaults). */
+  weightsGiven: boolean;
+  tempGiven: boolean;
+  /**
+   * `--table`: the modular seat description — a JSON file of four explicit
+   * `SeatSpec`s, each seat with its OWN complete vector, components and
+   * weights (`spec.ts::loadTable`). The flat per-run flags (`--ktune`,
+   * `--ktune-opp`, `--plan`, `--standings`, `--consumer`, `--curriculum`,
+   * `--weights`, `--temp`, `--seats`) are the legacy spelling of the same
+   * thing, so each of them CONFLICTS with `--table` rather than composing:
+   * a table is a complete description, and a flag that quietly lost to it
+   * would be worse than one refused. `a.seats` is derived from the table for
+   * the reports and the seat-0 checks below.
+   */
+  tablePath: string;
+  table?: TableSpec;
+  /**
+   * `--table-b`: `paired`'s control arm as an explicit table. Seats 1–3 must
+   * equal `--table`'s (the environment is shared; `pairedRun` enforces it) —
+   * the two arms may differ in seat 0 only.
+   */
+  tableBPath: string;
+  tableB?: TableSpec;
   /** Engage the C7 planner on the "k" seats (`--plan`). */
   plan: boolean;
   /**
@@ -78,6 +106,15 @@ export interface Args {
    */
   ktuneBPath: string;
   ktuneB?: KTune;
+  /**
+   * `--ktune-opp`: the OPPONENTS' (席1-3) 感性 vector, distinct from seat 0's
+   * `--ktune`. Without it every seat shares `--ktune` exactly as before; with it
+   * a second, differently tuned population can be built — which is what asking
+   * whether fitted parameters TRANSFER requires. The opponents are the
+   * environment, so in `paired` it reaches both arms alike.
+   */
+  ktuneOppPath: string;
+  ktuneOpp?: KTune;
   /**
    * `--consumer` as typed (report line), and the curve set it loaded. M9: the
    * learned consumer of the evidence vector, on seat 0 of the test arm only —
@@ -142,6 +179,11 @@ export function parseArgs(argv: string[]): Args {
     timerBank: 10_000,
     noIntro: false,
     seats: "hhhh",
+    seatsGiven: false,
+    weightsGiven: false,
+    tempGiven: false,
+    tablePath: "",
+    tableBPath: "",
     plan: false,
     standings: false,
     oracle: parseChannels(DEFAULT_ORACLE)!,
@@ -153,6 +195,7 @@ export function parseArgs(argv: string[]): Args {
     recordAll: false,
     ktunePath: "",
     ktuneBPath: "",
+    ktuneOppPath: "",
     consumerPath: "",
     consumerBPath: "",
     calibrate: "",
@@ -174,11 +217,14 @@ export function parseArgs(argv: string[]): Args {
       if (!m) die(`--timer は 10+3 の形式: ${arg.slice(8)}`);
       a.timerBank = Number(m[1]) * 1000;
       a.timerTurn = Number(m[2] ?? 0) * 1000;
-    } else if (arg.startsWith("--weights=")) a.weights = arg.slice(10);
-    else if (arg.startsWith("--temp=")) {
+    } else if (arg.startsWith("--weights=")) {
+      a.weights = arg.slice(10);
+      a.weightsGiven = true;
+    } else if (arg.startsWith("--temp=")) {
       const v = Number(arg.slice(7));
       if (!Number.isFinite(v) || v < 0) die(`--temp は 0 以上の実数: ${arg.slice(7)}`);
       a.temp = v;
+      a.tempGiven = true;
     } else if (arg === "--record-all") a.recordAll = true;
     else if (arg.startsWith("--record=")) a.record = arg.slice(9);
     else if (arg.startsWith("--oracle=")) {
@@ -197,9 +243,18 @@ export function parseArgs(argv: string[]): Args {
         die(`--curriculum は 0..1 の実数: ${arg.slice(13)}`);
       }
       a.curriculum = v;
+    } else if (arg.startsWith("--table-b=")) {
+      a.tableBPath = arg.slice(10);
+      a.tableB = loadTable(a.tableBPath, "--table-b");
+    } else if (arg.startsWith("--table=")) {
+      a.tablePath = arg.slice(8);
+      a.table = loadTable(a.tablePath);
     } else if (arg.startsWith("--ktune-b=")) {
       a.ktuneBPath = arg.slice(10);
       a.ktuneB = loadKtune(a.ktuneBPath, "--ktune-b");
+    } else if (arg.startsWith("--ktune-opp=")) {
+      a.ktuneOppPath = arg.slice(12);
+      a.ktuneOpp = loadKtune(a.ktuneOppPath, "--ktune-opp");
     } else if (arg.startsWith("--ktune=")) {
       a.ktunePath = arg.slice(8);
       a.ktune = loadKtune(a.ktunePath);
@@ -230,6 +285,7 @@ export function parseArgs(argv: string[]): Args {
       if (!/^[hrnok]{1,4}$/.test(v)) die(`--seats は h, r, n, o, k を4文字まで: ${v}`);
       // Short forms repeat the last letter: "hr" ⇒ "hrrr".
       a.seats = v.padEnd(4, v[v.length - 1]);
+      a.seatsGiven = true;
     } else if (arg.startsWith("--glyphs=")) {
       const v = arg.slice(9);
       if (v !== "ascii" && v !== "kanji") die(`--glyphs は ascii か kanji: ${v}`);
@@ -238,6 +294,10 @@ export function parseArgs(argv: string[]): Args {
     else if (!a.cmd) a.cmd = arg;
     else die(`余分な引数: ${arg}`);
   }
+  // A table decides the kinds; the derived string is what the reports print
+  // and what the seat-0 rules below check. `argError` still refuses the
+  // combination of `--table` with an EXPLICIT `--seats` (see `seatsGiven`).
+  if (a.table) a.seats = kindString(a.table);
   const err = argError(a);
   if (err) die(err);
   return a;
@@ -253,8 +313,15 @@ export type ArgCheck =
       | "curriculum"
       | "consumerBPath"
       | "ktuneBPath"
+      | "ktuneOppPath"
       | "consumerPath"
       | "ktunePath"
+      | "tablePath"
+      | "tableBPath"
+      | "seatsGiven"
+      | "weightsGiven"
+      | "tempGiven"
+      | "plan"
       | "standings"
       | "temp"
       | "record"
@@ -272,6 +339,84 @@ export type ArgCheck =
  * `die` is what lets a test read the rules without spawning a process.
  */
 export function argError(a: ArgCheck): string | null {
+  // `--table` is the modular spelling of the whole per-seat surface, so every
+  // flag it subsumes conflicts instead of composing: a table is a COMPLETE
+  // description of the four seats, and a flag that quietly lost to it would be
+  // the silent no-op this function exists to refuse. Run-level wiring
+  // (`--oracle`, `--noise`, `--record`, `--calibrate`, …) still composes.
+  if (a.tablePath) {
+    if (a.cmd === "play") return "--table は selfplay / bench / paired 専用です";
+    if (a.seatsGiven) return "--table と --seats は併用できません (席種は table が決めます)";
+    if (a.ktunePath) return "--table と --ktune は併用できません (席0の ktune は table に書きます)";
+    if (a.ktuneOppPath) {
+      return "--table と --ktune-opp は併用できません (席1-3の ktune は table に書きます)";
+    }
+    if (a.consumerPath) {
+      return "--table と --consumer は併用できません (席ごとに table で指定します)";
+    }
+    if (a.standings) return "--table と --standings は併用できません (席ごとに table で指定します)";
+    if (a.plan) return "--table と --plan は併用できません (席ごとに table で指定します)";
+    if (a.curriculum !== undefined) {
+      return "--table と --curriculum は併用できません (席ごとに table で指定します)";
+    }
+    if (a.weightsGiven) {
+      return "--table と --weights は併用できません (n席の weights は table に書きます)";
+    }
+    if (a.tempGiven) return "--table と --temp は併用できません (n席の temp は table に書きます)";
+    // A TableSpec arm ignores the flat seat options, so `--ktune-b` against a
+    // table would build arm B identical to arm A and measure zero — silently.
+    if (a.ktuneBPath) {
+      return "--table と --ktune-b は併用できません (対照腕は --table-b で書きます)";
+    }
+    if (a.consumerBPath) {
+      return "--table と --consumer-b は併用できません (対照腕は --table-b で書きます)";
+    }
+    // No implicit hhhh control for a table, either: the fallback carries no
+    // environment guard, which is the exact leak that mis-crowned M11. A
+    // table-based paired run states BOTH arms and gets the guard for free.
+    if (a.cmd === "paired" && !a.tableBPath) {
+      return "paired の --table には --table-b が要ります (対照腕も明示し、環境一致を検査します)";
+    }
+  }
+  if (a.tableBPath) {
+    if (!a.tablePath) {
+      return "--table-b には --table が要ります (対照腕だけを table にはできません)";
+    }
+    if (a.ktuneBPath) return "--table-b と --ktune-b は併用できません";
+    if (a.consumerBPath) return "--table-b と --consumer-b は併用できません";
+  }
+  // 2026-08-25 epoch: the "h" seat is a frozen copy of the default 計算 seat
+  // and configurable by NOTHING, so each of these needs a "k" seat where its
+  // routing points, or it would be accepted and reach nobody. `play` is
+  // exempt from the ktune rule alone: there the vector also feeds the 助言
+  // seat, which exists regardless of the CPU letters.
+  if (a.cmd !== "play") {
+    if (a.ktunePath && !a.seats.includes("k")) {
+      return "--ktune には k席が要ります (h席は凍結済みでベクトルを受け取りません)";
+    }
+    if (a.ktuneOppPath && !a.seats.slice(1).includes("k")) {
+      return "--ktune-opp には席1-3に k席が要ります (h席は凍結済みでベクトルを受け取りません)";
+    }
+    // The default control arm is frozen "hhhh", which no vector reaches — so
+    // an opponents' vector under `paired` needs an incumbent control (same
+    // seats both arms) for "the environment is identical" to stay true.
+    if (a.ktuneOppPath && a.cmd === "paired" && !a.ktuneBPath && !a.consumerBPath) {
+      return "--ktune-opp は paired では --ktune-b / --consumer-b (現行対照) と併用します " +
+        "(既定の対照腕 hhhh は凍結席なので環境が一致しません)";
+    }
+    if (a.standings && a.seats[0] !== "k") {
+      return `--standings は席0が k席のときだけ使えます: --seats=${a.seats} (h席は凍結済み)`;
+    }
+    if (a.consumerPath && a.seats[0] !== "k") {
+      return `--consumer は席0が k席のときだけ使えます: --seats=${a.seats} (h席は凍結済み)`;
+    }
+  }
+  if (a.ktuneBPath && a.seats[0] !== "k") {
+    return `--ktune-b は席0が k席のときだけ使えます: --seats=${a.seats} (対照腕の席0に渡すものです)`;
+  }
+  if (a.consumerBPath && a.seats[0] !== "k") {
+    return `--consumer-b は席0が k席のときだけ使えます: --seats=${a.seats} (対照腕の席0に渡すものです)`;
+  }
   // The curriculum reads the live Table (that is what makes it a curriculum),
   // so it belongs to the headless drivers alone.
   if (a.curriculum !== undefined && a.cmd === "play") {
@@ -302,6 +447,9 @@ export function argError(a: ArgCheck): string | null {
     if (a.consumerPath) return "--consumer は selfplay / bench / paired 専用です";
     if (a.temp) return "--temp は selfplay / bench / paired 専用です (play の n席は常に決定的)";
     if (a.record || a.recordAll) return "--record / --record-all は selfplay 専用です";
+    // `cmdPlay` builds its seats by hand, never through `openArm`, so the
+    // opponents' vector would be accepted and then reach nobody.
+    if (a.ktuneOppPath) return "--ktune-opp は selfplay / bench / paired 専用です";
   }
   // The recorder needs BOTH readers: the 計算 seat whose predictions are being
   // graded (seat 0, and only a "k" seat computes them) and the oracle's tap on
@@ -341,7 +489,7 @@ export function argError(a: ArgCheck): string | null {
       return "--handcalib は selfplay / paired 専用です (局の結末で札を貼るので、通しで打つ駆動が要ります)";
     }
     if (a.seats[0] !== "k" && a.seats[0] !== "h") {
-      return `--handcalib は席0が k席 (計算) か h席 (発見的) のときだけ使えます: --seats=${a.seats}\n` +
+      return `--handcalib は席0が k席 (計算) か h席 (凍結基準) のときだけ使えます: --seats=${a.seats}\n` +
         "手牌価値の読みを持たない席 (n / r / o) には記録するものがありません。";
     }
     if ((a.jobs ?? 1) > 1) {

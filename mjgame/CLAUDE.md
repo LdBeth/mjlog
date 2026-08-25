@@ -101,6 +101,17 @@ buffering seam). Flags a command would silently ignore are rejected by
 
 ## Decisions
 
+- **The "h" seat was RE-BOUND 2026-08-25 (epoch)**: the original hand-written
+  heuristic agent is retired; the letter now builds a FROZEN copy of the
+  default 計算 seat (`src/ai/frozen.ts` — complete weight objects, snapshotted,
+  configurable by nothing; `test/frozen_test.ts` pins it and that pin NEVER
+  regenerates). Vectors route to "k" seats only; `loadTable`/`argError` refuse
+  configuration aimed at an "h" seat. Consequences: numbers in `runs/`
+  recorded before the epoch were measured against the old h population and are
+  not comparable forward, and `--ktune-opp` under `paired` now requires an
+  incumbent control (`--ktune-b`/`--consumer-b`) — the default hhhh control
+  arm is frozen and no vector reaches it.
+
 - **長考/腰 (the time-based Tier-B penalties) were REMOVED 2026-08-23**: a
   keyboard TUI cannot meet physical-table timing norms (3s / 1.2s), only the
   human seat ever had a clock, and one ledger entry demotes the seat below

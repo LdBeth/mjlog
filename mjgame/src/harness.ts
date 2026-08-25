@@ -14,7 +14,6 @@
 // start where a newly built seat's did, or a run would stop reproducing).
 
 import { RandomPolicy } from "./ai/random.ts";
-import { HeuristicPolicy } from "./ai/heuristic.ts";
 import type { HeuristicWeights } from "./ai/heuristic.ts";
 import {
   AugmentedHeuristic,
@@ -31,9 +30,12 @@ import { computedReads } from "./ai/computed.ts";
 import type { ComputedTraceRef, ComputedWeights } from "./ai/computed.ts";
 import { parseConsumerParams } from "./ai/consumer.ts";
 import type { ConsumerParams } from "./ai/consumer.ts";
+import { FROZEN_AUGMENT, FROZEN_COMPUTED, FROZEN_HEURISTIC } from "./ai/frozen.ts";
 import type { HandCalibrationWriter, HandSample } from "./ai/handcalib.ts";
 import { mergeHand } from "./ai/handvalue.ts";
 import type { HandWeights } from "./ai/handvalue.ts";
+import { mergeRiichi } from "./ai/riichi.ts";
+import type { RiichiWeights } from "./ai/riichi.ts";
 import { DEFAULT_STANDINGS_WEIGHTS } from "./ai/standings.ts";
 import { die } from "./cli/die.ts";
 import { makeDojoHooks } from "./dojo.ts";
@@ -46,6 +48,8 @@ import type { MatchResult } from "./match.ts";
 import type { SyncPolicy } from "./policy.ts";
 import { DOJO_HEADLESS, JANKI } from "./rules.ts";
 import { scorer } from "./score.ts";
+import { kindString, resolveTable } from "./spec.ts";
+import type { KTune, SeatSpec, TableSpec } from "./spec.ts";
 import type { Table } from "./table.ts";
 import { SEATS } from "./types.ts";
 import type { RoundOutcome, Seat } from "./types.ts";
@@ -61,76 +65,10 @@ export const DEFAULT_WEIGHTS = "weights/manifest.json";
  */
 const CALIBRATION_CHANNELS = parseChannels("C1,C2,C3")!;
 
-/**
- * A tuned 感性 vector: the three weight objects a "k" seat is built from, each
- * section a PARTIAL merged over its own defaults by the constructor that
- * receives it.
- *
- * Deliberately un-validated. `scripts/tune.ts` writes these files and
- * `ComputedWeights` grows fields as the reader learns to count more; a key
- * whitelist here would have to be edited in lockstep with that, and would
- * reject a forward-compatible file by silently dropping the very term under
- * test. Unknown keys are simply spread onto the defaults and ignored by
- * whatever does not read them.
- */
-export interface KTune {
-  heuristic?: Partial<HeuristicWeights>;
-  augment?: Partial<AugmentedWeights>;
-  computed?: Partial<ComputedWeights>;
-  /**
-   * M11's 手牌価値 scalars. ABSENT means the model is off and the heuristic
-   * family plays the game it has always played — so this section, unlike the
-   * three above, is what SWITCHES a behaviour on rather than retuning one.
-   * `scripts/hand_fit.ts` writes a file whose only key is this one.
-   */
-  hand?: Partial<HandWeights>;
-}
-
-/**
- * Read a `--ktune` file. Unreadable or malformed is fatal, never silent.
- * `flag` names the option in the diagnostics, so `--ktune-b` reports itself.
- */
-export function loadKtune(path: string, flag = "--ktune"): KTune {
-  let text: string;
-  try {
-    text = Deno.readTextFileSync(path);
-  } catch (e) {
-    return die(`${flag} のファイルが読めません: ${path}\n${e instanceof Error ? e.message : e}`);
-  }
-  let json: unknown;
-  try {
-    json = JSON.parse(text);
-  } catch (e) {
-    return die(`${flag} のJSONが壊れています: ${path}\n${e instanceof Error ? e.message : e}`);
-  }
-  if (typeof json !== "object" || json === null || Array.isArray(json)) {
-    die(
-      `${flag} はオブジェクト {heuristic, augment, computed, hand} である必要があります: ${path}`,
-    );
-  }
-  // Sections only — the contents pass through verbatim.
-  const k = json as KTune;
-  return { heuristic: k.heuristic, augment: k.augment, computed: k.computed, hand: k.hand };
-}
-
-/**
- * Read a `--consumer` file. Unreadable, malformed or incomplete is fatal: a
- * silently-defaulted consumer would measure the hand-written score and call it
- * the fitted one.
- */
-export function loadConsumer(path: string): ConsumerParams {
-  let text: string;
-  try {
-    text = Deno.readTextFileSync(path);
-  } catch (e) {
-    return die(`--consumer のファイルが読めません: ${path}\n${e instanceof Error ? e.message : e}`);
-  }
-  try {
-    return parseConsumerParams(JSON.parse(text));
-  } catch (e) {
-    return die(`--consumer のJSONが不正です: ${path}\n${e instanceof Error ? e.message : e}`);
-  }
-}
+// The seat/table description layer lives in `spec.ts`; re-exported here because
+// this module has always been where the CLI and the tests read them from.
+export { loadConsumer, loadKtune, loadTable, resolveTable } from "./spec.ts";
+export type { KTune, SeatSpec, TableSpec } from "./spec.ts";
 
 /** What an "o" seat needs: the live-Table tap and the channels it may read. */
 export interface OracleWiring {
@@ -143,28 +81,17 @@ export interface OracleWiring {
   noise?: number;
 }
 
-/** Everything one seat is built from. `kind` is the `--seats` letter. */
-export interface MakePolicyOptions {
-  kind: string;
+/**
+ * Everything one seat is built from: its `SeatSpec` — the complete, plain-JSON
+ * description of WHO the seat is (`spec.ts`) — plus the wiring only the driver
+ * holds: a name, an rng seed, the live-Table tap, and the recording sinks.
+ */
+export interface MakePolicyOptions extends SeatSpec {
   name: string;
   /** The seat's own rng seed, and what `reset` is handed for the first match. */
   seed: number;
-  /** Manifest path for an "n" seat. */
-  weights?: string;
-  /** Softmax temperature for an "n" seat; 0 or omitted = greedy. */
-  temp?: number;
   /** The live-Table tap; absent in `play`, which has no hidden-info seats. */
   oracle?: OracleWiring;
-  /** Engage the C7 planner on a "k" seat. */
-  plan?: boolean;
-  /** Tuned 感性 vector for a "k" seat. */
-  ktune?: KTune;
-  /** 順位効用 for this seat (the caller decides WHICH seat may carry it). */
-  standings?: boolean;
-  /** M9's learned consumer for this seat. */
-  consumer?: ConsumerParams;
-  /** M9c curriculum rate for a "k" seat's reader. */
-  curriculum?: number;
   /** M10a: where a "k" seat's calibration records go. */
   calibrate?: (rec: CalibRecord) => void;
   /**
@@ -234,6 +161,13 @@ export function makePolicy(o: MakePolicyOptions): SeatPolicy {
   // against the baseline it is meant to beat. Absent (no `hand` section in the
   // file) it stays undefined and neither seat kind changes by a single bit.
   const hand = o.ktune?.hand && mergeHand(o.ktune.hand);
+  // M12 riichi head. Same cross-kind reach as `hand`, for the same reason: a
+  // decision MODEL, not a 感性 vector — the pre-fit lane and the baseline it
+  // must beat are both "h" seats, so withholding it from "h" would leave it
+  // untestable. Absent (no `riichi` section) neither seat kind changes by a
+  // bit. With `--ktune-opp` the opponents' file may carry its own block —
+  // nothing extra to wire, since each seat's vector fully describes that seat.
+  const riichiHead = o.ktune?.riichi && mergeRiichi(o.ktune.riichi);
   if (kind === "r") return reseeded(new RandomPolicy(name, seed));
   if (kind === "k") {
     // 計算. The same consumption terms as an "o" seat, fed by exact counting
@@ -299,6 +233,7 @@ export function makePolicy(o: MakePolicyOptions): SeatPolicy {
         // the 計算 reader's own constants).
         consumer: o.consumer,
         hand,
+        riichi: riichiHead,
         handSink: o.handSink,
       }));
   }
@@ -335,14 +270,27 @@ export function makePolicy(o: MakePolicyOptions): SeatPolicy {
     // The one seat kind that holds memory the process does not free on its own.
     return { policy: p, reset: (s) => p.reset(s), close: () => p.close() };
   }
-  return reseeded(
-    new HeuristicPolicy(name, seed, {
-      weights: rank,
-      consumer: o.consumer,
-      hand,
+  // "h" — 2026-08-25 EPOCH. The original hand-written heuristic seat is
+  // retired; the letter now builds a FROZEN copy of the default 計算 seat
+  // (`ai/frozen.ts`). Nothing configurable reaches it — no ktune, no hand
+  // block, no riichi head, no consumer/standings/planner/curriculum — which is
+  // the property that makes it a baseline: `resolveTable` routes the vectors
+  // to "k" seats only, and `loadTable`/`argError` refuse the attempt loudly.
+  // The one thing that still composes is `handSink`: a recording tap, not a
+  // policy knob — the seat plays identically with or without it.
+  const frozen = (): ReadsProvider => computedReads(FROZEN_COMPUTED);
+  return withReads(frozen, (reads) =>
+    new AugmentedHeuristic(name, seed, reads, {
+      weights: FROZEN_HEURISTIC,
+      augment: FROZEN_AUGMENT,
+      // Spelled out even though they equal today's constructor defaults: a
+      // default is a LIVE value, and the frozen seat may not reference one —
+      // if these ever drift for "k" experimentation, this seat must not move.
+      kuitan: true,
+      dojo: true,
+      epsilon: 0,
       handSink: o.handSink,
-    }),
-  );
+    }));
 }
 
 export interface HeadlessOptions {
@@ -387,6 +335,25 @@ export interface HeadlessOptions {
    * control arm.
    */
   ktune?: KTune;
+  /**
+   * The OPPONENTS' (seats 1–3) tuning vector, distinct from the subject's
+   * `ktune`. Absent, the opponents share the subject's `--ktune` exactly as
+   * before — bit-for-bit; the option exists so a SECOND competent population can
+   * be built, which is what measuring whether fitted parameters transfer needs.
+   *
+   * Unlike `ktuneB` this is not a control-arm knob: the opponents are the
+   * ENVIRONMENT, so `pairedRun` hands this to BOTH arms unchanged.
+   */
+  ktuneOpp?: KTune;
+  /**
+   * `pairedRun` ONLY (`headless` ignores it): an EXPLICIT control table — the
+   * `--table-b` form of the incumbent comparison. Set, the control arm is built
+   * from these four specs instead of from `ktuneB`/`consumerB` (which the CLI
+   * refuses alongside it), and `pairedRun` REFUSES the pair unless seats 1–3
+   * match arm A's resolved specs exactly: the opponents are the environment,
+   * and the environment must be identical in both arms.
+   */
+  tableB?: TableSpec;
   /**
    * `pairedRun` ONLY (`headless` ignores it): the CONTROL arm's 感性 vector.
    *
@@ -453,7 +420,10 @@ export interface HeadlessOptions {
  * rather than a scope inside `headless`.
  */
 export interface Arm {
+  /** Kind letters, for reports — derived from the table ("khhh"). */
   readonly seats: string;
+  /** The four resolved specs this arm was built from. */
+  readonly table: TableSpec;
   /** What the engine plays: the seats, wrapped in recorders where asked for. */
   readonly policies: SyncPolicy[];
   /** The same seats, unwrapped, for `reset` and `close`. */
@@ -469,7 +439,16 @@ export interface Arm {
   readonly handCalib: HandCalibrationWriter | undefined;
 }
 
-export function openArm(seats: string, opts: HeadlessOptions = {}): Arm {
+/**
+ * Open one arm — from a legacy seats-string (whose per-seat conventions
+ * `resolveTable` reproduces bit for bit) or from an explicit `TableSpec`, the
+ * modular form: four complete seats, each with its own components and weights.
+ * A string arm is DEFINED as `openArm(resolveTable(seats, opts), opts)`, so
+ * the two paths cannot drift.
+ */
+export function openArm(seats: string | TableSpec, opts: HeadlessOptions = {}): Arm {
+  const table = typeof seats === "string" ? resolveTable(seats, opts) : seats;
+  const kinds = kindString(table);
   // One file, one handle, every seat and every match of the run: the trainer
   // reads a single stream and the "r"/"m" lines terminate each match in it.
   // …unless the caller brought its own sink (a `--jobs` worker does).
@@ -479,36 +458,32 @@ export function openArm(seats: string, opts: HeadlessOptions = {}): Arm {
   // outside a round nobody calls the tap.
   // ...and the oracle seats' window onto the same thing. One tap serves both.
   const ref: { t: Table | null } = { t: null };
-  const oracleSeats = seats.includes("o");
+  const oracleSeats = table.some((s) => s.kind === "o");
   // The curriculum's oracle half needs the same tap, on a "k" seat that would
   // otherwise never ask for it.
-  const curriculumOn = opts.curriculum !== undefined && seats[0] === "k";
+  const curriculumOn = table.some((s) => s.kind === "k" && s.curriculum !== undefined);
   // …and so does the calibration recorder, for the truth half of its records.
-  const calibrateOn = opts.calibrate !== undefined && seats[0] === "k";
+  const calibrateOn = opts.calibrate !== undefined && table[0].kind === "k";
   // M11's lane. No tap needed — the writer reads the Table through `onRoundEnd`
   // — and "h" qualifies as well as "k": the pre-fit lane is plain `hhhh`.
-  const handCalibOn = opts.handCalib !== undefined && (seats[0] === "k" || seats[0] === "h");
+  const handCalibOn = opts.handCalib !== undefined &&
+    (table[0].kind === "k" || table[0].kind === "h");
   const wiring: OracleWiring = {
     get: () => ref.t,
     channels: opts.oracle ?? new Set(),
     noise: opts.noise ?? 0,
   };
-  const built = SEATS.map((seat) =>
+  const built = table.map((spec, seat) =>
     makePolicy({
-      kind: seats[seat],
-      name: `${seats[seat].toUpperCase()}${seat}`,
+      // The seat IS its spec — kind, vector, components, weights — plus the
+      // wiring only this driver holds.
+      ...spec,
+      name: `${spec.kind.toUpperCase()}${seat}`,
       // A placeholder: the construction seed only ever seeds the seat's rng,
       // and `playGame` re-seeds it — including before the FIRST match, so no
       // match is ever played on this number.
       seed: seat,
-      weights: opts.weights,
-      temp: opts.temp,
       oracle: wiring,
-      plan: opts.plan,
-      ktune: opts.ktune,
-      standings: (opts.standings ?? false) && seat === 0,
-      consumer: seat === 0 ? opts.consumer : undefined,
-      curriculum: seat === 0 ? opts.curriculum : undefined,
       calibrate: calibrateOn && seat === 0 ? opts.calibrate!.record : undefined,
       handSink: handCalibOn && seat === 0 ? opts.handCalib!.record : undefined,
     })
@@ -520,12 +495,13 @@ export function openArm(seats: string, opts: HeadlessOptions = {}): Arm {
   // `recordAll` overrides for BC teacher datasets, whose consumer (bc.py) never
   // computes a ratio.
   const policies = built.map((b, seat) =>
-    writer && (opts.recordAll || seats[seat] === "n")
+    writer && (opts.recordAll || table[seat].kind === "n")
       ? new RecordingPolicy(b.policy, writer, (sq) => encodeOracle(ref.t!, sq as Seat))
       : b.policy
   );
   return {
-    seats,
+    seats: kinds,
+    table,
     policies,
     built,
     writer,
@@ -592,7 +568,7 @@ export interface RunReport {
 export function headless(
   games: number,
   seed: number,
-  seats = "hhhh",
+  seats: string | TableSpec = "hhhh",
   opts: HeadlessOptions = {},
 ): RunReport {
   const results: MatchResult[] = [];
@@ -654,15 +630,23 @@ export function headless(
  * `postMessage`. `record` is replaced by a boolean (the path stays on the main
  * thread), `writer`/`calibrate` are live objects and never cross, and
  * `ktuneB`/`consumerB` belong to `pairedRun`, which does not shard.
+ *
+ * `ktune` and `ktuneOpp` are plain JSON and deliberately DO cross: a sharded
+ * run must build the same four seats every worker would.
  */
 export type ArmSpec = Omit<
   HeadlessOptions,
-  "record" | "writer" | "calibrate" | "handCalib" | "ktuneB" | "consumerB"
+  "record" | "writer" | "calibrate" | "handCalib" | "ktuneB" | "consumerB" | "tableB"
 >;
 
 /** The one message a worker receives: its arm, and the games it owns. */
 export interface ShardInit {
-  seats: string;
+  /**
+   * The RESOLVED table — the main thread runs `resolveTable` (or takes the
+   * caller's explicit specs) exactly once, and every worker builds from the
+   * same four specs. Plain JSON, so `postMessage` carries it verbatim.
+   */
+  table: TableSpec;
   opts: ArmSpec;
   /** This worker's games, in the order it plays them. `i` is the game INDEX. */
   games: Array<{ i: number; seed: number }>;
@@ -740,12 +724,15 @@ function launchShard(
 export async function headlessParallel(
   games: number,
   seed: number,
-  seats: string,
+  seats: string | TableSpec,
   jobs: number,
   opts: HeadlessOptions = {},
 ): Promise<RunReport> {
   if (opts.calibrate) throw new Error("headlessParallel: --calibrate cannot be sharded");
   if (opts.handCalib) throw new Error("headlessParallel: --handcalib cannot be sharded");
+  // Resolved HERE, once: every shard receives the same four specs, so a table
+  // and its seats-string form shard identically by construction.
+  const table = typeof seats === "string" ? resolveTable(seats, opts) : seats;
   const n = Math.max(1, Math.min(Math.floor(jobs), games));
   const {
     record,
@@ -786,7 +773,7 @@ export async function headlessParallel(
     for (let w = 0; w < n; w++) {
       const mine: Array<{ i: number; seed: number }> = [];
       for (let i = w; i < games; i += n) mine.push({ i, seed: seed + i });
-      shards.push(launchShard(url, { seats, opts: spec, games: mine, record: !!record }, onGame));
+      shards.push(launchShard(url, { table, opts: spec, games: mine, record: !!record }, onGame));
       // Worker 0 alone is allowed to race with nobody: it warms the native
       // kernel's lazy tables before anyone else exists. See hazard (a) above.
       if (w === 0) await shards[0].ready;

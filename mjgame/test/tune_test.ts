@@ -128,9 +128,12 @@ Deno.test("ktune-b: 同じベクトルを両腕に渡すと差は厳密に0", ()
 Deno.test("ktune-b は対照腕だけを差し替え、A腕には触れない", () => {
   const A: KTune = { heuristic: { dora: 100_000 } };
   const vsBaseline = pairedRun(4, 777, "khhh", { ktune: A });
-  // An EMPTY vector is still a "k" seat, which the hhhh control is not — so the
-  // control arm must visibly move while arm A stays bit-identical.
-  const vsIncumbent = pairedRun(4, 777, "khhh", { ktune: A, ktuneB: {} });
+  // The incumbent must be VISIBLY not the baseline. (Before the 2026-08-25
+  // epoch an empty vector sufficed — a bare "k" seat differed from the old
+  // hand-written "h". Now frozen-h IS a copy of the bare "k", so the two arms
+  // would coincide bit for bit; the control needs a vector of its own.)
+  const B: KTune = { heuristic: { dora: 50_000 } };
+  const vsIncumbent = pairedRun(4, 777, "khhh", { ktune: A, ktuneB: B });
   assertEquals(vsIncumbent.rankA, vsBaseline.rankA, "対照の指定がA腕を動かした");
   assertEquals(vsIncumbent.scoreA, vsBaseline.scoreA, "対照の指定がA腕を動かした");
   assertNotEquals(vsIncumbent.scoreB, vsBaseline.scoreB, "B腕が hhhh のままになっている");

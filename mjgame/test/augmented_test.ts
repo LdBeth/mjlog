@@ -748,11 +748,20 @@ Deno.test("augmented: a faded oracle seat plays a legal hanchan, reproducibly", 
   assertNotEquals(a.scores, full, "ε=0.5 が真値と同じ打牌 — 劣化が効いていない");
 });
 
-Deno.test("augmented: with no channels the seat is the plain heuristic, bit for bit", () => {
-  const st = pairedRun(1, 909, "ohhh", { oracle: new Set() });
-  assertEquals(st.dRank.mean, 0);
-  assertEquals(st.dScore.mean, 0);
-  assertEquals(st.vioA, st.vioB);
+Deno.test("augmented: with no channels the seat is the base heuristic, bit for bit", () => {
+  // Checked at the CLASS level since the 2026-08-25 epoch: the table letter
+  // "h" now builds the frozen 計算 seat, so `pairedRun`'s hhhh control can no
+  // longer stand in for "the plain heuristic". The claim itself is unchanged —
+  // an oracle seat reading ZERO channels must degrade to exactly the base
+  // `HeuristicPolicy` it extends.
+  const zero = playOne(909, new Set());
+  const base = playHanchan(
+    909,
+    (s) => new HeuristicPolicy(`${s === 0 ? "O" : "H"}${s}`, 909 * 4 + s),
+  );
+  assertEquals(zero.scores, base.scores);
+  assertEquals(zero.ledger, base.ledger);
+  assertEquals(zero.rounds.length, base.rounds.length);
 });
 
 Deno.test("paired: reports a paired difference over identical walls", () => {

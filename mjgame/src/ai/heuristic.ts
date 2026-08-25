@@ -40,6 +40,8 @@ import { assembleCandidate, assembleContext } from "./evidence.ts";
 import type { HandSample } from "./handcalib.ts";
 import type { HandFacts, HandOutlook, HandWeights } from "./handvalue.ts";
 import { DEFAULT_HAND, handOutlook } from "./handvalue.ts";
+import type { RiichiFeatures, RiichiWeights } from "./riichi.ts";
+import { decideRiichi } from "./riichi.ts";
 import { doraTypesOf, publicUnseen, valueHonorsOf } from "./planner.ts";
 import type { StandingsWeights } from "./standings.ts";
 import { standingsScales } from "./standings.ts";
@@ -152,6 +154,16 @@ export interface HeuristicOptions {
    * offline fit also calls.
    */
   hand?: HandWeights;
+  /**
+   * M12. The riichi head (`riichi.ts`) — the learned declare-vs-damaten
+   * decision. ABSENT BY DEFAULT, and absent means `wantRiichi` behaves bit for
+   * bit as it always has: the four gates, then declare. Present, it replaces
+   * exactly one thing — the unconditional "declare" inside the region the
+   * gates admit — with `decideRiichi` over the features of the post-discard
+   * shape. The gates themselves, `riichiBanned` and the `mustCure` override
+   * stay outside it, always.
+   */
+  riichi?: RiichiWeights;
   /**
    * M11's recorder, one sample per turn decision (`handcalib.ts` labels them
    * from the outcome of the 局).
@@ -323,6 +335,8 @@ export class HeuristicPolicy implements SyncPolicy {
    * seat still carries a well-defined prediction to fit against.
    */
   private handW: HandWeights;
+  /** M12's head, or null for the unconditional declare. */
+  private riichiHead: RiichiWeights | null;
   private handSink: ((rec: HandSample) => void) | null;
   private memo: DecisionMemo | null = null;
 
@@ -342,6 +356,7 @@ export class HeuristicPolicy implements SyncPolicy {
     this.consumer = opts.consumer ?? null;
     this.hand = opts.hand ?? null;
     this.handW = opts.hand ?? DEFAULT_HAND;
+    this.riichiHead = opts.riichi ?? null;
     this.handSink = opts.handSink ?? null;
     this.rng = sfc32(seed);
   }
@@ -1179,7 +1194,7 @@ export class HeuristicPolicy implements SyncPolicy {
     return false;
   }
 
-  private wantRiichi(ctx: Ctx, _discard: Tile): boolean {
+  private wantRiichi(ctx: Ctx, discard: Tile): boolean {
     const { obs } = ctx;
     const waits = this.waitsOf(obs);
     if (waits.length === 0) return false;
@@ -1188,7 +1203,44 @@ export class HeuristicPolicy implements SyncPolicy {
     // Furiten riichi is legal in the dojo but rarely what you want.
     if (obs.furiten.permanent || obs.furiten.temporary) return false;
 
-    return obs.wallRemaining >= 4;
+    if (obs.wallRemaining < 4) return false;
+
+    // M12. The four gates above are exactly the pre-head policy and stay so —
+    // the head is consulted only INSIDE the region they admit, and only to pick
+    // declare over damaten. Absent, declaring unconditionally is the answer the
+    // gates have always given.
+    if (!this.riichiHead) return true;
+    return decideRiichi(this.riichiFeatures(ctx, discard), this.riichiHead);
+  }
+
+  /**
+   * The head's view of one gated-in declaration. Everything comes off the
+   * memoized `handEntry` of the POST-DISCARD resting shape — the same entry the
+   * M11 hooks read, so no new computation path exists — plus the one public
+   * fact the outlook does not carry: who has already declared. The gates above
+   * deliberately keep reading `waitsOf`'s resting-hand approximation; the head
+   * is free to see the committed shape.
+   */
+  private riichiFeatures(ctx: Ctx, discard: Tile): RiichiFeatures {
+    const { obs } = ctx;
+    const rest = this.handWithout(ctx, discard);
+    // sh 0: riichi is only on offer when the discard leaves tenpai.
+    const { facts, out } = this.handEntry(obs, rest, 0, { tile: discard });
+    let oppRiichi = 0;
+    for (let s = 1; s < 4; s++) if (obs.riichi[s]) oppRiichi++;
+    return {
+      ev: out.ev / 1000,
+      pwin: out.pwin,
+      value: out.value / 1000,
+      liveWaits: facts.ukeire,
+      waitTypes: facts.ukeireTypes,
+      junme: facts.junme,
+      turnsLeft: facts.turnsLeft,
+      dora: facts.dora,
+      dealer: facts.dealer ? 1 : 0,
+      oppRiichi,
+      kyotaku: facts.kyotaku,
+    };
   }
 
   private liveWaits(obs: Observation, waits: number[]): number {

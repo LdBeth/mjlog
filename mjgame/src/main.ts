@@ -16,6 +16,8 @@ import { writeExport } from "./export.ts";
 import { headless, headlessParallel, loadKtune, makePolicy } from "./harness.ts";
 import type { HeuristicPolicy } from "./ai/heuristic.ts";
 import type { HeadlessOptions, RunReport, SeatPolicy } from "./harness.ts";
+import { kindString } from "./spec.ts";
+import type { SeatKind } from "./spec.ts";
 import { pairedJson, pairedRun } from "./paired.ts";
 import { runMatch } from "./match.ts";
 import type { MatchResult } from "./match.ts";
@@ -38,10 +40,11 @@ import * as term from "./tui/term.ts";
  * non-human seats in seat order, so "nhhh" is one neural CPU no matter where
  * the human landed. (selfplay/bench read the same string per absolute seat.)
  */
-export function cpuKindAt(cpu: string, humanSeat: Seat, seat: Seat): string {
+export function cpuKindAt(cpu: string, humanSeat: Seat, seat: Seat): SeatKind {
   let i = 0;
   for (let s = 0; s < seat; s++) if (s !== humanSeat) i++;
-  return cpu[i] ?? "h";
+  // `argError` has already vetted the letters, so the cast records a fact.
+  return (cpu[i] ?? "h") as SeatKind;
 }
 
 /**
@@ -258,6 +261,7 @@ async function cmdSelfplay(a: Args): Promise<void> {
       curriculum: a.curriculum,
       plan: a.plan,
       ktune: a.ktune,
+      ktuneOpp: a.ktuneOpp,
       standings: a.standings,
       consumer: a.consumer,
     };
@@ -265,9 +269,12 @@ async function cmdSelfplay(a: Args): Promise<void> {
     // nothing below is reachable without the flag. Sharding a run shorter than
     // the job count would only spawn idle workers, so N is clamped there too —
     // `headlessParallel` does the clamping, this decides whether to shard at all.
+    // `--table` hands the driver the four explicit specs; the legacy flags go
+    // through `resolveTable` inside. `a.seats` already prints the right kinds
+    // either way (parseArgs derives it from the table).
     const run = a.jobs > 1 && a.games > 1
-      ? await headlessParallel(a.games, a.seed, a.seats, a.jobs, opts)
-      : headless(a.games, a.seed, a.seats, opts);
+      ? await headlessParallel(a.games, a.seed, a.table ?? a.seats, a.jobs, opts)
+      : headless(a.games, a.seed, a.table ?? a.seats, opts);
     reportSelfplay(a, run);
   } finally {
     calibrate?.close();
@@ -353,7 +360,8 @@ function reportSelfplay(a: Args, { results, ms, traj }: RunReport): void {
     (a.seats.includes("k") ? `  計算${a.plan ? " 立案あり" : ""}` : "") +
     (a.standings ? "  順位効用" : "");
   console.log(
-    `対局数 ${a.games}  (seed ${a.seed}..${a.seed + a.games - 1})  席 ${a.seats}${arm}`,
+    `対局数 ${a.games}  (seed ${a.seed}..${a.seed + a.games - 1})  席 ${a.seats}${arm}` +
+      (a.tablePath ? `  卓 ${a.tablePath}` : ""),
   );
   console.log(`局数 ${rounds}  平均 ${(rounds / a.games).toFixed(2)} 局/半荘  流局 ${draws}`);
   console.log(`違反 ${seats.reduce((x, t) => x + t.vio, 0)}件`);
@@ -426,7 +434,7 @@ function cmdPairedInner(
   handCalib?: HandCalibrationWriter,
 ): void {
   if (a.games < 1) die("--games は1以上");
-  const st = pairedRun(a.games, a.seed, a.seats, {
+  const st = pairedRun(a.games, a.seed, a.table ?? a.seats, {
     calibrate,
     handCalib,
     weights: a.weights,
@@ -437,6 +445,8 @@ function cmdPairedInner(
     plan: a.plan,
     ktune: a.ktune,
     ktuneB: a.ktuneB,
+    ktuneOpp: a.ktuneOpp,
+    tableB: a.tableB,
     standings: a.standings,
     consumer: a.consumer,
     consumerB: a.consumerB,
@@ -448,18 +458,23 @@ function cmdPairedInner(
   const sign = (x: number) => (x >= 0 ? "+" : "") + x.toFixed(3);
   const signPt = (x: number) => (x >= 0 ? "+" : "") + x.toFixed(0);
 
+  const bSeats = a.tableB
+    ? kindString(a.tableB)
+    : a.consumerBPath || a.ktuneBPath
+    ? st.seats
+    : "hhhh";
   console.log(
     `対局数 ${st.games}  (seed ${st.seed}..${st.seed + st.games - 1})  ` +
-      `A席 ${st.seats} / B席 ${a.consumerBPath || a.ktuneBPath ? st.seats : "hhhh"}  オラクル ${
-        oracleLabel(a)
-      }` +
+      `A席 ${st.seats} / B席 ${bSeats}  オラクル ${oracleLabel(a)}` +
       (a.seats.includes("k") ? `  計算${a.plan ? " 立案あり" : ""}` : "") +
       (a.curriculum !== undefined ? `  カリキュラム E=${a.curriculum}` : "") +
       (a.standings ? "  順位効用" : "") +
       (a.ktunePath ? `  感性${a.ktuneBPath ? "A" : ""} ${a.ktunePath}` : "") +
       (a.ktuneBPath ? `  感性B ${a.ktuneBPath}` : "") +
       (a.consumerPath ? `  消費${a.consumerBPath ? "A" : ""} ${a.consumerPath}` : "") +
-      (a.consumerBPath ? `  消費B ${a.consumerBPath}` : ""),
+      (a.consumerBPath ? `  消費B ${a.consumerBPath}` : "") +
+      (a.tablePath ? `  卓 ${a.tablePath}` : "") +
+      (a.tableBPath ? `  卓B ${a.tableBPath}` : ""),
   );
   console.log("");
   console.log("腕     席0平均順位   道場順位   席0平均点   違反(全席)");
@@ -467,12 +482,12 @@ function cmdPairedInner(
     `A ${st.seats}${st.rankA.toFixed(3).padStart(10)}${st.rankDojoA.toFixed(3).padStart(11)}` +
       `${st.scoreA.toFixed(0).padStart(12)}${String(st.vioA).padStart(13)}`,
   );
-  // With --consumer-b / --ktune-b the control arm is the same seat kind as A,
-  // not hhhh.
+  // With --consumer-b / --ktune-b / --table-b the control arm is not hhhh;
+  // `bSeats` (computed with the header above) names what it actually is.
   console.log(
-    `B ${(a.consumerBPath || a.ktuneBPath ? st.seats : "hhhh").padEnd(4)}${
-      st.rankB.toFixed(3).padStart(10)
-    }${st.rankDojoB.toFixed(3).padStart(11)}` +
+    `B ${bSeats.padEnd(4)}${st.rankB.toFixed(3).padStart(10)}${
+      st.rankDojoB.toFixed(3).padStart(11)
+    }` +
       `${st.scoreB.toFixed(0).padStart(12)}${String(st.vioB).padStart(13)}`,
   );
   console.log("");
@@ -530,13 +545,14 @@ function cmdPairedInner(
 // ---------------------------------------------------------------------------
 
 function cmdBench(a: Args): void {
-  const { results, ms } = headless(a.games, a.seed, a.seats, {
+  const { results, ms } = headless(a.games, a.seed, a.table ?? a.seats, {
     weights: a.weights,
     oracle: a.oracle,
     noise: a.noise,
     curriculum: a.curriculum,
     plan: a.plan,
     ktune: a.ktune,
+    ktuneOpp: a.ktuneOpp,
     standings: a.standings,
     consumer: a.consumer,
   });

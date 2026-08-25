@@ -7,6 +7,8 @@ import type { Arm, HeadlessOptions } from "./harness.ts";
 import type { MatchResult } from "./match.ts";
 import { JANKI } from "./rules.ts";
 import { finalStandings } from "./score.ts";
+import { sameEnvironment } from "./spec.ts";
+import type { TableSpec } from "./spec.ts";
 import type { Seat } from "./types.ts";
 
 /** Seat 0's placement by raw score. Ties go to the lower seat, as in selfplay. */
@@ -102,7 +104,7 @@ export interface PairedStats {
 export function pairedRun(
   games: number,
   seed: number,
-  seats: string,
+  seats: string | TableSpec,
   opts: HeadlessOptions = {},
 ): PairedStats {
   const dRank: number[] = [];
@@ -117,8 +119,16 @@ export function pairedRun(
   const t0 = performance.now();
 
   const armA = openArm(seats, opts);
-  // The control arm is handed ONE option, and it is not a tuning knob: the
-  // manifest path, so an "n" seat in `seats` has a comparable baseline to load.
+  // The control arm is handed two options, neither of them a knob on the seat
+  // under test: the manifest path, so an "n" seat in `seats` has a comparable
+  // baseline to load, and `ktuneOpp`.
+  //
+  // THE OPPONENTS ARE THE ENVIRONMENT. `ktuneOpp` describes seats 1–3, not the
+  // subject, so it reaches arm A and arm B IDENTICALLY — including the plain
+  // `hhhh` baseline below, whose "h" seats read the vector's `hand` block. It is
+  // never overridden by `--ktune-b`, which swaps the SUBJECT's vector alone. If
+  // the two arms faced differently-tuned opponents the paired difference would
+  // no longer be a difference of players over one wall.
   // Nothing that could move seat 0's play — `oracle`, `noise`, `plan`, `ktune`,
   // `standings` — may cross this line, or the difference below would be measured
   // against a baseline the candidate had already edited. (hhhh has no "k" or "o"
@@ -135,15 +145,39 @@ export function pairedRun(
   // on arm A's trajectory file, and the control arm is not what is being
   // calibrated — its decisions would interleave into arm A's records under the
   // same seed. Stripped structurally rather than overridden, so a field added to
-  // `HeadlessOptions` later cannot reintroduce them by being spread.
+  // `HeadlessOptions` later cannot reintroduce them by being spread. (A
+  // `TableSpec` control arm gets this discipline for free: a spec is plain
+  // JSON and cannot carry a writer at all.)
   const { record: _record, calibrate: _calibrate, handCalib: _handCalib, ...shared } = opts;
-  const armB: Arm = incumbent
-    ? openArm(seats, {
-      ...shared,
-      consumer: opts.consumerB ?? opts.consumer,
-      ktune: opts.ktuneB ?? opts.ktune,
-    })
-    : openArm("hhhh", { weights: opts.weights });
+  let armB: Arm;
+  if (opts.tableB !== undefined) {
+    // `--table-b`: an EXPLICIT control table. The guard is the reason this form
+    // exists: seats 1–3 are the environment, and two arms facing different
+    // environments measure a difference of fields, not of players — the exact
+    // confound that mis-crowned the M11 champion. Checked on the RESOLVED
+    // specs, so it cannot be argued with; a legitimate environment change is a
+    // different experiment, not a different control arm.
+    if (!sameEnvironment(armA.table, opts.tableB)) {
+      closeArm(armA);
+      throw new Error(
+        "pairedRun: --table-b の席1-3 (環境) が --table と一致しません — " +
+          "両腕は席0だけが異なる必要があります",
+      );
+    }
+    armB = openArm(opts.tableB, { oracle: opts.oracle, noise: opts.noise });
+  } else {
+    armB = incumbent
+      ? openArm(seats, {
+        ...shared,
+        consumer: opts.consumerB ?? opts.consumer,
+        ktune: opts.ktuneB ?? opts.ktune,
+      })
+      // 2026-08-25 epoch: the baseline arm's "h" seats are frozen and take no
+      // vector, so `ktuneOpp` cannot reach them — the CLI refuses the pairing
+      // (an opp vector under `paired` needs an incumbent control), and this
+      // call passes nothing a frozen seat would ignore.
+      : openArm("hhhh", { weights: opts.weights });
+  }
 
   try {
     for (let g = 0; g < games; g++) {
@@ -179,7 +213,9 @@ export function pairedRun(
   return {
     games,
     seed,
-    seats,
+    // Kind letters derived from the arm, so a TableSpec run reports "khhh"
+    // exactly as its seats-string twin would.
+    seats: armA.seats,
     rankA: rankA / games,
     rankB: rankB / games,
     scoreA: scoreA / games,

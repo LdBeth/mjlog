@@ -42,12 +42,18 @@ function fingerprint(seed: number, ktune = loadKtune(CHAMPION)): string {
 
 // M11 baseline (2026-08-23): computed-calibrated (tune-m10d) + hand block
 // fitted on runs/hand/lane-k.jsonl, pushScale 6000 / evWeight 0.2.
+//
+// REGENERATED 2026-08-25 (epoch): the champion's own play did not change —
+// the OPPONENTS did. The "h" seat was re-bound that day to a frozen copy of
+// the default 計算 seat (`ai/frozen.ts`), so the three H seats these hanchan
+// are played against are different players, and every stream moved. The
+// champion.json vector itself is bit-identical to the 08-23 pin.
 const PINNED: Record<number, string> = {
-  101: "-8100/36800/45200/46100#599350cd",
-  404: "28400/48900/18000/24700#a1d5e846",
-  505: "29800/38800/40100/11300#eb000788",
-  606: "21700/14400/46200/37700#340434da",
-  707: "42000/26500/38800/12700#772b8254",
+  101: "15600/33600/51100/19700#95fc878c",
+  404: "43500/47200/15700/13600#3ceab9a1",
+  505: "33300/17500/41600/27600#ef69d46c",
+  606: "25000/17600/36900/40500#3fdda809",
+  707: "38200/7700/44200/29900#285f37c5",
 };
 
 Deno.test("champion: the shipped vector carries all four sections", () => {

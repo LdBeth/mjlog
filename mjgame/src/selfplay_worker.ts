@@ -38,7 +38,9 @@ function run(init: ShardInit): void {
   // perfectly good probe: the entry point allocates before it looks at anything.
   shanten(new Array(34).fill(0));
   const writer = init.record ? TrajectoryWriter.buffering() : null;
-  const arm = openArm(init.seats, { ...init.opts, writer });
+  // `init.table` is already resolved — the main thread ran `resolveTable`
+  // once, so every shard builds from the same four specs.
+  const arm = openArm(init.table, { ...init.opts, writer });
   post({ k: "ready" });
   try {
     for (const g of init.games) {
