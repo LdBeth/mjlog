@@ -11,9 +11,12 @@ deno task play        # TUI game (needs a tty)
 deno task selfplay    # headless matches; --seats=…, --jobs=N, --record=…, --export=…
 deno task bench       # timing subset of selfplay
 deno task check       # typecheck src/ + scripts/
-deno task test        # full suite (~555 tests, ~50s; compiles native libs via clang)
+deno task test        # full suite (~640 tests, ~60s; compiles native libs via clang)
 deno task tune        # 感性 vector tuning via paired runs
-# champion seat: --seats=khhh --ktune=weights/champion.json (計算 calibrated + hand block)
+deno task freeze      # league snapshot: --label=MMDD [--ktune=FILE] [--plan] → weights/league/
+deno task arena       # riichi.dev bot: --token-file=PATH [--ranked] [--games=N]
+                      #   [--brain=champion|tsumogiri] [--ktune=PATH] [--log=PATH]
+# champion vs the frozen field: --seats=khhh --ktune=weights/champion.json
 deno task build-kernel  # native/mjkernel  (shanten/ukeire/shape-mass)
 deno task build-native  # native/librlnet  (policy net via Accelerate)
 ```
@@ -61,9 +64,34 @@ buffering seam). Flags a command would silently ignore are rejected by
   set by paired sweeps, not by the fit (see `runs/hand/SWEEP.md`). FIT ONLY
   on a lane played WITHOUT the hand block: labels recorded under the folding
   policy are censored by its own folds, and a refit on them measured +0.11
-  WORSE. `weights/champion.json` (tracked; the only files under weights/ in
-  git are the three ktune JSONs) is the shipped baseline, pinned by
-  `test/champion_test.ts` — a deliberate change regenerates the pins there.
+  WORSE. `weights/champion.json` is BY CONVENTION the current champion: the
+  TUI 助言 advisor always reads it (`src/main.ts`; play's CPU seats carry no
+  vector) — never point it elsewhere; improve the file. Promotion requires
+  controlled paired evidence (opponents held fixed) and deliberately
+  regenerates the `test/champion_test.ts` pins. Since 2026-08-25 it is the
+  M10 computed calibration ALONE — the post-epoch sweep removed the M11 hand
+  block (see Decisions); `hand-calibrated.json` stays archived. Tracked under
+  weights/: the three ktune JSONs plus `weights/league/` (frozen snapshots,
+  see Decisions).
+- **`src/net/`**: the riichi.dev (RiichiLab) MJAI bridge — the arena owns the
+  game; the bot answers `request_action` messages whose `possible_actions` is
+  the authoritative legal set (an off-list reply is a chombo, recorded on the
+  bot's profile — the one unforgivable failure). `arena.ts` transport
+  (WebSocketStream Bearer auth, `--log` wire tap, last-ditch in-protocol
+  fallback); `mjai.ts` notation arithmetic (the arena uses mjgame's own
+  136-id scheme, reds = ids 16/52/88 ⇒ `ARENA_CFG`); `shadow.ts` rebuilds a
+  REAL `Table` per kyoku from the event stream (proxy ids for concealed
+  opponent tiles, exact-id resync from each request's decoded observation)
+  so the champion's `Observation` comes from the real `observe()` — referee
+  on, zero duplicated derivation; `champion.ts` maps possible_actions ↔
+  engine `Action`s, runs the champion `decide`, handles the reach two-step,
+  and surrenders the kyoku to the tsumogiri fallback on any desync. The
+  loopback parity test (`test/arena_shadow_test.ts`) asserts shadow
+  observations equal the engine's field-by-field — the champion DEGRADES
+  SILENTLY on bad observations, so "same action chosen" is never enough;
+  `test/arena_replay_test.ts` replays a real captured wire log
+  (`test/fixtures/arena-validate-0827.jsonl`). Bot tokens live outside the
+  repo (`--token-file`); never log or commit them.
 - **`src/penalty/`**: `rules.ts` predicates, `preview.ts` the speculative
   referee (same `runHook`, guarded mutate-and-rollback). `heuristic.ts`
   keeps deliberate hand copies of a few predicates at a *different pricing
@@ -100,6 +128,39 @@ buffering seam). Flags a command would silently ignore are rejected by
   reward — no per-decision penalty shaping.
 
 ## Decisions
+
+- **The M11 hand block was REMOVED from the champion 2026-08-25**: the
+  post-epoch sweep re-grade (pre-registered rule: promote only on 道場順位差
+  negative with 95% CI clear of zero) measured EVERY (pushScale, evWeight)
+  cell WORSE than the no-hand-block incumbent — 31/31 completed cells
+  positive with CIs clear of zero, harm monotone in pushScale (+0.18 @1500 →
+  +0.52 @100000) — for BOTH the 08-23 fit and a fresh refit on a frozen-field
+  lane, while the refit predicted held-out hand outcomes essentially
+  identically to the 08-23 fit. So the defect is STRUCTURAL, not predictive:
+  ev = pwin×value is ~4.4x flatter across shanten than the incumbent push
+  table (`value` cancels most of pwin's gradient), and a multiplicative
+  pushScale can match the push LEVEL but never that SHAPE, so every setting
+  trades under-pushing good hands against over-pushing bad ones.
+  `champion.json` is the M10 computed calibration alone; do NOT re-inject
+  computed information into hand-tuned rules through a single scalar — feed
+  it to a learned decision rule (the M12+ direction). Re-adding a hand block
+  takes new controlled paired evidence, and `champion_test` fails loudly if
+  one reappears by merge accident. Full grids: `runs/hand/SWEEP.md` addendum.
+
+- **League of frozen snapshots (adopted 2026-08-25)**: at each meaningful
+  improvement of the default "k" seat, freeze the champion configuration —
+  `deno task freeze --label=MMDD [--ktune=FILE] [--plan]` writes
+  `weights/league/frozen-MMDD.json`, a COMPLETE resolved ktune (the script
+  self-checks the dump against the live seat before writing) — and grade
+  future candidates against MIXED fields of past snapshots via `--table`. A
+  monoculture of the current self manufactures style-specific overfitting,
+  and that matters most for learned heads (M12's riichi head onward).
+  `test/league_test.ts` pins every snapshot, and league pins NEVER regenerate
+  — the opposite of `champion_test`'s, which regenerate on deliberate
+  promotion (the champion is the present; the league is the past). When a new
+  default field breaks a league pin, the fix is adding the explicit old value
+  to that snapshot's JSON, never re-pinning. `frozen-0825` is snapshot #1:
+  the same seat as the frozen "h" letter, pins equal by construction.
 
 - **The "h" seat was RE-BOUND 2026-08-25 (epoch)**: the original hand-written
   heuristic agent is retired; the letter now builds a FROZEN copy of the

@@ -176,6 +176,15 @@ const DEFAULT_AUGMENTED_WEIGHTS: AugmentedWeights = {
   planRelock: RELOCK_MARGIN,
 };
 
+/**
+ * A partial over the defaults (flat — no nested records here). The constructor
+ * and `scripts/freeze.ts` (which must dump EXACTLY what a seat would play
+ * under) both resolve through here.
+ */
+export function mergeAugmented(w?: Partial<AugmentedWeights>): AugmentedWeights {
+  return { ...DEFAULT_AUGMENTED_WEIGHTS, ...w };
+}
+
 /** Fallback deal-in cost, in points, wherever the value channel is off. */
 const ASSUMED_LOSS = 6000;
 
@@ -542,7 +551,7 @@ export class AugmentedHeuristic extends HeuristicPolicy {
   constructor(name: string, seed: number, provider: ReadsProvider, opts: AugmentedOptions = {}) {
     super(name, seed, opts);
     this.provider = provider;
-    this.aw = { ...DEFAULT_AUGMENTED_WEIGHTS, ...opts.augment };
+    this.aw = mergeAugmented(opts.augment);
     this.planOpts = opts.plan ?? {};
   }
 

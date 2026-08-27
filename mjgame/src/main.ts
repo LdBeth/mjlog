@@ -88,8 +88,10 @@ async function cmdPlay(a: Args): Promise<void> {
       : `${cpuKindAt(a.seats, humanSeat, s) === "n" ? "AI" : "CPU"}${WINDS[s]}`
   );
   // The 助言 seat: a 計算 CPU consulted on the human's own Observation, under
-  // the shipped champion vector unless `--ktune` names another. Forked seed so
-  // it never shares a stream with a seat that actually plays.
+  // the CURRENT CHAMPION (weights/champion.json — by convention always the
+  // best validated vector; promotion updates the file, never this path) unless
+  // `--ktune` names another. Forked seed so it never shares a stream with a
+  // seat that actually plays.
   const advisor = makePolicy({
     kind: "k",
     name: "助言",

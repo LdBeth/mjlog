@@ -119,6 +119,21 @@ export const DEFAULT_WEIGHTS: HeuristicWeights = {
   foldDanger: 10,
 };
 
+/**
+ * A partial over the defaults, `danger` merged level-wise: spreading a partial
+ * wholesale would let an override drop a level, and a missing level scores
+ * every discard NaN — which silently degrades to "discard the first tile in
+ * hand". The constructor and `scripts/freeze.ts` (which must dump EXACTLY what
+ * a seat would play under) both resolve through here.
+ */
+export function mergeHeuristic(w?: Partial<HeuristicWeights>): HeuristicWeights {
+  return {
+    ...DEFAULT_WEIGHTS,
+    ...w,
+    danger: { ...DEFAULT_WEIGHTS.danger, ...w?.danger },
+  };
+}
+
 export interface HeuristicOptions {
   weights?: Partial<HeuristicWeights>;
   /** 喰いタン. Only affects whether an open tanyao counts as a confirmed yaku. */
@@ -342,14 +357,7 @@ export class HeuristicPolicy implements SyncPolicy {
 
   constructor(name: string, seed: number, opts: HeuristicOptions = {}) {
     this.name = name;
-    // `danger` is a nested record: spreading `opts.weights` wholesale would let
-    // a partial override drop levels, and a missing level scores every discard
-    // NaN — which silently degrades to "discard the first tile in hand".
-    this.w = {
-      ...DEFAULT_WEIGHTS,
-      ...opts.weights,
-      danger: { ...DEFAULT_WEIGHTS.danger, ...opts.weights?.danger },
-    };
+    this.w = mergeHeuristic(opts.weights);
     this.kuitan = opts.kuitan ?? true;
     this.dojo = opts.dojo ?? true;
     this.epsilon = opts.epsilon ?? 0;

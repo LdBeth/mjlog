@@ -1,13 +1,14 @@
 // The shipped champion, pinned.
 //
-// `weights/champion.json` is the ONE vector the project ships as its best seat
-// (計算 calibrated in M10 + the M11 own-hand block). It is a baseline in the
-// measurement sense: every later milestone is graded against it with
-// `--ktune-b`, so a silent drift in how it plays — a default nudged, a merge
-// order changed, a kernel rebuilt with contraction on — would move every
-// number measured afterwards without anyone noticing. These fingerprints make
-// the drift loud. A DELIBERATE change to the champion regenerates them, with
-// the reason written here; see `computed_test.ts` for the discipline.
+// `weights/champion.json` is BY CONVENTION the current champion — the ONE
+// vector the project ships as its best seat, and the one the TUI 助言 advisor
+// reads. It is a baseline in the measurement sense: every later milestone is
+// graded against it with `--ktune-b`, so a silent drift in how it plays — a
+// default nudged, a merge order changed, a kernel rebuilt with contraction on
+// — would move every number measured afterwards without anyone noticing.
+// These fingerprints make the drift loud. A DELIBERATE change to the champion
+// (a promotion under controlled paired evidence) regenerates them, with the
+// reason written here; see `computed_test.ts` for the discipline.
 //
 // Built through `makePolicy`, not by hand: the pin covers the loader, the
 // merge of the four sections and the seat wiring, which is what a CLI run uses.
@@ -40,40 +41,37 @@ function fingerprint(seed: number, ktune = loadKtune(CHAMPION)): string {
   return `${r.scores.join("/")}#${h.toString(16).padStart(8, "0")}`;
 }
 
-// M11 baseline (2026-08-23): computed-calibrated (tune-m10d) + hand block
-// fitted on runs/hand/lane-k.jsonl, pushScale 6000 / evWeight 0.2.
-//
-// REGENERATED 2026-08-25 (epoch): the champion's own play did not change —
-// the OPPONENTS did. The "h" seat was re-bound that day to a frozen copy of
-// the default 計算 seat (`ai/frozen.ts`), so the three H seats these hanchan
-// are played against are different players, and every stream moved. The
-// champion.json vector itself is bit-identical to the 08-23 pin.
+// REGENERATED 2026-08-25 (promotion): the post-epoch sweep re-grade removed
+// the M11 hand block. Under the pre-registered rule (道場順位差 negative, 95%
+// CI clear of zero on both lanes) NO (pushScale, evWeight) cell qualified:
+// both the 08-23 fit and a fresh refit against the frozen field measured
+// positive (worse) in all 31 completed cells, monotone in pushScale — a
+// structural transfer defect (a single scalar cannot match the push table's
+// shanten-shape), not a prediction defect. The champion is now the M10
+// computed calibration alone: champion.json ≡ computed-calibrated.json as of
+// this date. The retired 08-23 champion pins ended
+// 101:#95fc878c 404:#3ceab9a1 505:#ef69d46c 606:#3fdda809 707:#285f37c5.
 const PINNED: Record<number, string> = {
-  101: "15600/33600/51100/19700#95fc878c",
-  404: "43500/47200/15700/13600#3ceab9a1",
-  505: "33300/17500/41600/27600#ef69d46c",
-  606: "25000/17600/36900/40500#3fdda809",
-  707: "38200/7700/44200/29900#285f37c5",
+  101: "31100/22800/50900/15200#4e7dac36",
+  404: "34700/45500/18200/21600#8abc79ad",
+  505: "47500/28000/26000/18500#416d90c7",
+  606: "26000/14000/36900/43100#a0cf9a64",
+  707: "31700/14600/31500/42200#c6a2b709",
 };
 
-Deno.test("champion: the shipped vector carries all four sections", () => {
+Deno.test("champion: the computed calibration, and NO hand block", () => {
   const k = loadKtune(CHAMPION);
-  assert(k.computed && k.hand, "champion.json must carry `computed` and `hand`");
-  assertEquals(k.hand.pushScale, 6000);
-  assertEquals(k.hand.evWeight, 0.2);
+  assert(k.computed, "champion.json must carry `computed`");
+  // The 2026-08-25 sweep verdict: an own-hand ev spent through the fold gate's
+  // single scalar measured WORSE than the incumbent push table at every tested
+  // authority, however well calibrated. A hand block reappearing here would
+  // silently re-enable that — it takes new controlled paired evidence, not a
+  // merge accident.
+  assertEquals(k.hand, undefined, "hand ブロックは 2026-08-25 に除去済み (sweep 判定)");
 });
 
 Deno.test("champion: whole-hanchan decision streams are pinned", () => {
   for (const [seed, want] of Object.entries(PINNED)) {
     assertEquals(fingerprint(Number(seed)), want, `種${seed}: 基準席の打牌が変わった`);
   }
-});
-
-Deno.test("champion: the hand block is live — dropping it changes the stream", () => {
-  const k = loadKtune(CHAMPION);
-  let diverged = 0;
-  for (const seed of Object.keys(PINNED)) {
-    if (fingerprint(Number(seed), { ...k, hand: undefined }) !== PINNED[Number(seed)]) diverged++;
-  }
-  assert(diverged > 0, "hand ブロックを外しても同一 — 消費に届いていない");
 });

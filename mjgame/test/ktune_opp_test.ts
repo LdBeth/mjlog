@@ -135,7 +135,10 @@ Deno.test("--ktune-opp: --ktune-b swaps the subject only, never the opponents", 
 // ---------------------------------------------------------------------------
 
 Deno.test("--ktune-opp: parsed for the headless drivers, refused under play", () => {
-  const path = new URL("../weights/champion.json", import.meta.url).pathname;
+  // hand-calibrated.json: the archived M11 fixture — champion.json no longer
+  // carries a `hand` section (removed 2026-08-25, see champion_test), and this
+  // test only needs SOME tracked file whose section survives the load.
+  const path = new URL("../weights/hand-calibrated.json", import.meta.url).pathname;
   // kkkk: since the epoch the flag needs a "k" opponent to reach (a khhh
   // layout dies inside parseArgs — the frozen seats take no vector).
   const a = parseArgs(["selfplay", `--ktune-opp=${path}`, "--seats=kkkk"]);

@@ -8,3 +8,4 @@ native/*.so
 !weights/champion.json
 !weights/computed-calibrated.json
 !weights/hand-calibrated.json
+!weights/league/
