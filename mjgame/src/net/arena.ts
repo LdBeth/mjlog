@@ -88,6 +88,25 @@ export class TsumogiriChooser implements ArenaChooser {
   }
 }
 
+/**
+ * The server hard-drops the socket after `end_game` (documented behaviour),
+ * which surfaces here as a WebSocketError mid-read. Once a game has completed
+ * that is a normal goodbye, not a failure; before one, it is a real transport
+ * error and propagates.
+ */
+async function* iterateUntilServerDrop(
+  readable: ReadableStream<string | Uint8Array>,
+  gameDone: () => boolean,
+  log: (line: string) => void,
+): AsyncGenerator<string | Uint8Array> {
+  try {
+    for await (const raw of readable) yield raw;
+  } catch (err) {
+    if (!gameDone()) throw err;
+    log(`arena: 対局後のサーバ切断 (${err instanceof Error ? err.name : err})`);
+  }
+}
+
 export interface ArenaRunResult {
   games: number;
   /** Final `end_game.scores` of the last game, if one completed. */
@@ -118,7 +137,7 @@ export async function runArena(
   let seat = -1;
 
   try {
-    for await (const raw of readable) {
+    for await (const raw of iterateUntilServerDrop(readable, () => out.games > 0, log)) {
       const text = typeof raw === "string" ? raw : new TextDecoder().decode(raw);
       trace?.("<", text);
       let e: MjaiEvent;
@@ -158,9 +177,11 @@ export async function runArena(
         case "end_kyoku":
           break;
         case "end_game":
+          // riichi.dev sends a BARE end_game (no scores, unlike the docs);
+          // final standings live in the accumulated hora/ryukyoku deltas.
           out.games++;
           out.scores = Array.isArray(e.scores) ? e.scores.map(Number) : null;
-          log(`arena: end_game scores=${JSON.stringify(e.scores)}`);
+          log(`arena: end_game${out.scores ? ` scores=${out.scores.join("/")}` : ""}`);
           break;
         case "error":
           log(`arena: サーバ error: ${JSON.stringify(e)}`);
@@ -257,4 +278,8 @@ async function main() {
   logFile?.close();
 }
 
-if (import.meta.main) await main();
+// NOT `await main()`: main dynamically imports champion.ts, which statically
+// imports this module — a top-level await here would block arena.ts's own
+// evaluation, which that dynamic import waits on. Deadlock (Deno reports it
+// as "Top-level await promise never resolved").
+if (import.meta.main) main().catch((e) => die(String(e)));

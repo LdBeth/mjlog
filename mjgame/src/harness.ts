@@ -234,6 +234,7 @@ export function makePolicy(o: MakePolicyOptions): SeatPolicy {
         consumer: o.consumer,
         hand,
         riichi: riichiHead,
+        sense: o.ktune?.sense,
         handSink: o.handSink,
       }));
   }

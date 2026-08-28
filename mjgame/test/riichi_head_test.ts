@@ -30,6 +30,9 @@ const FEATURES: RiichiFeatures = {
   dealer: 0,
   oppRiichi: 1,
   kyotaku: 0,
+  improvable: 1,
+  tenpaiHeld: 0,
+  holdShape: 1,
 };
 
 Deno.test("riichi head: INIT declares on any finite features", () => {
@@ -74,9 +77,13 @@ Deno.test("riichi head: `{}` (⇒ INIT) plays the identical hanchan — kkkk", (
 });
 
 Deno.test("riichi head: `{}` (⇒ INIT) plays the identical hanchan — khhh + champion", () => {
-  const plain = headless(GAMES, SEED, "khhh", { ktune: CHAMPION });
+  // Since 2026-08-27 champion.json SHIPS a doctrine riichi block, so the
+  // equivalence base strips it: headless-vs-`riichi:{}` is a claim about the
+  // loader and the INIT weights, not about the shipped doctrine.
+  const base = { ...CHAMPION, riichi: undefined };
+  const plain = headless(GAMES, SEED, "khhh", { ktune: base });
   const inited = headless(GAMES, SEED, "khhh", {
-    ktune: { ...CHAMPION, riichi: {} },
+    ktune: { ...base, riichi: {} },
   });
   assertEquals(inited.results, plain.results);
 });

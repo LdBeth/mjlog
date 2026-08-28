@@ -371,10 +371,14 @@ Deno.test("planner: the keep-set decides which tile goes", () => {
 });
 
 Deno.test("planner: plan discipline declines a call the plan never asked for", () => {
-  // 234m 567m 89p 北北 55s + 3索. Pon-ing the 北 buys a shanten step — the base
-  // policy takes it, because its 対々和 clause sees a route to a yaku that the
-  // finished hand does not actually have. Every future the planner prices keeps
-  // the 北 as the HEAD, so the call is simply not part of any of them.
+  // 234m 567m 89p 北北 55s + 3索. Pon-ing the 北 buys a shanten step toward a
+  // hand with no yaku. Until 2026-08-27 the base policy TOOK it — the old
+  // 対々和 clause read any chi-free shape as a triplet build — and this test
+  // existed to show the planner declining what the gate let through. The
+  // tightened gate (the rest owes three more pairs after a first pon; this
+  // one holds 55s alone) now refuses it too, so both layers decline: the
+  // planner by plan discipline (its locked future is closed), the base policy
+  // at the prospect screen.
   const hand = tiles("234m567m89p北北55s3s");
   const kita = tiles("北北北")[2];
   const pon: Action = { t: "pon", tiles: [hand[8], hand[9]], called: kita };
@@ -383,8 +387,8 @@ Deno.test("planner: plan discipline declines a call the plan never asked for", (
   const blind = new AugmentedHeuristic("blind", 1, () => null);
   assertEquals(
     blind.decide(obsOf({ hand, legal, claimTile: kita })).t,
-    "pon",
-    "the base policy takes the shanten step",
+    "pass",
+    "the tightened prospect screen refuses the yakuless pon",
   );
 
   const planner = new AugmentedHeuristic("plan", 1, publicPlanner);

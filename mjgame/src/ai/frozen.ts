@@ -21,6 +21,12 @@
 // of this seat; drift there is a bug — in this file or in a shared code path —
 // never a legitimate behaviour change. Numbers in `runs/` recorded before this
 // date were measured against the OLD h and are not comparable forward.
+//
+// ONE sanctioned exception so far, 2026-08-27: the owner re-ruled the DOJO
+// itself — 持ち点8000点未満 is judged at 終局 (buffer engages 南入以降 only)
+// and the call gate's 対々和/バック clauses were tightened — and directed that
+// the frozen seat play under the corrected rules too. The pins were
+// re-captured that day; runs/ numbers straddling it are not comparable.
 
 import type { AugmentedWeights } from "./augmented.ts";
 import type { ComputedWeights } from "./computed.ts";
@@ -42,6 +48,10 @@ export const FROZEN_HEURISTIC: HeuristicWeights = {
   tsumogiriLock: 2500,
   foldEfficiency: 0.05,
   foldDanger: 10,
+  // Added to HeuristicWeights 2026-08-27 (arena buffer neutralization); these
+  // are the values the 8000-line buffer had when this seat froze.
+  bufferTight: 0.35,
+  bufferLow: 0.7,
 };
 
 /** The Reads-consumption weights, as augmented.ts's defaults stood. */

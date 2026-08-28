@@ -38,6 +38,7 @@ import { mergeComputed } from "../src/ai/computed.ts";
 import { mergeHand } from "../src/ai/handvalue.ts";
 import { mergeHeuristic } from "../src/ai/heuristic.ts";
 import { mergeRiichi } from "../src/ai/riichi.ts";
+import { mergeSense } from "../src/ai/sense.ts";
 import { die } from "../src/cli/die.ts";
 import { headless } from "../src/harness.ts";
 import type { KTune, TableSpec } from "../src/spec.ts";
@@ -90,6 +91,9 @@ function main() {
     computed: mergeComputed({ planner: plan, ...src.computed }),
     ...(src.hand ? { hand: mergeHand(src.hand) } : {}),
     ...(src.riichi ? { riichi: mergeRiichi(src.riichi) } : {}),
+    // 色読み is a switch like the two above: absent stays absent (identity),
+    // present is resolved through its merge so the dump is complete.
+    ...(src.sense ? { sense: mergeSense(src.sense) } : {}),
   };
 
   // The self-check: the resolved dump and the original configuration must be

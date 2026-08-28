@@ -24,7 +24,9 @@ export type Hook =
   | "on-kan"
   | "on-riichi"
   | "on-win"
-  | "on-round-end";
+  | "on-round-end"
+  /** Fired once, when the MATCH ends — the final scores are the evidence. */
+  | "on-game-end";
 
 export interface RuleCtx {
   t: Table;

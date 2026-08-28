@@ -1,4 +1,8 @@
 {
+  "heuristic": {
+    "bufferTight": 1,
+    "bufferLow": 1
+  },
   "computed": {
     "tenpaiPrior": [
       [

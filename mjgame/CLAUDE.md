@@ -91,7 +91,13 @@ buffering seam). Flags a command would silently ignore are rejected by
   SILENTLY on bad observations, so "same action chosen" is never enough;
   `test/arena_replay_test.ts` replays a real captured wire log
   (`test/fixtures/arena-validate-0827.jsonl`). Bot tokens live outside the
-  repo (`--token-file`); never log or commit them.
+  repo (`--token-file`); never log or commit them. Ranked play uses
+  `weights/arena.json` — the champion's computed block and 最終形 riichi
+  block plus arena-only heuristic overrides (`bufferTight`/`bufferLow` = 1:
+  the 持ち点8000未満 buffer defends a HOME ledger rule the arena does not
+  have; wire-log replay showed it was the dominant cause of folding live
+  tenpai vs a single riichi). Do not fold arena-only overrides back into
+  champion.json.
 - **`src/penalty/`**: `rules.ts` predicates, `preview.ts` the speculative
   referee (same `runHook`, guarded mutate-and-rollback). `heuristic.ts`
   keeps deliberate hand copies of a few predicates at a *different pricing
@@ -128,6 +134,87 @@ buffering seam). Flags a command would silently ignore are rejected by
   reward — no per-decision penalty shaping.
 
 ## Decisions
+
+- **色読み — the 感性 field sense (`ai/sense.ts`, 2026-08-28, owner-directed)**:
+  the 0827 ranked arena batch (30 games, avg 2.60) fed 10 mangan+ deal-ins,
+  and the owner's replay review found the cluster was 染め手 (mostly CLOSED
+  flushes — invisible to both the danger assessor, which needs a riichi/furo
+  threat to run, and the computed `dealinP`), plus false 七対子 commitment
+  (`kernel.shanten` is the MIN over standard/chiitoi, so four early pairs flip
+  the discard chooser onto the pairs line as an artifact). The owner's doctrine:
+  色読み is NOT a river read (forbidden) — it is the 感性 sense of the 場,
+  トイツ場 and 染め場, exposed as FIELD facts only (per-suit heat + one pairing
+  scalar, never "seat N holds X"). Facts are fixed arithmetic; consumption is
+  three ktune weights (`sense` block — a switch like `hand`/`riichi`, absent ⇒
+  bit-identical play): `someRisk` (suit-heat surcharge added at every `riskOf`
+  exit, the explicit 安全 proof included — that proof is against ASSESSED
+  threats; the sense's own proof is the dye source's discards), `somePressure`
+  (un-zeros the fold gate's quiet-table early-out), `chiitoiTax` (line tax
+  beside `dojoCost` on BOTH scoreDiscard paths). Two measurement lessons are
+  built in: the void score is DEFICIT below uniform expectation (share-based
+  and raw-void scores both called 40%+ of mid-game decisions hot on the 0827
+  wire replay), and consumption prices heat only above `HEAT_BAR` 0.35 (linear
+  consumption cost +0.08 道場順位 per arm at home; thresholded it is free:
+  {someRisk 200, somePressure 0.5, chiitoiTax 500} graded +0.008 ±0.051 over
+  600 paired games, violations flat). NO vector ships it yet — adding `sense`
+  to champion.json is a promotion (pins regenerate) awaiting the owner's word.
+
+- **The sense is ORACLE-CALIBRATED, and the 場 is per-player (owner doctrine,
+  2026-08-28)**: `scripts/sense_lane.ts` plays headless hanchan and records
+  `fieldSenseDetail` evidence next to truth read off the live Table (opponent
+  suit shares, concealed pairs + pon count, shanten) with round outcomes
+  joined by (kyoku, honba); `scripts/sense_fit.ts` renders reliability tables
+  (recommends — the paired sweep still decides). The 0828 lane (600 半荘, 90k
+  rows): dye heat is genuinely calibrated — P(dye-committed | heat ≥ 0.7) =
+  17.5% mid-game vs a 1.8% base rate, monotone across bins — and few-honors-
+  discarded sharpens it further (9.8% vs 5.5%), an unused corroborator noted
+  for later. トイツ場 is monotone (18.9% → 51.7% P(field pairs) across bins)
+  ONLY under a pon-aware truth label: a pon consumes the pair it proves, so
+  concealed-pair counts anti-calibrate the pon-heavy bins — a label lesson,
+  not a fact defect. The doctrine refinement in the same pass: the 場 is not
+  shared by all four — usually one player is OUT of the field the other three
+  are in — so own-hand pairing was REMOVED from the toitsuba field evidence
+  (own pairs are the temptation to commit, never proof the field pairs; the
+  alignment reading comes from the chiitoi tax's `1 − toitsuba` scale; the
+  lane's observational slice is consistent — aligned pairing ran ~250
+  points/round ahead of lone pairing, though junme/pon confounds keep that
+  a direction, not a confirmation). Re-graded under the final formula: the
+  trio {someRisk 200,
+  somePressure 0.5, chiitoiTax 500} is −0.017 ±0.053 over 600 fresh paired
+  games — free at home.
+
+- **The dojo's own rules were CORRECTED 2026-08-27 (owner ruling), and the
+  frozen seats play under the corrected dojo**: (1) 持ち点8000点未満 is judged
+  at 終局, not per 局 — the rule moved to a new `on-game-end` hook (fired by
+  the match drivers on the last round's table; its violations are appended to
+  the MATCH ledger after the last `ledgerCut`, so no per-round slice owns
+  them and the "m" line totals still count them), and `bufferScale` engages
+  南入以降 only. (2) The call gate's 対々和 clause no longer passes any
+  chi-free shape — the concealed rest must hold ≥ `4 − melds` pair-or-better
+  types (arena wire logs: 15/36 pons had no other justification, one at
+  5向聴) — and a バック needs its third tile LIVE. Both changes are shared
+  code, so ALL fingerprint pins were re-captured that day — the ONE
+  sanctioned exception to the frozen/league never-regenerate rule, by the
+  owner's explicit direction ("apply fixes to both h agent"); the
+  frozen-h ≡ frozen-0825 equality was re-verified across the re-capture.
+
+- **最終形リーチ doctrine (2026-08-27 owner ruling, refined same day)**:
+  immediate riichi is allowed for any tenpai with acceptance strictly > 2
+  live tiles AND more hand than riichi(+平和)のみ — cheapness is priced by
+  the M11 value model (`out.value` under `valueRiichi` + half a
+  `valuePerDora`, dealer-scaled), not by a dora count — and always for the
+  sanctioned 単騎 (ドラ単騎, 七対子単騎, 四暗刻単騎, 国士 shapes). Everything
+  else HOLDS, released after ~2 own turns tenpai without the wait improving.
+  Implemented as M12 head features: `holdShape` (the doctrine verdict —
+  a conjunction the linear surface cannot build, computed by
+  `riichiHoldShape`), `tenpaiHeld` (own turns at an unimproved wait — the
+  base policy's only cross-decision state: feature-only, dead without a
+  head, cleared by `reset`, and the arena bridge resets per kyoku), and
+  `improvable` (informational: a live draw could rebuild a strictly wider
+  wait, via `waitUpgradeExists`). INIT weights carry 0 for all three, so a
+  headless vector still declares unconditionally; the doctrine ships as the
+  `riichi` block in champion.json / arena.json
+  (`{bias 0.1, holdShape −1, tenpaiHeld 0.5}`), never in the frozen seats.
 
 - **The M11 hand block was REMOVED from the champion 2026-08-25**: the
   post-epoch sweep re-grade (pre-registered rule: promote only on 道場順位差

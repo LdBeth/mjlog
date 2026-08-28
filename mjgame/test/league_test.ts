@@ -38,10 +38,13 @@ function fingerprint(seed: number, table: TableSpec): string {
 const LEAGUE_DIR = new URL("../weights/league/", import.meta.url).pathname;
 
 const LEAGUE_PIN: Record<string, Record<number, string>> = {
+  // Re-captured 2026-08-27 with frozen_test's EPOCH_PIN (owner-directed dojo
+  // rules correction — see the note there); the equality between the two pin
+  // sets was re-verified across the re-capture.
   "frozen-0825.json": {
-    101: "28600/23300/51400/16700#af5c064d",
-    505: "43600/23300/27900/25200#545ecdaf",
-    909: "47600/45000/18100/9300#a9aab631",
+    101: "63200/27700/17500/11600#e65683eb",
+    505: "48600/28500/21000/21900#ff24c152",
+    909: "63900/32300/14700/9100#6a0d13cd",
   },
 };
 

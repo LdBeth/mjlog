@@ -49,8 +49,9 @@
 //   yakuman-threat-riichi  on-riichi      YES  ditto
 //   hikkake                on-riichi      YES  ditto
 //   yakuman-related        post-discard   YES  previewDiscard
-//   under-8000             on-round-end   NO   fires on the PAYMENTS at the end
-//                                              of a round, not on an action; no
+//   under-8000             on-game-end    NO   fires on the FINAL scores when
+//                                              the match ends (2026-08-27
+//                                              ruling), not on an action; no
 //                                              single move can veto it.
 //   katagari               on-win         NO   fires on taking a win. A policy
 //                                              could only avoid it by declining

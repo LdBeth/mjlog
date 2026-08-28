@@ -35,7 +35,11 @@
 // be: the first is a price on a 禁じ手 and is deliberately immune to every scale
 // in this file, and the second is a veto no score may reach around. The consumer
 // replaces the score CORE — `ctx.eff·eff − ctx.def·risk + drawBonus − keepBonus`
-// — and nothing else.
+// — and nothing else. Since 2026-08-28 the 色読み line tax (`senseLineTax`)
+// also rides outside, beside `dojoCost` on both paths: a judgment about which
+// LINE the hand may commit to, deliberately immune to the fitted core. (Its
+// defence twin needs no such carve-out — `senseRisk` enters through the
+// `riskOf` hook and flows into the `risk` curve like any other risk.)
 //
 // DEVIATION, deliberate and reported. The two hook bonuses (`drawBonus`,
 // `keepBonus`) form a THIRD, unscaled group rather than living inside

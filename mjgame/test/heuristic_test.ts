@@ -8,6 +8,7 @@ import type { Meld, Tile } from "mjrender/model.ts";
 import type { RiverEntry } from "mjrender/state.ts";
 import { tileType } from "mjrender/tiles.ts";
 import { HeuristicPolicy } from "../src/ai/heuristic.ts";
+import { mergeRiichi } from "../src/ai/riichi.ts";
 import type { Observation } from "../src/observe.ts";
 import type { ActionPreview } from "../src/penalty/preview.ts";
 import { JANKI } from "../src/rules.ts";
@@ -240,6 +241,26 @@ Deno.test("heuristic: avoids the discard that fixes a yakuless open wait", () =>
   if (chosen.t === "discard") assertEquals(chosen.tile, clean);
 });
 
+Deno.test("heuristic: a pair-rich hand may still pon toward 対々和", () => {
+  // 22m 55m 88p 22s 66s 999p — after the 2m pon the rest still holds four
+  // pairs behind the 999p set, which is what an actual 対々和 build looks
+  // like. The 2026-08-27 tightening must not refuse THIS; it exists to refuse
+  // the pair-poor pon (see planner_test's plan-discipline case).
+  const hand = tiles("22m55m88p22s66s999p");
+  const called = tiles("222m")[2];
+  const obs = baseObs({
+    hand,
+    drawn: null,
+    shanten: 2,
+    legal: [
+      { t: "pass" },
+      { t: "pon", tiles: [hand[0], hand[1]], called },
+    ],
+  });
+  const p = new HeuristicPolicy("cpu", 1);
+  assertEquals(p.decide(obs).t, "pon");
+});
+
 Deno.test("heuristic: takes a yakuhai pon that gains a shanten", () => {
   const hand = tiles("11199m22p4578s白白");
   const called = tiles("白白白")[2];
@@ -351,7 +372,82 @@ Deno.test("heuristic: riichi cures 片和了り rather than abandoning the hand"
   if (chosen.t === "discard") assertEquals(chosen.riichi, true);
 });
 
-Deno.test("heuristic: a short stack folds where a healthy one would push", () => {
+// The shipped doctrine boundary (see CLAUDE.md 最終形リーチ): immediate
+// declaration unless `holdShape` says the hand is cheap-and-narrow; two held
+// turns release it.
+const DOCTRINE = mergeRiichi({ bias: 0.1, holdShape: -1, tenpaiHeld: 0.5 });
+
+function riichiPick(p: HeuristicPolicy, over: Partial<Observation>): boolean {
+  const hand = over.hand!;
+  const drawn = hand[hand.length - 1];
+  const obs = baseObs({
+    drawn,
+    discardInfo: new Map([[drawn, { shanten: 0, katagari: false, yakuless: false }]]),
+    legal: [
+      { t: "discard", tile: drawn, riichi: false, tsumogiri: true },
+      { t: "discard", tile: drawn, riichi: true, tsumogiri: false },
+    ],
+    ...over,
+  });
+  const chosen = p.decide(obs);
+  assertEquals(chosen.t, "discard");
+  return chosen.t === "discard" ? chosen.riichi : false;
+}
+
+Deno.test("heuristic: 最終形 doctrine — a cheap hand holds, then declares after two held turns", () => {
+  // 123456789m1122p + 東: cutting the 東 leaves the 1p/2p シャンポン — 4 live,
+  // but the hand is riichi(+平和)のみ with no dora, which is exactly the
+  // cheap-and-unremarkable shape the doctrine holds. Two held turns later the
+  // same observation declares. The head must be IN the vector for any of this
+  // — the default policy still declares immediately (M12 discipline).
+  const hand = tiles("123456789m1122p東");
+  const p = new HeuristicPolicy("cpu", 1, { riichi: DOCTRINE });
+  const w = [tileType(tiles("1p")[0]), tileType(tiles("2p")[0])];
+  const shared: Partial<Observation> = {
+    hand,
+    waits: w,
+    ukeire: [{ type: w[0], live: 2 }, { type: w[1], live: 2 }],
+  };
+  assertEquals(riichiPick(p, { ...shared, junme: 4 }), false, "安手は即リーチしない");
+  assertEquals(riichiPick(p, { ...shared, junme: 5 }), false, "1巡待ってもまだ宣言しない");
+  assertEquals(riichiPick(p, { ...shared, junme: 6 }), true, "2巡待てば宣言してよい");
+});
+
+Deno.test("heuristic: 最終形 doctrine — value or a sanctioned 単騎 declares immediately", () => {
+  // Same シャンポン but the 9m indicator makes the held 1m a dora: the value
+  // model prices it above the riichi-only baseline, and >2 acceptance plus a
+  // real hand is an immediate declaration.
+  const hand = tiles("123456789m1122p東");
+  const w = [tileType(tiles("1p")[0]), tileType(tiles("2p")[0])];
+  const dora = new HeuristicPolicy("cpu", 1, { riichi: DOCTRINE });
+  assertEquals(
+    riichiPick(dora, {
+      hand,
+      junme: 4,
+      doraIndicators: tiles("9m"),
+      waits: w,
+      ukeire: [{ type: w[0], live: 2 }, { type: w[1], live: 2 }],
+    }),
+    true,
+    "ドラ1の実のある手は即リーチ",
+  );
+  // 七対子の単騎 is sanctioned regardless of its price.
+  const chiitoi = new HeuristicPolicy("cpu", 1, { riichi: DOCTRINE });
+  const hand7 = tiles("1133m5577p2244s9s東");
+  const w9s = tileType(tiles("9s")[0]);
+  assertEquals(
+    riichiPick(chiitoi, {
+      hand: hand7,
+      junme: 4,
+      waits: [w9s],
+      ukeire: [{ type: w9s, live: 3 }],
+    }),
+    true,
+    "七対子単騎は即リーチしてよい",
+  );
+});
+
+Deno.test("heuristic: a short stack folds in the South round, pushes in the East", () => {
   const hand = tiles("123456789m1122p東");
   const drawn = hand[hand.length - 1];
   const shared = {
@@ -361,14 +457,18 @@ Deno.test("heuristic: a short stack folds where a healthy one would push", () =>
     riichi: [false, true, false, false],
     danger: new Map([[TON, threat("危険度高")]]),
   };
-  const pick = (score: number) => {
-    const obs = baseObs({ ...shared, scores: [score, 25000, 25000, 25000] });
+  const pick = (score: number, roundWind = 28) => {
+    const obs = baseObs({ ...shared, roundWind, scores: [score, 25000, 25000, 25000] });
     const chosen = new HeuristicPolicy("cpu", 1).decide(obs);
     return chosen.t === "discard" ? chosen.tile : -1;
   };
-  // 1-shanten with a dangerous 東: comfortable stack pushes it, short one does not.
+  // 南場, 1-shanten with a dangerous 東: comfortable stack pushes it, short one
+  // does not — the 8000-line buffer is live in the closing stretch.
   assertEquals(pick(25000), drawn);
   assert(pick(9000) !== drawn, "a 9000-point stack should not fire the 危険度高 tile");
+  // 東場, same short stack: the rule is judged at 終局 (2026-08-27 ruling), and
+  // with a whole hanchan left to recover in the buffer stays out of the gate.
+  assertEquals(pick(9000, 27), drawn, "東場の 9000点 is not yet a buffer problem");
 });
 
 Deno.test("heuristic: tedashi stops once ドラ切り has been ponned off us", () => {

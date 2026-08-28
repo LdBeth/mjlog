@@ -657,10 +657,18 @@ export class AugmentedHeuristic extends HeuristicPolicy {
   protected override riskOf(ctx: Ctx, tile: Tile): number {
     // ONE lookup for both halves: the rule ladder's price, and the proof test
     // below. They are the same entry of the same danger map.
+    //
+    // The 色読み surcharge (`senseRisk`, zero unless a `sense` block armed it)
+    // is ADDED at every exit, the explicit 安全 proof included: that proof is
+    // against the ASSESSED threats, while the sense prices a 染め場 neither the
+    // assessor nor the deal-in estimate models — a genbutsu against a riichi
+    // can still be the live suit of a silent flush. The sense carries its own
+    // proof test (`FieldSense.safe`, the dye source's discards) and zeroes
+    // itself there.
     const level = this.dangerLevelOf(ctx, tile);
     const base = this.ruleRisk(level);
     const dealinP = this.reads?.dealinP;
-    if (!dealinP) return base;
+    if (!dealinP) return base + this.senseRisk(ctx, tile);
 
     // RULE FLOOR, top half: "安全" is genbutsu — a proof, not an assessment.
     // No estimate, however confident, may price a provably safe tile. The proof
@@ -670,7 +678,7 @@ export class AugmentedHeuristic extends HeuristicPolicy {
     // an estimate-holding policy must keep pricing there. Quiet tables are
     // where a silent tenpai lives, and where the deal-in estimate has no rule
     // reading to fall back on.
-    if (level === "安全") return 0;
+    if (level === "安全") return this.senseRisk(ctx, tile);
 
     const ty = tileType(tile);
     let risk = 0;
@@ -681,7 +689,7 @@ export class AugmentedHeuristic extends HeuristicPolicy {
       risk += p * v;
     }
     // RULE FLOOR, bottom half.
-    return Math.max(this.aw.lambda * risk, this.aw.floor * base);
+    return Math.max(this.aw.lambda * risk, this.aw.floor * base) + this.senseRisk(ctx, tile);
   }
 
   /** Threat volume priced by who is actually tenpai, and for how much. */
@@ -696,7 +704,9 @@ export class AugmentedHeuristic extends HeuristicPolicy {
       if (t <= 0) continue;
       p += t * Math.min(2, (expLoss?.[i] ?? ASSUMED_LOSS) / ASSUMED_LOSS);
     }
-    return p;
+    // 色読み: the estimate models tenpai it can see coming; a 染め場's silent
+    // flush is exactly what it underweights. Added here as in the base hook.
+    return p + this.sensePressure(obs);
   }
 
   /**

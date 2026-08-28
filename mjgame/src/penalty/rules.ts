@@ -533,16 +533,21 @@ const yakumanRelated: DojoRule = {
   },
 };
 
+// Judged at 終局 (2026-08-27 owner ruling): the ledger charges for ENDING the
+// game short, not for passing under the line mid-match — an early deal-in that
+// drops a seat to 5000 leaves the whole rest of the hanchan to climb back, and
+// charging it every 局 punished the recovery itself. Fires once, on the final
+// scores.
 const underEightThousand: DojoRule = {
   id: "under-8000",
   label: "持ち点8000点未満",
   tier: "A",
   points: PENALTY.medium,
-  hooks: ["on-round-end"],
+  hooks: ["on-game-end"],
   check(ctx) {
     const { t, seat } = ctx;
     if (t.scores[seat] >= 8000) return null;
-    return [{ detail: `局終了時の持ち点 ${t.scores[seat]}点` }];
+    return [{ detail: `終局時の持ち点 ${t.scores[seat]}点` }];
   },
 };
 

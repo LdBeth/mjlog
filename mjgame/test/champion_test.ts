@@ -41,6 +41,19 @@ function fingerprint(seed: number, ktune = loadKtune(CHAMPION)): string {
   return `${r.scores.join("/")}#${h.toString(16).padStart(8, "0")}`;
 }
 
+// REGENERATED 2026-08-27 (owner rulings): two things moved at once. The dojo
+// rules correction (under-8000 judged at 終局 with the buffer 南入以降; call
+// gate 対々和/バック tightening — shared code, every pin file re-captured that
+// day), and the 最終形リーチ doctrine head added to champion.json:
+// {bias 0.1, holdShape −1, tenpaiHeld 0.5} — immediate riichi for >2 live
+// acceptance with more hand than riichi(+平和)のみ (M11 value model prices
+// the cheapness) and for the sanctioned 単騎 (ドラ/七対子/四暗刻/国士);
+// everything else holds ~2 unimproved turns. Graded vs the pre-head
+// incumbent on the frozen-h field (300 paired games): 道場順位差 +0.037
+// ±0.054 (CI spans zero), riichi rate 24.0%→21.5%, violations flat — the
+// doctrine ships by the owner's ruling, at a measured cost of ≈nil, and beat
+// every cell of the earlier improvable-based 4-cell sweep.
+//
 // REGENERATED 2026-08-25 (promotion): the post-epoch sweep re-grade removed
 // the M11 hand block. Under the pre-registered rule (道場順位差 negative, 95%
 // CI clear of zero on both lanes) NO (pushScale, evWeight) cell qualified:
@@ -52,16 +65,17 @@ function fingerprint(seed: number, ktune = loadKtune(CHAMPION)): string {
 // this date. The retired 08-23 champion pins ended
 // 101:#95fc878c 404:#3ceab9a1 505:#ef69d46c 606:#3fdda809 707:#285f37c5.
 const PINNED: Record<number, string> = {
-  101: "31100/22800/50900/15200#4e7dac36",
-  404: "34700/45500/18200/21600#8abc79ad",
-  505: "47500/28000/26000/18500#416d90c7",
-  606: "26000/14000/36900/43100#a0cf9a64",
-  707: "31700/14600/31500/42200#c6a2b709",
+  101: "44800/35400/26100/13700#3af23773",
+  404: "33900/33300/26100/26700#8828a996",
+  505: "45500/25700/23300/25500#06404d89",
+  606: "19100/39300/22100/39500#7b409038",
+  707: "66100/4800/29300/19800#6edf323d",
 };
 
 Deno.test("champion: the computed calibration, and NO hand block", () => {
   const k = loadKtune(CHAMPION);
   assert(k.computed, "champion.json must carry `computed`");
+  assert(k.riichi, "champion.json must carry the 最終形 doctrine `riichi` block (2026-08-27)");
   // The 2026-08-25 sweep verdict: an own-hand ev spent through the fold gate's
   // single scalar measured WORSE than the incumbent push table at every tested
   // authority, however well calibrated. A hand block reappearing here would

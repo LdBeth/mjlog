@@ -35,6 +35,8 @@ import { pickLesserEvil, violationPoints } from "../penalty/preview.ts";
 import type { SyncPolicy } from "../policy.ts";
 import type { ConsumerParams } from "./consumer.ts";
 import { scoreDiscard as consumeEvidence } from "./consumer.ts";
+import { chiitoiShanten, dyeEff, fieldSense, mergeSense, senseActive } from "./sense.ts";
+import type { FieldSense, SenseWeights } from "./sense.ts";
 import type { ContextEvidence, EvidenceHooks } from "./evidence.ts";
 import { assembleCandidate, assembleContext } from "./evidence.ts";
 import type { HandSample } from "./handcalib.ts";
@@ -93,6 +95,18 @@ export interface HeuristicWeights {
   /** Danger is scaled by this while folding. */
   foldDanger: number;
   /**
+   * The 持ち点8000未満 buffer (see `bufferScale`): from 南入 on, push is scaled
+   * by `bufferTight` within one assumed deal-in of the 8000 line and by
+   * `bufferLow` within two. (East is exempt — the rule is judged on the FINAL
+   * scores, 2026-08-27 ruling, and an early stack has a whole hanchan to
+   * recover in.) These exist to protect a LEDGER RULE of the home dojo; an
+   * environment without that rule (the riichi.dev arena) sets both to 1 —
+   * measured on ranked wire logs, the buffer was the dominant cause of folding
+   * live tenpai against a single riichi at ordinary mid-game stacks.
+   */
+  bufferTight: number;
+  bufferLow: number;
+  /**
    * 順位効用. Absent by DEFAULT, and absent means off: every scale the layer
    * produces is 1 and the policy is bit-for-bit the point-EV agent it has always
    * been. Present, it prices this seat's points by what they do to the FINAL
@@ -117,6 +131,8 @@ export const DEFAULT_WEIGHTS: HeuristicWeights = {
   tsumogiriLock: 2500,
   foldEfficiency: 0.05,
   foldDanger: 10,
+  bufferTight: 0.35,
+  bufferLow: 0.7,
 };
 
 /**
@@ -179,6 +195,15 @@ export interface HeuristicOptions {
    * stay outside it, always.
    */
   riichi?: RiichiWeights;
+  /**
+   * 色読み (`sense.ts`) — the 感性 field sense: トイツ場 and 染め場. ABSENT BY
+   * DEFAULT, and absent (or all-zero) means no field fact is even computed and
+   * every decision is the one this class has always made, bit for bit. Present
+   * with live weights, it adds exactly three terms: suit-heat risk on the
+   * defence side, field pressure at the fold gate, and the chiitoi-line tax on
+   * the discard score — each scaled by its own weight, nothing replaced.
+   */
+  sense?: Partial<SenseWeights>;
   /**
    * M11's recorder, one sample per turn decision (`handcalib.ts` labels them
    * from the outcome of the 局).
@@ -277,6 +302,8 @@ interface DecisionMemo {
   fold?: boolean;
   /** M11: `threatOf`, the per-seat half of `pressure`. */
   threat?: number[];
+  /** 色読み: the field, sensed once per decision — never when the sense is off. */
+  sense?: FieldSense;
   /** M11: the board facts every `HandFacts` of this decision is built from. */
   basis?: HandBasis;
   /** M11: one entry per resting shape, keyed by the discard that produced it. */
@@ -352,8 +379,20 @@ export class HeuristicPolicy implements SyncPolicy {
   private handW: HandWeights;
   /** M12's head, or null for the unconditional declare. */
   private riichiHead: RiichiWeights | null;
+  /** 色読み weights, and the guard that keeps a zero vector costing zero work. */
+  private sw: SenseWeights;
+  private senseOn: boolean;
   private handSink: ((rec: HandSample) => void) | null;
   private memo: DecisionMemo | null = null;
+  /**
+   * The `tenpaiHeld` counter (see `riichiFeatures`): how long the current
+   * kyoku's tenpai has sat on an unimproving wait. Per-kyoku by key, advanced
+   * at most once per 巡, cleared by `reset` — the only cross-decision state
+   * the base policy carries, and it feeds a FEATURE, never a gate: with no
+   * riichi head in the ktune vector it is dead weight and the policy is
+   * bit-for-bit its stateless self.
+   */
+  private riichiHold: { key: string; junme: number; mass: number; held: number } | null = null;
 
   constructor(name: string, seed: number, opts: HeuristicOptions = {}) {
     this.name = name;
@@ -365,6 +404,8 @@ export class HeuristicPolicy implements SyncPolicy {
     this.hand = opts.hand ?? null;
     this.handW = opts.hand ?? DEFAULT_HAND;
     this.riichiHead = opts.riichi ?? null;
+    this.sw = mergeSense(opts.sense);
+    this.senseOn = senseActive(this.sw);
     this.handSink = opts.handSink ?? null;
     this.rng = sfc32(seed);
   }
@@ -391,6 +432,7 @@ export class HeuristicPolicy implements SyncPolicy {
   reset(seed: number): void {
     this.rng = sfc32(seed);
     this.memo = null;
+    this.riichiHold = null;
   }
 
   /** The memo slot for this decision, freshly emptied when the board moved. */
@@ -416,6 +458,76 @@ export class HeuristicPolicy implements SyncPolicy {
   private threat(obs: Observation): number[] {
     const m = this.cache(obs);
     return m.threat ??= this.threatOf(obs);
+  }
+
+  /** 色読み, once per decision — and never at all while the sense is off. */
+  private senseOf(obs: Observation): FieldSense {
+    const m = this.cache(obs);
+    return m.sense ??= fieldSense(obs);
+  }
+
+  // ------------------------------------------------------------- 色読み (感性)
+
+  /**
+   * The 染め場 surcharge on one tile, in `w.danger` currency. This is the one
+   * defensive price that fires where the assessor does NOT look: a quiet table
+   * (no riichi, no furo threat) with a silent flush growing on it prices every
+   * tile 0 through the rule ladder, and that quiet is exactly where the
+   * 2026-08-27 arena batch fed its mangan cluster. Honors take the hottest
+   * suit's heat — the dyer is holding them. Types the dye's own source already
+   * discarded stay free (`FieldSense.safe`): the field evidence proves them out.
+   *
+   * Protected so `AugmentedHeuristic.riskOf` can ADD it around its estimate —
+   * the estimate models assessed threats, and this term models a threat the
+   * assessor has no entry for, so the two compose instead of competing.
+   */
+  protected senseRisk(ctx: Ctx, tile: Tile): number {
+    if (!this.senseOn || this.sw.someRisk === 0) return 0;
+    const f = this.senseOf(ctx.obs);
+    if (f.hot === 0) return 0;
+    const ty = tileType(tile);
+    const s = ty < 9 ? 0 : ty < 18 ? 1 : ty < 27 ? 2 : 3;
+    if (s === 3) {
+      // Hot honors: free only when the hottest suit's source let this type go.
+      const hotSuit = f.someba.indexOf(f.hot);
+      if (f.safe[hotSuit].has(ty)) return 0;
+      return this.sw.someRisk * dyeEff(f.hot);
+    }
+    if (f.safe[s].has(ty)) return 0;
+    return this.sw.someRisk * dyeEff(f.someba[s]);
+  }
+
+  /** The 染め場 term of the fold gate's pressure: a fully dyed field, weight 1 ⇒ one riichi. */
+  protected sensePressure(obs: Observation): number {
+    if (!this.senseOn || this.sw.somePressure === 0) return 0;
+    return this.sw.somePressure * dyeEff(this.senseOf(obs).hot);
+  }
+
+  /**
+   * The chiitoi-line tax on one discard candidate, in score units.
+   *
+   * `kernel.shanten` is the MIN across standard/chiitoi, so four early pairs
+   * silently flip the whole discard chooser onto the pairs line — commitment as
+   * an artifact of taking the min, with no judgment about whether the field
+   * pairs at all. The tax makes that flip cost something outside a トイツ場:
+   * `chiitoiTax × (standard − min) × (1 − toitsuba)`, only while the kept shape
+   * actually rides the chiitoi line (its chiitoi shanten IS the min, strictly
+   * below standard) and only at 2向聴 or worse — a hand at six pairs has
+   * completed its commitment, and taxing it out of tenpai would be absurd.
+   * Melded hands are exempt by construction (no meld shape can reach 七対子;
+   * the kernel already prices them standard-only).
+   *
+   * Subtracted in BOTH `scoreDiscard` paths beside `dojoCost`: like the dojo
+   * price it is a judgment no fitted core is allowed to move.
+   */
+  protected senseLineTax(ctx: Ctx, tile: Tile, sh: number): number {
+    if (!this.senseOn || this.sw.chiitoiTax === 0) return 0;
+    if (sh < 2 || ctx.obs.melds[0].length > 0) return 0;
+    const counts = countsFromTiles(this.handWithout(ctx, tile));
+    if (chiitoiShanten(counts) !== sh) return 0;
+    const std = shanten(counts, 0, false);
+    if (std <= sh) return 0;
+    return this.sw.chiitoiTax * (std - sh) * (1 - this.senseOf(ctx.obs).toitsuba);
   }
 
   decide(obs: Observation): Action {
@@ -589,19 +701,26 @@ export class HeuristicPolicy implements SyncPolicy {
   }
 
   /**
-   * 持ち点8000未満になる打ち方禁止. The ledger charges for *being* short, and by
-   * then it is too late to play differently — so the buffer, not the breach, is
-   * what the policy watches: a stack within one deal-in of the line is one bad
-   * discard away from the violation.
+   * 持ち点8000未満になる打ち方禁止. The ledger judges the FINAL scores, at 終局
+   * (2026-08-27 ruling) — and by then it is too late to play differently — so
+   * the buffer, not the breach, is what the policy watches: in the closing
+   * stretch, a stack within one deal-in of the line is one bad discard away
+   * from ending the game in violation. Before 南入 the buffer stays out of it:
+   * an early deal-in leaves most of a hanchan to recover in, and (as the rule
+   * is judged) has broken nothing yet.
    *
    * HOOK. `expectedLoss` is what a deal-in is assumed to cost; the base policy
    * has no way to know, so it guesses. A subclass that can price the table
    * overrides this, computes the figure and calls `super` with it.
    */
   protected bufferScale(obs: Observation, expectedLoss = 6000): number {
+    // 東場 is not the closing stretch. (A 東風戦 would end in East, but the
+    // home dojo plays hanchan — the rule this buffer defends is a hanchan
+    // ledger's.)
+    if (obs.roundWind === 27) return 1;
     const buffer = obs.scores[0] - 8000;
-    if (buffer < expectedLoss) return 0.35;
-    if (buffer < 2 * expectedLoss) return 0.7;
+    if (buffer < expectedLoss) return this.w.bufferTight;
+    if (buffer < 2 * expectedLoss) return this.w.bufferLow;
     return 1;
   }
 
@@ -622,7 +741,9 @@ export class HeuristicPolicy implements SyncPolicy {
       }
     }
     p += 0.5 * furoSeats.size;
-    return p;
+    // 色読み: a dyed field is loud even when nobody has declared anything —
+    // this term is what un-zeros the fold gate's quiet-table early-out.
+    return p + this.sensePressure(obs);
   }
 
   /**
@@ -1013,7 +1134,8 @@ export class HeuristicPolicy implements SyncPolicy {
         context: run.context,
         candidate: assembleCandidate(run.hooks, ctx, tile, sh, wideOpen),
       };
-      return consumeEvidence(ev, this.consumer) - this.dojoCost(ctx, tile, sh);
+      return consumeEvidence(ev, this.consumer) - this.dojoCost(ctx, tile, sh) -
+        this.senseLineTax(ctx, tile, sh);
     }
 
     const { obs } = ctx;
@@ -1065,10 +1187,13 @@ export class HeuristicPolicy implements SyncPolicy {
     // The dojo cost is deliberately outside `ctx.eff`: folding must not make a
     // 禁じ手 cheap. The ledger charges the same either way. The two bonus hooks
     // sit outside it too, and outside `ctx.eff`/`ctx.def`: they are already in
-    // score units and already know whether the policy is folding.
+    // score units and already know whether the policy is folding. The 色読み
+    // line tax rides beside `dojoCost` on both paths for the same reason: it is
+    // a judgment about which LINE the hand may commit to, and no fitted core is
+    // allowed to buy its way around it.
     return ctx.eff * eff - ctx.def * this.riskOf(ctx, tile) +
       this.drawBonus(ctx, tile) - this.keepBonus(ctx, tile) -
-      this.dojoCost(ctx, tile, sh);
+      this.dojoCost(ctx, tile, sh) - this.senseLineTax(ctx, tile, sh);
   }
 
   /**
@@ -1079,10 +1204,13 @@ export class HeuristicPolicy implements SyncPolicy {
    * observation; a policy holding a per-tile deal-in probability and a payment
    * to go with it computes the product instead. Whatever the source, "安全"
    * must stay free — that level means provably safe (genbutsu), and no estimate
-   * outranks a proof.
+   * outranks a proof. The 色読み surcharge (`senseRisk`) is ADDED outside that
+   * contract, and deliberately so: 安全 is a proof against the ASSESSED threats,
+   * while the sense prices a 染め場 the assessor holds no entry for — its own
+   * proof test is `FieldSense.safe`, the dye source's discards.
    */
   protected riskOf(ctx: Ctx, tile: Tile): number {
-    return this.ruleRisk(this.dangerLevelOf(ctx, tile));
+    return this.ruleRisk(this.dangerLevelOf(ctx, tile)) + this.senseRisk(ctx, tile);
   }
 
   /**
@@ -1236,6 +1364,36 @@ export class HeuristicPolicy implements SyncPolicy {
     const { facts, out } = this.handEntry(obs, rest, 0, { tile: discard });
     let oppRiichi = 0;
     for (let s = 1; s < 4; s++) if (obs.riichi[s]) oppRiichi++;
+
+    // 最終形 doctrine (2026-08-27): both features share one wait-mass basis —
+    // live copies by `publicUnseen`, so today's mass and a hypothetical
+    // upgrade's mass are comparable numbers.
+    const unseen = publicUnseen(obs);
+    const counts = countsFromTiles(rest);
+    const nM = obs.melds[0].length; // ankan only — riichi needs a menzen hand
+    const waits = ukeireTypes(counts, nM, true, 0);
+    let mass = 0;
+    for (const ty of waits) mass += unseen[ty];
+    const improvable = this.waitUpgradeExists(counts, nM, mass, unseen) ? 1 : 0;
+
+    // The held counter advances once per 巡 and only while the head is being
+    // consulted (tenpai inside the four gates); an improvement resets it. The
+    // high-water mass is what "improve" is measured against, so a wait that
+    // wobbles down and back does not reset the clock.
+    const key = `${obs.kyoku}:${obs.honba}`;
+    const st = this.riichiHold;
+    let held = 0;
+    if (st && st.key === key) {
+      if (obs.junme > st.junme) {
+        held = mass > st.mass ? 0 : st.held + 1;
+        this.riichiHold = { key, junme: obs.junme, mass: Math.max(mass, st.mass), held };
+      } else {
+        held = st.held;
+      }
+    } else {
+      this.riichiHold = { key, junme: obs.junme, mass, held: 0 };
+    }
+
     return {
       ev: out.ev / 1000,
       pwin: out.pwin,
@@ -1248,7 +1406,110 @@ export class HeuristicPolicy implements SyncPolicy {
       dealer: facts.dealer ? 1 : 0,
       oppRiichi,
       kyotaku: facts.kyotaku,
+      improvable,
+      tenpaiHeld: held,
+      holdShape: this.riichiHoldShape(obs, counts, waits, mass, out.value, facts.dealer) ? 1 : 0,
     };
+  }
+
+  /**
+   * The refined 最終形 doctrine (2026-08-27), as one verdict: should this
+   * tenpai HOLD rather than declare immediately? Held ⇔ the wait's acceptance
+   * is not strictly better than 2 live tiles, OR the hand is riichi(+平和)
+   * only — priced by the M11 value model: `value` below the model's own
+   * declared-hand baseline (`valueRiichi` plus half a dora, dealer-scaled)
+   * is a hand riichi itself is most of — UNLESS the shape is a sanctioned
+   * 単騎: ドラ単騎, 七対子の単騎, or a 役満形の単騎 (四暗刻単騎, 国士無双).
+   * `tenpaiHeld` remains the release: ~2 own turns without improvement and
+   * the head may declare anyway.
+   */
+  private riichiHoldShape(
+    obs: Observation,
+    counts: number[],
+    waits: number[],
+    mass: number,
+    value: number,
+    dealer: boolean,
+  ): boolean {
+    const wide = mass > 2;
+    const w = this.handW;
+    const cheap = value < (w.valueRiichi + 0.5 * w.valuePerDora) * (dealer ? w.valueDealer : 1);
+    if (wide && !cheap) return false;
+
+    const melds = obs.melds[0];
+    const ns: number[] = [];
+    const kinds: number[] = [];
+    for (let ty = 0; ty < 34; ty++) {
+      if (counts[ty] > 0) {
+        ns.push(counts[ty]);
+        kinds.push(ty);
+      }
+    }
+
+    // 国士無双: a truly closed hand of nothing but 幺九 is that tenpai,
+    // whichever of its tiles waits — 13面 included, so before any 単騎 test.
+    if (melds.length === 0 && kinds.every(isYaochu)) return false;
+
+    // The 単騎 exceptions: a single-type wait pairing a lone tile.
+    if (waits.length === 1 && counts[waits[0]] === 1) {
+      if (doraTypesOf(obs).has(waits[0])) return false; // ドラ単騎
+      // 七対子聴牌: six pairs and the lone wait tile.
+      if (
+        melds.length === 0 &&
+        ns.filter((n) => n === 2).length === 6 && ns.filter((n) => n === 1).length === 1
+      ) {
+        return false;
+      }
+      // 四暗刻単騎: four concealed triplets (暗槓 counts) and the lone wait.
+      const ankan = melds.filter((m) => m.kind === "ankan").length;
+      if (ankan === melds.length && ns.filter((n) => n === 3).length + ankan === 4) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /**
+   * Could a LIVE draw rebuild this tenpai onto a strictly wider wait? The
+   * probe behind the head's `improvable` feature: for every unseen draw type
+   * that is not already a winning tile, try every discard that keeps tenpai
+   * and ask whether the new wait's live mass beats the current one. Discarding
+   * into the new wait is skipped — that tenpai would be born furiten.
+   *
+   * 34×~13 kernel calls at worst, and only at a gated-in riichi decision —
+   * the rarest decision the policy faces.
+   */
+  private waitUpgradeExists(
+    counts: number[],
+    openMelds: number,
+    massNow: number,
+    unseen: number[],
+  ): boolean {
+    const c = [...counts];
+    const winsNow = new Set(ukeireTypes(c, openMelds, true, 0));
+    for (let d = 0; d < 34; d++) {
+      if (unseen[d] === 0 || c[d] >= 4) continue;
+      // A winning tile drawn is a win, not an upgrade path.
+      if (winsNow.has(d)) continue;
+      c[d]++;
+      for (let x = 0; x < 34; x++) {
+        if (x === d || c[x] === 0) continue;
+        c[x]--;
+        if (shanten(c, openMelds, true) === 0) {
+          const w2 = ukeireTypes(c, openMelds, true, 0);
+          if (!w2.includes(x)) {
+            let mass = 0;
+            for (const ty of w2) mass += unseen[ty] - (ty === d ? 1 : 0);
+            if (mass > massNow) {
+              return true;
+            }
+          }
+        }
+        c[x]++;
+      }
+      c[d]--;
+    }
+    return false;
   }
 
   private liveWaits(obs: Observation, waits: number[]): number {
@@ -1305,7 +1566,10 @@ export class HeuristicPolicy implements SyncPolicy {
     };
     const melds = [...obs.melds[0], meld];
 
-    if (this.dojo && !this.hasYakuProspect(rest, melds, ctx.valueHonors, this.kuitan)) {
+    if (
+      this.dojo &&
+      !this.hasYakuProspect(rest, melds, ctx.valueHonors, this.kuitan, publicUnseen(obs))
+    ) {
       return null;
     }
 
@@ -1319,26 +1583,40 @@ export class HeuristicPolicy implements SyncPolicy {
    * rule judges the finished waiting hand with the real scorer (`yakuless` in
    * `DiscardInfo`, priced in `dojoCost`); this one only has to stop the CPU
    * from opening a hand with no route to a yaku at all. A concealed 役牌 pair —
-   * the classic バック — passes here on purpose: under the new reading the crime
-   * is the yakuless WAIT, not the hopeful call, so refusing every バック would
-   * cost the policy hands the dojo has no objection to.
+   * the classic バック — passes here on purpose, PROVIDED the third tile is
+   * still live: under the new reading the crime is the yakuless WAIT, not the
+   * hopeful call, so refusing every バック would cost the policy hands the dojo
+   * has no objection to — but a バック whose trigger is dead is not hopeful, it
+   * is a route to nothing.
+   *
+   * TIGHTENED 2026-08-27 (with the owner's word, ranked wire logs as the
+   * evidence): the 対々和 clause used to pass ANY chi-free shape — which made
+   * every first pon self-justifying and produced open, cheap, yakuless hands
+   * (15 of 36 arena pons had no other justification, one of them at 5向聴).
+   * It now demands the concealed rest actually be pair-rich enough to finish
+   * the triplet build.
    */
   private hasYakuProspect(
     rest: Tile[],
     melds: Meld[],
     valueHonors: Set<number>,
     kuitan: boolean,
+    unseen: number[],
   ): boolean {
     const restTypes = rest.map(tileType);
     const meldTypes = melds.map((m) => m.tiles.map(tileType));
 
-    // 役牌: already melded, or held concealed as a pair waiting on the third.
+    // 役牌: already melded, or held concealed as a pair waiting on a LIVE third.
     for (const m of melds) {
       if (m.kind !== "chi" && valueHonors.has(tileType(m.tiles[0]))) return true;
     }
     const counts = new Map<number, number>();
     for (const ty of restTypes) counts.set(ty, (counts.get(ty) ?? 0) + 1);
-    for (const [ty, n] of counts) if (n >= 2 && valueHonors.has(ty)) return true;
+    for (const [ty, n] of counts) {
+      if (!valueHonors.has(ty)) continue;
+      // A concealed triplet already IS the yaku; a pair needs its third live.
+      if (n >= 3 || (n >= 2 && unseen[ty] > 0)) return true;
+    }
 
     // 断幺九: nothing melded touches a yaochu, and the concealed part holds at
     // most one — which the discard that follows this call can throw away.
@@ -1358,8 +1636,17 @@ export class HeuristicPolicy implements SyncPolicy {
       if (strays.length <= 2) return true;
     }
 
-    // 対々和: no chi anywhere means the hand is still a pure triplet build.
-    if (melds.every((m) => m.kind !== "chi")) return true;
+    // 対々和: chi-free, AND the concealed rest can still supply the build.
+    // `melds` already includes the call being judged, so the rest owes
+    // (4 − melds) triplets + 1 pair; every one of those blocks realistically
+    // grows from a pair already held, and ONE of them is allowed to arrive
+    // later (a draw pairing a floater) — hence ≥ 4 − melds pair-or-better
+    // types. A first pon wants three more pairs behind it, which is what a
+    // hand actually built for 対々和 looks like.
+    if (melds.every((m) => m.kind !== "chi")) {
+      const pairTypes = [...counts.values()].filter((n) => n >= 2).length;
+      if (pairTypes >= 4 - melds.length) return true;
+    }
 
     return false;
   }

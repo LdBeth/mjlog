@@ -60,6 +60,29 @@ export interface RiichiFeatures {
   oppRiichi: number;
   /** Riichi sticks already on the table — declaring buys a shot at them. */
   kyotaku: number;
+  /**
+   * 1 when a LIVE draw could still rebuild this tenpai onto a strictly wider
+   * wait (see `waitUpgradeExists` in heuristic.ts), 0 when the shape is 最終形.
+   * Informational since the doctrine refinement — the shipped rule reads
+   * `holdShape` — but kept computed for future fits.
+   */
+  improvable: number;
+  /**
+   * Own turns already spent tenpai WITHOUT the wait improving, 0 on the turn
+   * tenpai arrives. The doctrine's release valve: a shape that refused to
+   * improve for ~2 turns has shown its final form the slow way, and may
+   * declare.
+   */
+  tenpaiHeld: number;
+  /**
+   * The 2026-08-27 doctrine verdict, as ONE fact the linear surface cannot
+   * build from the other features (it is a conjunction): 1 when the shape is
+   * NOT worth an immediate declaration — acceptance ≤ 2 live tiles OR a
+   * riichi(+平和)-only hand with no dora — unless it is one of the sanctioned
+   * 単騎 exceptions (ドラ単騎, 七対子単騎, 役満形の単騎: 四暗刻単騎・国士).
+   * Computed by `riichiHoldShape` in heuristic.ts.
+   */
+  holdShape: number;
 }
 
 /**
@@ -82,6 +105,9 @@ export interface RiichiWeights {
   dealer: number;
   oppRiichi: number;
   kyotaku: number;
+  improvable: number;
+  tenpaiHeld: number;
+  holdShape: number;
 }
 
 /**
@@ -103,6 +129,9 @@ export const INIT_RIICHI: RiichiWeights = {
   dealer: 0,
   oppRiichi: 0,
   kyotaku: 0,
+  improvable: 0,
+  tenpaiHeld: 0,
+  holdShape: 0,
 };
 
 /**
@@ -126,5 +155,8 @@ export function decideRiichi(f: RiichiFeatures, w: RiichiWeights): boolean {
       w.dora * f.dora +
       w.dealer * f.dealer +
       w.oppRiichi * f.oppRiichi +
-      w.kyotaku * f.kyotaku >= 0;
+      w.kyotaku * f.kyotaku +
+      w.improvable * f.improvable +
+      w.tenpaiHeld * f.tenpaiHeld +
+      w.holdShape * f.holdShape >= 0;
 }

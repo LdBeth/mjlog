@@ -10,7 +10,7 @@ import { runHook } from "./penalty/rules.ts";
 import type { DojoConfig } from "./rules.ts";
 import { scorer } from "./score.ts";
 import type { Table } from "./table.ts";
-import type { Action, RoundOutcome, Seat } from "./types.ts";
+import type { Action, RoundOutcome, Seat, Violation } from "./types.ts";
 import { SEATS } from "./types.ts";
 
 export interface DojoHooksOptions {
@@ -63,6 +63,25 @@ export function dojoHooks(opts: DojoHooksOptions) {
         const ctx = ctxFor(t, seat, { t: "pass" }, null);
         for (const v of runHook("on-round-end", ctx)) t.addViolation(v);
       }
+    },
+
+    /**
+     * Fired once by the match driver when the hanchan is over, on the LAST
+     * round's table (its scores are final, bar the 供託 top-up to the leader —
+     * who cannot be the seat any game-end rule is short-changing). Returns the
+     * violations instead of filing them: the round's ledger has already been
+     * folded into the match by the time the driver knows the match is over, so
+     * the driver appends these to the MATCH ledger itself — after the last
+     * `ledgerCut`, which is what keeps them out of every per-round slice while
+     * the match totals still count them.
+     */
+    onGameEnd(t: Table): Violation[] {
+      const out: Violation[] = [];
+      for (const seat of SEATS) {
+        const ctx = ctxFor(t, seat, { t: "pass" }, null);
+        out.push(...runHook("on-game-end", ctx));
+      }
+      return out;
     },
   };
 }

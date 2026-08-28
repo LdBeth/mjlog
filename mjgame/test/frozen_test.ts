@@ -12,6 +12,14 @@
 // (Verified at epoch time, not pinned: frozen-h ≡ default-k, bit for bit, on
 // 2026-08-25. That equality is EXPECTED to break as "k" evolves — it is the
 // difference between a snapshot and a reference.)
+//
+// RE-CAPTURED ONCE, 2026-08-27, by the owner's explicit direction — not a
+// regeneration of convenience: the DOJO'S OWN RULES were corrected (持ち点
+// 8000点未満 judged at 終局, buffer 南入以降; the call gate's 対々和/バック
+// clauses tightened) and the owner ruled the frozen seat plays under the
+// corrected dojo too ("apply fixes to both h agent"). The seat's weights are
+// untouched; the world it plays in changed. The frozen-h ≡ frozen-0825
+// league equality was re-verified to hold across the re-capture.
 
 import { assertEquals } from "@std/assert";
 import { closeArm, headless, openArm } from "../src/harness.ts";
@@ -31,9 +39,9 @@ function fingerprint(seed: number): string {
 }
 
 const EPOCH_PIN: Record<number, string> = {
-  101: "28600/23300/51400/16700#af5c064d",
-  505: "43600/23300/27900/25200#545ecdaf",
-  909: "47600/45000/18100/9300#a9aab631",
+  101: "63200/27700/17500/11600#e65683eb",
+  505: "48600/28500/21000/21900#ff24c152",
+  909: "63900/32300/14700/9100#6a0d13cd",
 };
 
 Deno.test("frozen h: the epoch pin — these streams never change", () => {

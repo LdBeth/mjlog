@@ -981,12 +981,15 @@ Deno.test("計算(M10b): 本場の額は score.ts の ronValue が実際に請�
  * rest — so the seat it describes no longer exists. The claim the strings carry
  * is unchanged; only the code they were read off is newer.
  */
+// Re-captured 2026-08-27: the owner-directed dojo rules correction (under-8000
+// judged at game end, buffer 南入以降, call-gate 対々和/バック tightening)
+// moved every default seat. The claim is unchanged; only the world is newer.
 const HONBA_OFF: Record<number, string> = {
-  101: "1400/21600/63500/33500#32a4e25f",
-  404: "36100/30400/23800/29700#9883694e",
-  505: "30000/40700/37500/11800#e7a125e7",
-  606: "24700/13400/45200/36700#01233df3",
-  707: "22900/9400/54100/33600#618b456e",
+  101: "62900/26300/26900/3900#963fa21a",
+  404: "33400/43700/18300/24600#a10a1382",
+  505: "24100/32800/46100/17000#a4614d76",
+  606: "27600/5900/44600/41900#43bab41f",
+  707: "27000/62300/32400/-1700#49c7b3a4",
 };
 
 function fingerprint(seed: number, w?: Partial<ComputedWeights>): string {

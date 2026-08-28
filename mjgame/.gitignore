@@ -9,3 +9,4 @@ native/*.so
 !weights/computed-calibrated.json
 !weights/hand-calibrated.json
 !weights/league/
+!weights/arena.json

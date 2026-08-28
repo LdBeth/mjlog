@@ -29,6 +29,13 @@ export interface MatchOptions extends RoundDeps {
    * engine reads it back — it is a one-way tap.
    */
   tableRef?: { t: Table | null };
+  /**
+   * Called once when the match is over, with the last round's table (scores
+   * final). What it returns — `dojoHooks().onGameEnd` runs the "on-game-end"
+   * rules — is appended to the MATCH ledger, after the last `ledgerCut`: no
+   * per-round slice owns a game-end violation, the match totals count it.
+   */
+  onGameEnd?: (t: Table) => Violation[];
 }
 
 export interface MatchResult {
@@ -40,8 +47,10 @@ export interface MatchResult {
   /**
    * Round boundaries into `ledger`: `ledgerCuts[k]` is the ledger length once
    * round `k` finished, so round `k` owns `ledger[ledgerCuts[k-1] ?? 0 ..
-   * ledgerCuts[k])`. Non-decreasing, one entry per outcome, last === ledger
-   * length. `kyoku` alone cannot do this — 連荘 repeats the same kyoku number.
+   * ledgerCuts[k])`. Non-decreasing, one entry per outcome. `kyoku` alone
+   * cannot do this — 連荘 repeats the same kyoku number. Entries past the LAST
+   * cut are on-game-end violations (持ち点8000点未満, judged at 終局): they
+   * belong to no round, only to the match.
    */
   ledgerCuts: number[];
   /**
@@ -240,7 +249,10 @@ export function runMatchSync(policies: SyncPolicy[], opts: MatchOptions): MatchR
     for (;;) {
       const step = reply === undefined ? gen.next() : gen.next(reply);
       if (step.done) {
-        if (!advance(m, step.value.table, step.value.outcome, opts)) return finalize(m, opts);
+        if (!advance(m, step.value.table, step.value.outcome, opts)) {
+          m.ledger.push(...(opts.onGameEnd?.(step.value.table) ?? []));
+          return finalize(m, opts);
+        }
         break;
       }
       const req = step.value;
@@ -276,7 +288,10 @@ export async function runMatch(policies: Policy[], opts: MatchOptions): Promise<
     for (;;) {
       const step = reply === undefined ? gen.next() : gen.next(reply);
       if (step.done) {
-        if (!advance(m, step.value.table, step.value.outcome, opts)) return finalize(m, opts);
+        if (!advance(m, step.value.table, step.value.outcome, opts)) {
+          m.ledger.push(...(opts.onGameEnd?.(step.value.table) ?? []));
+          return finalize(m, opts);
+        }
         break;
       }
       const req = step.value;

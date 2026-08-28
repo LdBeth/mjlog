@@ -279,11 +279,14 @@ Deno.test("役満関連牌切り: 大三元 fires from 2 melds, others need 3", 
   assert(ids("yakuman-related", fire("post-discard", ctx(t, 0, a))));
 });
 
-Deno.test("持ち点8000点未満: judged at round end", () => {
+Deno.test("持ち点8000点未満: judged at game end, not round end", () => {
   const lo = makeTable({ scores: [4000, 42000, 37000, 37000] });
-  assert(ids("under-8000", fire("on-round-end", ctx(lo, 0, { t: "pass" }))));
+  assert(ids("under-8000", fire("on-game-end", ctx(lo, 0, { t: "pass" }))));
   const ok = makeTable();
-  assert(!ids("under-8000", fire("on-round-end", ctx(ok, 0, { t: "pass" }))));
+  assert(!ids("under-8000", fire("on-game-end", ctx(ok, 0, { t: "pass" }))));
+  // 2026-08-27 ruling: passing under the line mid-match breaks nothing — the
+  // rule left the on-round-end hook entirely.
+  assert(!ids("under-8000", fire("on-round-end", ctx(lo, 0, { t: "pass" }))));
 });
 
 // ---------------------------------------------------------------------------

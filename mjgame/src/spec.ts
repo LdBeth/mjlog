@@ -22,6 +22,7 @@ import { parseConsumerParams } from "./ai/consumer.ts";
 import type { HandWeights } from "./ai/handvalue.ts";
 import type { HeuristicWeights } from "./ai/heuristic.ts";
 import type { RiichiWeights } from "./ai/riichi.ts";
+import type { SenseWeights } from "./ai/sense.ts";
 import { die } from "./cli/die.ts";
 
 /**
@@ -55,6 +56,14 @@ export interface KTune {
    * bit by construction.
    */
   riichi?: Partial<RiichiWeights>;
+  /**
+   * 色読み — the 感性 field sense (`ai/sense.ts`): トイツ場/染め場. A switch
+   * like `hand` and `riichi`: ABSENT (or all-zero) means no field fact is even
+   * computed and the seat plays bit-for-bit its prior game; live weights add
+   * three terms (suit-heat risk, field pressure, chiitoi-line tax), nothing
+   * replaced.
+   */
+  sense?: Partial<SenseWeights>;
 }
 
 /**
@@ -77,7 +86,7 @@ export function loadKtune(path: string, flag = "--ktune"): KTune {
   }
   if (typeof json !== "object" || json === null || Array.isArray(json)) {
     die(
-      `${flag} はオブジェクト {heuristic, augment, computed, hand, riichi} である必要があります: ${path}`,
+      `${flag} はオブジェクト {heuristic, augment, computed, hand, riichi, sense} である必要があります: ${path}`,
     );
   }
   // Sections only — the contents pass through verbatim. (`riichi` was silently
@@ -90,6 +99,7 @@ export function loadKtune(path: string, flag = "--ktune"): KTune {
     computed: k.computed,
     hand: k.hand,
     riichi: k.riichi,
+    sense: k.sense,
   };
 }
 
