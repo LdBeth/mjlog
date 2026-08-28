@@ -35,7 +35,14 @@ import { pickLesserEvil, violationPoints } from "../penalty/preview.ts";
 import type { SyncPolicy } from "../policy.ts";
 import type { ConsumerParams } from "./consumer.ts";
 import { scoreDiscard as consumeEvidence } from "./consumer.ts";
-import { chiitoiShanten, dyeEff, fieldSense, mergeSense, senseActive } from "./sense.ts";
+import {
+  chiitoiShanten,
+  dyeEff,
+  fieldSense,
+  HONOR_SHARE,
+  mergeSense,
+  senseActive,
+} from "./sense.ts";
 import type { FieldSense, SenseWeights } from "./sense.ts";
 import type { ContextEvidence, EvidenceHooks } from "./evidence.ts";
 import { assembleCandidate, assembleContext } from "./evidence.ts";
@@ -107,6 +114,23 @@ export interface HeuristicWeights {
   bufferTight: number;
   bufferLow: number;
   /**
+   * 生牌の役牌 surcharge: risk points (the `w.danger` currency) added to a
+   * mid-game release of a value honor NOBODY has shown yet, while at least one
+   * opponent is open. DEFAULT 0 — the term is off until a vector asks for it,
+   * so the seat plays bit-for-bit its prior game.
+   *
+   * Why it is not already priced: the 計算 deal-in estimate needs a threat to
+   * model, and one chi or pon sits below the assessor's activation, so a live
+   * 白 released at 8巡目 against a single-meld hand costs a few percent on
+   * paper. Across 35 arena games (2026-08-28) the bot's 巡目 ≥ 6 releases of a
+   * 0-copies-visible value honor into a table with an open hand were ronned
+   * 2/16 times at 満貫 or better — about 1,300 points per discard, against
+   * ~216 for an ordinary middle tile. This is the flat charge for that gap, not
+   * a model of it: a 役牌 nobody can spare is the tile an open hand is waiting
+   * on, and the assessor cannot see the wait yet.
+   */
+  liveYakuhai: number;
+  /**
    * 順位効用. Absent by DEFAULT, and absent means off: every scale the layer
    * produces is 1 and the policy is bit-for-bit the point-EV agent it has always
    * been. Present, it prices this seat's points by what they do to the FINAL
@@ -133,6 +157,7 @@ export const DEFAULT_WEIGHTS: HeuristicWeights = {
   foldDanger: 10,
   bufferTight: 0.35,
   bufferLow: 0.7,
+  liveYakuhai: 0,
 };
 
 /**
@@ -491,10 +516,81 @@ export class HeuristicPolicy implements SyncPolicy {
       // Hot honors: free only when the hottest suit's source let this type go.
       const hotSuit = f.someba.indexOf(f.hot);
       if (f.safe[hotSuit].has(ty)) return 0;
-      return this.sw.someRisk * dyeEff(f.hot);
+      // シャンポン不成立 ⇒ 無価格. An honor deals in as シャンポン or 単騎 only,
+      // and a 染め手 is built on the PAIR: with fewer than two copies left
+      // outside our own hand nobody can hold one, and the bare 単騎 that
+      // remains is not what the field evidence is arguing for. `ctx.unseen`
+      // (`publicUnseen`) is exactly "not in a river, meld or indicator, and
+      // not in our hand" — the count this test wants.
+      if (ctx.unseen[ty] < 2) return 0;
+      // 字牌は本命ではない — see `HONOR_SHARE`. Pricing the honor at the full
+      // suit heat made the agent hoard honors and shed live middle tiles.
+      return this.sw.someRisk * HONOR_SHARE * dyeEff(f.hot);
     }
     if (f.safe[s].has(ty)) return 0;
     return this.sw.someRisk * dyeEff(f.someba[s]);
+  }
+
+  /**
+   * 生牌の役牌: the flat surcharge on letting an untouched value honor go, in
+   * the same `w.danger` currency as the ladder. See `HeuristicWeights.liveYakuhai`
+   * for the arena measurement behind it; zero by default, so this is one
+   * comparison on the ordinary path.
+   *
+   * Every clause has to hold. The tile is an honor, and a VALUE honor to
+   * SOMEONE — the round wind, any dragon, or any OPPONENT's seat wind (our own
+   * seat wind is worthless to the three seats that could ron us, unless it is
+   * also the round wind). No copy is public, so the hand that wants it can
+   * still be holding a pair of it and waiting シャンポン. It is 巡目 ≥ 6, so a
+   * held 役牌 is being held on purpose rather than waiting to be cut. And
+   * somebody has actually called, which is what makes the 役牌 a plausible
+   * wait rather than a lone honor in four closed hands.
+   */
+  protected liveYakuhaiRisk(ctx: Ctx, tile: Tile): number {
+    const w = this.w.liveYakuhai;
+    if (w === 0) return 0;
+    const ty = tileType(tile);
+    if (ty < 27) return 0;
+    const obs = ctx.obs;
+    if (obs.junme < 6) return 0;
+    // Only where nobody is looking. Under a declared riichi or an activated
+    // furo threat the assessor already prices a live 役牌 (its honor rule is
+    // 危険度高 at ≤1 copy public); stacking this on top made the arena replay
+    // swap a 中-rated honor for a 高-rated number tile INTO the riichi. The
+    // surcharge exists for the 1-meld quiet table the assessor never enters.
+    if (this.dangerLevelOf(ctx, tile) !== undefined) return 0;
+
+    // 三元牌はいつでも役牌; 場風も同じ; 自風は他家のものだけ数える。
+    let value = ty >= 31 || ty === obs.roundWind;
+    if (!value) {
+      for (let o = 1; o < 4 && !value; o++) {
+        if (ty === 27 + ((obs.seatWind - 27 + o) % 4)) value = true;
+      }
+    }
+    if (!value) return 0;
+
+    // 生牌 test on PUBLIC copies only. `4 − unseen` counts rivers, melds,
+    // indicators AND our own hand (see `Ctx.unseen`), so our own copies come
+    // back out: holding a pair of 白 does not make the 白 any less live to the
+    // seat that would ron it.
+    let own = 0;
+    for (const t of obs.hand) if (tileType(t) === ty) own++;
+    if (4 - ctx.unseen[ty] - own !== 0) return 0;
+
+    // Open melds only — an ankan leaves the hand closed (same reading as
+    // `furoThreats`); the evidence was "somebody has called".
+    for (let o = 1; o < 4; o++) if (obs.melds[o].some((m) => m.kind !== "ankan")) return w;
+    return 0;
+  }
+
+  /**
+   * The 感性 surcharges, together — everything ADDED to a risk reading rather
+   * than computed from the assessed threats. Both terms price hands the
+   * assessor holds no entry for, so they compose with any estimate instead of
+   * competing with it, and both are exactly 0 unless a vector armed them.
+   */
+  protected surcharge(ctx: Ctx, tile: Tile): number {
+    return this.senseRisk(ctx, tile) + this.liveYakuhaiRisk(ctx, tile);
   }
 
   /** The 染め場 term of the fold gate's pressure: a fully dyed field, weight 1 ⇒ one riichi. */
@@ -1204,13 +1300,15 @@ export class HeuristicPolicy implements SyncPolicy {
    * observation; a policy holding a per-tile deal-in probability and a payment
    * to go with it computes the product instead. Whatever the source, "安全"
    * must stay free — that level means provably safe (genbutsu), and no estimate
-   * outranks a proof. The 色読み surcharge (`senseRisk`) is ADDED outside that
-   * contract, and deliberately so: 安全 is a proof against the ASSESSED threats,
-   * while the sense prices a 染め場 the assessor holds no entry for — its own
-   * proof test is `FieldSense.safe`, the dye source's discards.
+   * outranks a proof. The 感性 surcharges (`surcharge`: 色読み plus the 生牌
+   * 役牌 charge) are ADDED outside that contract, and deliberately so: 安全 is a
+   * proof against the ASSESSED threats, while those terms price hands the
+   * assessor holds no entry for — the sense's own proof test is
+   * `FieldSense.safe`, the dye source's discards, and a 役牌 nobody has shown
+   * is by construction genbutsu against nobody.
    */
   protected riskOf(ctx: Ctx, tile: Tile): number {
-    return this.ruleRisk(this.dangerLevelOf(ctx, tile)) + this.senseRisk(ctx, tile);
+    return this.ruleRisk(this.dangerLevelOf(ctx, tile)) + this.surcharge(ctx, tile);
   }
 
   /**

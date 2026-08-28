@@ -135,6 +135,38 @@ buffering seam). Flags a command would silently ignore are rejected by
 
 ## Decisions
 
+- **The assessor was fed DOUBLE-COUNTED own tiles (engine bug, found
+  2026-08-28 in the ranked arena)**: `Table.visibleCounts(seat)` includes the
+  seat's own hand (right for the ukeire `live` field), but `observe.ts`
+  passed it to `assessDanger` as the PUBLIC count while also passing
+  `ownCounts`, so a held pair killed every wait shape (`当たり形:なし` ⇒ 安全)
+  and the champion — which honours an explicit 安全 as a proof above its
+  deal-in estimate — threw a live 単騎 East into a 3-pon toitoi for 12,000.
+  Fixed to mjrender's own contract (public counts + hand separately).
+  Isolated on the 0827 wire log the fix changes 2.6% of live discards, every
+  one a tile the FIXED build rates 危険度低 (the old build had them at 安全
+  through the killed-shapes cap). The bug was SYMMETRIC at home
+  (shared `observe()`), so no paired grade could see it — only the arena,
+  where opponents do not share our bugs. Shared code ⇒ all fingerprint pins
+  moved and were re-captured the same day by the owner's word (the 08-27
+  precedent); frozen-h ≡ frozen-0825 re-verified across the re-capture.
+  The same replay pass ("old vs new on real decisions": the live `> dahai`
+  replies ARE the old build) shaped three sense/discipline corrections:
+  the sense's honor surcharge is now `HONOR_SHARE` 0.5 and zero once <2
+  copies remain unseen (at hot≈1.0 the folding bot had hoarded five honors
+  while cutting live middle tiles); each opponent's void score is scaled by
+  an honor-retention factor in the `fieldSense` reduction (lane-measured:
+  ≥4 honors discarded ⇒ ×0.5, 2–3 ⇒ ×0.8 — late-game precision of the
+  [0.5,0.7) bin 6.6%→12.6%; `fieldSenseDetail` untouched so the recorded
+  lane keeps its semantics); and a `liveYakuhai` heuristic weight (default
+  0) surcharges a 役牌-for-anyone honor with 0 public copies at junme ≥ 6
+  when an opponent has called AND the assessor holds no entry for the tile
+  (2/16 such releases were ronned at mangan+ across 35 arena games; under a
+  riichi the assessor already prices it, and stacking made the replay swap a
+  中 honor for a 高 number tile). Arena heat runs 2–3× hotter than home
+  (SL-bot rivers are suit-skewed: hot≥0.7 on 31.6% of late decisions vs
+  11.0% at home) — the home bench under-measures sense consumption costs.
+
 - **色読み — the 感性 field sense (`ai/sense.ts`, 2026-08-28, owner-directed)**:
   the 0827 ranked arena batch (30 games, avg 2.60) fed 10 mangan+ deal-ins,
   and the owner's replay review found the cluster was 染め手 (mostly CLOSED

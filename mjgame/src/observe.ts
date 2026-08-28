@@ -201,8 +201,20 @@ export function observe(
   const ownCounts = countsFromTiles(hand);
   const danger = new Map<number, DangerAssessment>();
   if (threats.length > 0 || furo.length > 0) {
+    // 二度数え防止. `assessDanger` counts a tile's remaining copies as
+    // `4 − (visible + ownCounts)`, so its first argument must be PUBLIC
+    // evidence only — rivers, melds, indicators. `visibleCounts` deliberately
+    // folds our own concealed hand in (the ukeire `live` field above wants
+    // exactly that: our own copies are not drawable), so handing the same
+    // vector to the assessor counted every held copy twice. A seat holding a
+    // pair of 東 with one 東 in a river read 場に3枚 / 当たり形:なし ⇒ 安全 —
+    // a false PROOF of safety, which `AugmentedHeuristic.riskOf` honours over
+    // its own deal-in estimate (2026-08-28 arena wire log: a 12000 単騎 ron).
+    // One 34-length subtraction, and only when a threat actually stands.
+    const publicVisible = new Array<number>(34);
+    for (let ty = 0; ty < 34; ty++) publicVisible[ty] = visible[ty] - ownCounts[ty];
     for (const ty of new Set(hand.map(tileType))) {
-      const d = assessDanger(ty, threats, furo, visible, ownCounts);
+      const d = assessDanger(ty, threats, furo, publicVisible, ownCounts);
       if (d) danger.set(ty, d);
     }
   }

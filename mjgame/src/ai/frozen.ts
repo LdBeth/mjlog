@@ -52,6 +52,10 @@ export const FROZEN_HEURISTIC: HeuristicWeights = {
   // are the values the 8000-line buffer had when this seat froze.
   bufferTight: 0.35,
   bufferLow: 0.7,
+  // Added to HeuristicWeights 2026-08-28 (生牌の役牌 surcharge). The frozen seat
+  // predates the term and must not learn it: 0 is the value that keeps this
+  // seat playing exactly the game it played on 2026-08-25.
+  liveYakuhai: 0,
 };
 
 /** The Reads-consumption weights, as augmented.ts's defaults stood. */

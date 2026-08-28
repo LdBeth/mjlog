@@ -658,17 +658,18 @@ export class AugmentedHeuristic extends HeuristicPolicy {
     // ONE lookup for both halves: the rule ladder's price, and the proof test
     // below. They are the same entry of the same danger map.
     //
-    // The 色読み surcharge (`senseRisk`, zero unless a `sense` block armed it)
-    // is ADDED at every exit, the explicit 安全 proof included: that proof is
-    // against the ASSESSED threats, while the sense prices a 染め場 neither the
-    // assessor nor the deal-in estimate models — a genbutsu against a riichi
-    // can still be the live suit of a silent flush. The sense carries its own
-    // proof test (`FieldSense.safe`, the dye source's discards) and zeroes
-    // itself there.
+    // The 感性 surcharges (`surcharge` — 色読み plus the 生牌役牌 charge, both
+    // zero unless a vector armed them) are ADDED at every exit, the explicit
+    // 安全 proof included: that proof is against the ASSESSED threats, while
+    // these price hands neither the assessor nor the deal-in estimate models —
+    // a genbutsu against a riichi can still be the live suit of a silent flush,
+    // or the 生牌の役牌 a single-meld hand is sitting on. The sense carries its
+    // own proof test (`FieldSense.safe`, the dye source's discards) and zeroes
+    // itself there; the 役牌 charge asks that no copy be public at all.
     const level = this.dangerLevelOf(ctx, tile);
     const base = this.ruleRisk(level);
     const dealinP = this.reads?.dealinP;
-    if (!dealinP) return base + this.senseRisk(ctx, tile);
+    if (!dealinP) return base + this.surcharge(ctx, tile);
 
     // RULE FLOOR, top half: "安全" is genbutsu — a proof, not an assessment.
     // No estimate, however confident, may price a provably safe tile. The proof
@@ -678,7 +679,7 @@ export class AugmentedHeuristic extends HeuristicPolicy {
     // an estimate-holding policy must keep pricing there. Quiet tables are
     // where a silent tenpai lives, and where the deal-in estimate has no rule
     // reading to fall back on.
-    if (level === "安全") return this.senseRisk(ctx, tile);
+    if (level === "安全") return this.surcharge(ctx, tile);
 
     const ty = tileType(tile);
     let risk = 0;
@@ -689,7 +690,7 @@ export class AugmentedHeuristic extends HeuristicPolicy {
       risk += p * v;
     }
     // RULE FLOOR, bottom half.
-    return Math.max(this.aw.lambda * risk, this.aw.floor * base) + this.senseRisk(ctx, tile);
+    return Math.max(this.aw.lambda * risk, this.aw.floor * base) + this.surcharge(ctx, tile);
   }
 
   /** Threat volume priced by who is actually tenpai, and for how much. */

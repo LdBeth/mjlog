@@ -118,6 +118,46 @@ const DUP_JUNME = 8;
 const suitOf = (ty: number): number => ty < 9 ? 0 : ty < 18 ? 1 : ty < 27 ? 2 : 3;
 
 /**
+ * 字牌保持の裏取り — the honor-retention corroborator (owner-directed,
+ * 2026-08-28), applied to the REDUCTION only (`fieldSenseDetail` keeps
+ * recording raw `honors`, so the oracle lane's evidence means what it always
+ * meant and old lanes stay comparable).
+ *
+ * A dyer KEEPS honors: they are the flush's pair and its 役牌 seed, so a river
+ * that has been shedding them belongs to someone who is not collecting them,
+ * and its suit void is that much less likely to be 染め手 rather than chance.
+ * The 0828 lane (600 半荘, 90k rows) measured it: at heat ≥ 0.35 mid-game,
+ * P(dye-committed) is 9.8% with ≤1 honors discarded against 5.5% with ≥4.
+ * Re-binning those same rows offline through this factor raised LATE-game
+ * precision of the [0.5, 0.7) bin from 6.6% to 12.6%, and of [0.7, 1.0) from
+ * 13.8% to 17.2% — it sharpens exactly the bins the consumers price.
+ *
+ * It scales the VOID score alone, never `meldBoost`: a meld inside the suit is
+ * physical evidence on the table, and no discard pattern argues it away.
+ */
+const HONOR_RETAIN_SOME = 2;
+const HONOR_RETAIN_MANY = 4;
+
+/** The corroborating factor on one opponent's void score. */
+function honorRetain(honors: number): number {
+  return honors >= HONOR_RETAIN_MANY ? 0.5 : honors >= HONOR_RETAIN_SOME ? 0.8 : 1;
+}
+
+/**
+ * 字牌は本命ではない — the share of a suit's heat an honor carries, for the
+ * defensive surcharge (`HeuristicPolicy.senseRisk`).
+ *
+ * A dyer's honor is a PAIR or a pon candidate: real evidence, but a smaller and
+ * far less certain part of the hand than the suit itself — the dyer needs one
+ * or two honor types, not nine ranks of them. Pricing honors at the FULL suit
+ * heat inverted the agent's safety ordering: the 2026-08-28 arena logs show it
+ * in fold mode at hot ≈ 1.0 releasing live middle number tiles for nine
+ * straight turns while hoarding five honors, against the two opponents who were
+ * not the dyer at all.
+ */
+export const HONOR_SHARE = 0.5;
+
+/**
  * The consumption bar: heat prices only above this, rescaled to [0, 1]. The
  * home paired sweep (2026-08-28) measured the LINEAR consumption of heat at
  * +0.08 道場順位 per arm even at weak weights — the cost was the constant
@@ -244,7 +284,8 @@ export function fieldSense(obs: Observation): FieldSense {
   for (let i = 0; i < 3; i++) {
     const o = d.opps[i];
     for (let s = 0; s < 3; s++) {
-      const c = Math.min(1, o.voidScore[s] + o.meldBoost[s]);
+      // 字牌保持の裏取り: a river long on honor cuts is a weaker dye claim.
+      const c = Math.min(1, o.voidScore[s] * honorRetain(o.honors) + o.meldBoost[s]);
       if (c > someba[s]) {
         someba[s] = c;
         safe[s] = o.seen;

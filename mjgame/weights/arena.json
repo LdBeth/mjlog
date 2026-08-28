@@ -1,7 +1,8 @@
 {
   "heuristic": {
     "bufferTight": 1,
-    "bufferLow": 1
+    "bufferLow": 1,
+    "liveYakuhai": 200
   },
   "computed": {
     "tenpaiPrior": [
@@ -75,5 +76,10 @@
     "bias": 0.1,
     "holdShape": -1,
     "tenpaiHeld": 0.5
+  },
+  "sense": {
+    "someRisk": 200,
+    "somePressure": 0.5,
+    "chiitoiTax": 500
   }
 }

@@ -111,6 +111,23 @@ Deno.test("sense: a river void of one suit is a 染め場", () => {
   }
 });
 
+Deno.test("sense: 字牌保持 corroborates the dye — honor cuts cool it", () => {
+  // The same twelve number discards in both rivers, so the void score itself is
+  // identical (`nNum` counts number tiles only); the second river merely also
+  // shows four honors. A dyer keeps honors for the pair and the 役牌, so the
+  // river that has been shedding them makes the weaker claim.
+  const kept = fieldSense(obsFor({ rivers: [[], river("123456789p123s"), [], []] }));
+  const shed = fieldSense(obsFor({
+    rivers: [[], river("123456789p123s北北北北"), [], []],
+  }));
+  assert(kept.someba[0] > shed.someba[0], `字牌0枚 ${kept.someba[0]} ≦ 字牌4枚 ${shed.someba[0]}`);
+  assertEquals(shed.someba[0], kept.someba[0] * 0.5);
+  // Two honors is the intermediate rung, not the full discount.
+  const some = fieldSense(obsFor({ rivers: [[], river("123456789p123s北北"), [], []] }));
+  assertEquals(some.someba[0], kept.someba[0] * 0.8);
+  assert(some.someba[0] > shed.someba[0]);
+});
+
 Deno.test("sense: a same-suit meld reinforces the dye", () => {
   // A modest void alone (six off-suit discards, evidence still ramping)…
   const rivers: RiverEntry[][] = [[], river("123456p"), [], []];
@@ -196,6 +213,43 @@ Deno.test("sense: `{}` plays the identical hanchan — khhh + champion", () => {
     ktune: { ...CHAMPION, sense: {} },
   });
   assertEquals(inited.results, plain.results);
+});
+
+// ---------------------------------------------------------------------------
+// 生牌の役牌 — the OTHER 感性 surcharge, composed through the same `surcharge`
+// hook as `senseRisk` (see `HeuristicWeights.liveYakuhai`). It lives beside the
+// sense identity tests because it makes the same load-bearing claim: DEFAULT 0
+// ⇒ bit-for-bit the prior game, a live weight ⇒ visibly different games.
+// ---------------------------------------------------------------------------
+
+Deno.test("liveYakuhai: the default 0 plays the identical hanchan — kkkk", () => {
+  const plain = headless(GAMES, SEED, "kkkk", {});
+  const zeroed = headless(GAMES, SEED, "kkkk", {
+    ktune: { heuristic: { liveYakuhai: 0 } },
+  });
+  assertEquals(zeroed.results, plain.results);
+});
+
+Deno.test("liveYakuhai: the default 0 plays the identical hanchan — khhh + champion", () => {
+  const CHAMPION: KTune = loadKtune(
+    new URL("../weights/champion.json", import.meta.url).pathname,
+  );
+  const plain = headless(GAMES, SEED, "khhh", { ktune: CHAMPION });
+  const zeroed = headless(GAMES, SEED, "khhh", {
+    ktune: { ...CHAMPION, heuristic: { ...CHAMPION.heuristic, liveYakuhai: 0 } },
+  });
+  assertEquals(zeroed.results, plain.results);
+});
+
+Deno.test("liveYakuhai: a live weight changes the games", () => {
+  const plain = headless(GAMES, SEED, "kkkk", {});
+  const charged = headless(GAMES, SEED, "kkkk", {
+    ktune: { heuristic: { liveYakuhai: 200 } },
+  });
+  assert(
+    JSON.stringify(charged.results) !== JSON.stringify(plain.results),
+    "生牌役牌の課金が一局も動かさない — 消費に届いていない",
+  );
 });
 
 // ---------------------------------------------------------------------------

@@ -41,6 +41,16 @@ function fingerprint(seed: number, ktune = loadKtune(CHAMPION)): string {
   return `${r.scores.join("/")}#${h.toString(16).padStart(8, "0")}`;
 }
 
+// RE-CAPTURED 2026-08-28 (owner-directed, shared-code bug fix): the danger
+// assessor was being fed the discarder's own tiles TWICE — `observe.ts`
+// passed the own-inclusive `Table.visibleCounts` as the public count AND
+// `ownCounts` — so a held pair rated 安全 through the killed-shapes cap. Fixed
+// to mjrender's contract (public counts + hand). Found from the ranked arena
+// wire log (a 12,000 単騎 ron on an East held as a pair). The champion's
+// weights are untouched; every seat's world changed, so every pin file was
+// re-captured the same day. The retired 08-27 pins ended
+// 101:#3af23773 404:#8828a996 505:#06404d89 606:#7b409038 707:#6edf323d.
+//
 // REGENERATED 2026-08-27 (owner rulings): two things moved at once. The dojo
 // rules correction (under-8000 judged at 終局 with the buffer 南入以降; call
 // gate 対々和/バック tightening — shared code, every pin file re-captured that
@@ -65,11 +75,11 @@ function fingerprint(seed: number, ktune = loadKtune(CHAMPION)): string {
 // this date. The retired 08-23 champion pins ended
 // 101:#95fc878c 404:#3ceab9a1 505:#ef69d46c 606:#3fdda809 707:#285f37c5.
 const PINNED: Record<number, string> = {
-  101: "44800/35400/26100/13700#3af23773",
+  101: "52400/38300/14000/15300#521c1352",
   404: "33900/33300/26100/26700#8828a996",
-  505: "45500/25700/23300/25500#06404d89",
-  606: "19100/39300/22100/39500#7b409038",
-  707: "66100/4800/29300/19800#6edf323d",
+  505: "39900/19400/28000/32700#4e7f8169",
+  606: "15500/46900/34200/23400#e0d15de4",
+  707: "79500/1700/39700/-900#d4e4ca7a",
 };
 
 Deno.test("champion: the computed calibration, and NO hand block", () => {

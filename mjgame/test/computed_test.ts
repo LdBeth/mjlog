@@ -984,12 +984,17 @@ Deno.test("計算(M10b): 本場の額は score.ts の ronValue が実際に請�
 // Re-captured 2026-08-27: the owner-directed dojo rules correction (under-8000
 // judged at game end, buffer 南入以降, call-gate 対々和/バック tightening)
 // moved every default seat. The claim is unchanged; only the world is newer.
+// Re-captured 2026-08-28 (owner-directed, shared-code bug fix): the danger
+// assessor was fed the discarder's own tiles twice (`observe.ts` passed the
+// own-inclusive `Table.visibleCounts` as the public count AND `ownCounts`),
+// so a held pair rated 安全 through the killed-shapes cap; fixed to public
+// counts + hand. Found from the ranked arena wire log. Claim unchanged.
 const HONBA_OFF: Record<number, string> = {
-  101: "62900/26300/26900/3900#963fa21a",
-  404: "33400/43700/18300/24600#a10a1382",
-  505: "24100/32800/46100/17000#a4614d76",
-  606: "27600/5900/44600/41900#43bab41f",
-  707: "27000/62300/32400/-1700#49c7b3a4",
+  101: "60600/15100/22200/22100#6f4c9d6b",
+  404: "15800/37200/39500/27500#fcb4e8e4",
+  505: "10200/14300/60900/34600#d4b33c43",
+  606: "24800/19900/23000/52300#eedf9a8c",
+  707: "3400/29900/47300/39400#5078adbe",
 };
 
 function fingerprint(seed: number, w?: Partial<ComputedWeights>): string {

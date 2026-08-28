@@ -157,6 +157,114 @@ Deno.test("heuristic: pushes the dangerous tile when tenpai with value", () => {
   assertEquals(tileType(a.tile), TON, "tenpai with two dora pushes through the threat");
 });
 
+// ---------------------------------------------------------------------------
+// 生牌の役牌 — the `liveYakuhai` surcharge (2026-08-28)
+// ---------------------------------------------------------------------------
+
+/** One opponent pon, so the 副露 clause of the surcharge is satisfied. */
+function oppPon(): Meld[][] {
+  const ts = tiles("333s");
+  return [[], [{ kind: "pon", who: 1, fromWho: 2, tiles: ts, calledTile: ts[0] }], [], []];
+}
+
+/**
+ * 中盤の生牌の役牌. No threat is assessed (nobody has declared, one meld is
+ * below the assessor's activation), so the whole difference between the two
+ * seats below is `liveYakuhai`: the default 0 keeps the old game, and a live
+ * weight buys the honor back out of the discard.
+ */
+function liveHakuObs() {
+  const hand = tiles("123456789m1122p白");
+  return baseObs({
+    hand,
+    drawn: hand[hand.length - 1],
+    junme: 6,
+    melds: oppPon(),
+  });
+}
+
+Deno.test("heuristic: liveYakuhai 0 still cuts the 生牌の白 (the default game)", () => {
+  const p = new HeuristicPolicy("cpu", 1, { weights: { liveYakuhai: 0 } });
+  const a = p.decide(liveHakuObs());
+  assert(a.t === "discard");
+  assertEquals(tileType(a.tile), HAKU);
+});
+
+Deno.test("heuristic: liveYakuhai holds a 生牌の役牌 against an open hand", () => {
+  const p = new HeuristicPolicy("cpu", 1, { weights: { liveYakuhai: 3000 } });
+  const a = p.decide(liveHakuObs());
+  assert(a.t === "discard");
+  assert(tileType(a.tile) !== HAKU, "誰も切っていない白を副露相手に放つのは高い");
+});
+
+Deno.test("heuristic: liveYakuhai stays silent when a clause is missing", () => {
+  const p = new HeuristicPolicy("cpu", 1, { weights: { liveYakuhai: 3000 } });
+  // 序盤 (巡目 < 6): the honor has not been HELD yet, it is just late to be cut.
+  {
+    const obs = { ...liveHakuObs(), junme: 5 };
+    const a = p.decide(obs);
+    assert(a.t === "discard");
+    assertEquals(tileType(a.tile), HAKU, "序盤は課金しない");
+  }
+  // 門前だけの卓: no call has been made, so a 役牌 wait is not on the table.
+  {
+    const obs = { ...liveHakuObs(), melds: [[], [], [], []] };
+    const a = p.decide(obs);
+    assert(a.t === "discard");
+    assertEquals(tileType(a.tile), HAKU, "副露がなければ課金しない");
+  }
+  // 自風の東 while 東場 would be a value honor, but 南 is nobody's here: seat 0
+  // sits 東, so 南/西/北 belong to the other three — 南 IS someone's seat wind.
+  // Use our OWN seat wind instead, in a 南場, where it is worth nothing to the
+  // three seats that could ron us.
+  {
+    const hand = tiles("123456789m1122p南");
+    const obs = baseObs({
+      hand,
+      drawn: hand[hand.length - 1],
+      junme: 6,
+      melds: oppPon(),
+      seatWind: 28, // 南家
+      roundWind: 27, // 東場 ⇒ 南 is only OUR wind
+    });
+    const a = p.decide(obs);
+    assert(a.t === "discard");
+    assertEquals(tileType(a.tile), 28, "自風のみの牌は他家にとって役牌ではない");
+  }
+});
+
+Deno.test("heuristic: liveYakuhai fires only where the assessor is not looking", () => {
+  const p = new HeuristicPolicy("cpu", 1, { weights: { liveYakuhai: 3000 } });
+  // An assessed tile is already priced by the ladder (a live 役牌 under a
+  // riichi reads 危険度高 there); stacking the surcharge on top made the arena
+  // replay swap a 中-rated honor for a 高-rated number tile INTO the riichi.
+  const base = liveHakuObs();
+  const assessed: DangerAssessment = {
+    level: "危険度中",
+    seats: [1],
+    details: [{ seat: 1, level: "危険度中", kind: "furo", openMeldCount: 1, notes: ["役牌"] }],
+  };
+  const danger = new Map(base.danger);
+  danger.set(HAKU, assessed);
+  const a = p.decide({ ...base, danger });
+  assert(a.t === "discard");
+  assertEquals(tileType(a.tile), HAKU, "査定済みの牌には重ねて課金しない");
+});
+
+Deno.test("heuristic: liveYakuhai counts open melds only — an 暗槓 is not a call", () => {
+  const p = new HeuristicPolicy("cpu", 1, { weights: { liveYakuhai: 3000 } });
+  const ts = tiles("3333s");
+  const ankanOnly: Meld[][] = [
+    [],
+    [{ kind: "ankan", who: 1, fromWho: 1, tiles: ts, calledTile: ts[0] }],
+    [],
+    [],
+  ];
+  const a = p.decide({ ...liveHakuObs(), melds: ankanOnly });
+  assert(a.t === "discard");
+  assertEquals(tileType(a.tile), HAKU, "暗槓だけの卓は門前扱い");
+});
+
 Deno.test("heuristic: never calls 明槓", () => {
   const hand = tiles("111m2345678p234s");
   const called = tiles("1111m")[3];

@@ -39,12 +39,14 @@ const LEAGUE_DIR = new URL("../weights/league/", import.meta.url).pathname;
 
 const LEAGUE_PIN: Record<string, Record<number, string>> = {
   // Re-captured 2026-08-27 with frozen_test's EPOCH_PIN (owner-directed dojo
-  // rules correction — see the note there); the equality between the two pin
-  // sets was re-verified across the re-capture.
+  // rules correction — see the note there), and again 2026-08-28 (owner-
+  // directed shared-path bug fix: the assessor's double-counted own tiles —
+  // see frozen_test); the equality between the two pin sets was re-verified
+  // across both re-captures.
   "frozen-0825.json": {
-    101: "63200/27700/17500/11600#e65683eb",
-    505: "48600/28500/21000/21900#ff24c152",
-    909: "63900/32300/14700/9100#6a0d13cd",
+    101: "61400/22200/18800/17600#b32bd33b",
+    505: "32700/20100/21200/46000#03e1b70e",
+    909: "65400/28600/10000/16000#8f05e7a0",
   },
 };
 
