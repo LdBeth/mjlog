@@ -2,7 +2,8 @@
   "heuristic": {
     "bufferTight": 1,
     "bufferLow": 1,
-    "liveYakuhai": 200
+    "liveYakuhai": 200,
+    "keepTriplet": 1
   },
   "computed": {
     "tenpaiPrior": [

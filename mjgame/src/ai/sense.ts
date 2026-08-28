@@ -247,9 +247,7 @@ export function fieldSenseDetail(obs: Observation): FieldSenseDetail {
   }
   let dup = 0;
   for (const n of early.values()) if (n >= 2) dup++;
-  const tDup = early.size >= 6
-    ? Math.min(1, Math.max(0, (dup / early.size - 0.15) / 0.35))
-    : 0;
+  const tDup = early.size >= 6 ? Math.min(1, Math.max(0, (dup / early.size - 0.15) / 0.35)) : 0;
   // Own pairing — measured, but NOT folded into the field (doctrine below).
   const counts = new Map<number, number>();
   for (const t of obs.hand) {

@@ -265,6 +265,82 @@ Deno.test("heuristic: liveYakuhai counts open melds only — an 暗槓 is not a 
   assertEquals(tileType(a.tile), HAKU, "暗槓だけの卓は門前扱い");
 });
 
+// ---------------------------------------------------------------------------
+// 暗刻を崩して七対子に向かわない — the `keepTriplet` guard (2026-08-28)
+// ---------------------------------------------------------------------------
+
+/**
+ * Arena 0827-doctrine g7 E2-0 4巡目, verbatim: 1p1p 1s 3s 5m5m5m 6m6m 6p6p 8m 西西.
+ * Cutting a 5m leaves five pairs (七対子1向聴) and the min-shanten score sees
+ * nothing lost; the standard line drops from 2向聴 to 3向聴.
+ */
+function tripletTrapObs(over: Partial<Observation> = {}) {
+  const hand = tiles("11p1s3s555m66m66p8m西西");
+  return baseObs({ hand, drawn: hand[hand.length - 1], junme: 4, shanten: 1, ...over });
+}
+
+const GO_M = 4; // 5m
+
+function candidateTypes(p: HeuristicPolicy): number[] {
+  return p.lastTrace!.candidates.map((c) => tileType(c.tile));
+}
+
+Deno.test("heuristic: keepTriplet 0 breaks the 暗刻 for five pairs (the default game)", () => {
+  const p = new HeuristicPolicy("cpu", 1, { weights: { keepTriplet: 0 } });
+  const a = p.decide(tripletTrapObs());
+  assert(a.t === "discard");
+  assertEquals(tileType(a.tile), GO_M);
+  assert(candidateTypes(p).includes(GO_M), "guard off: the break stays a candidate");
+});
+
+Deno.test("heuristic: keepTriplet vetoes the break — the 5m never reaches the score", () => {
+  const p = new HeuristicPolicy("cpu", 1, { weights: { keepTriplet: 1 } });
+  const a = p.decide(tripletTrapObs());
+  assert(a.t === "discard");
+  assert(tileType(a.tile) !== GO_M, "暗刻を崩して七対子に向かわない");
+  assert(!candidateTypes(p).includes(GO_M), "a filter, not a price");
+});
+
+Deno.test("heuristic: keepTriplet allows breaking INTO 七対子聴牌", () => {
+  // 1p1p 3s3s 5m5m 6m6m 7p7p 9s9s9s 東: cutting a 9s is six pairs, 東単騎.
+  const hand = tiles("11p33s55m66m77p999s東");
+  const obs = baseObs({ hand, drawn: hand[hand.length - 1], junme: 8, shanten: 0 });
+  const p = new HeuristicPolicy("cpu", 1, { weights: { keepTriplet: 1 } });
+  const a = p.decide(obs);
+  assert(a.t === "discard");
+  assertEquals(tileType(a.tile), 26, "六対子の聴牌は崩してよい — 七対子単騎は正当な待ち");
+});
+
+Deno.test("heuristic: keepTriplet leaves a standard-form break alone", () => {
+  // 111m 23m 456p 789s 1s1s 東: cutting a 1m is 123m-bound tenpai (1m/4m) on the
+  // standard line — the best standard shanten on offer — so it is no business
+  // of the guard, whatever the pairs line says.
+  const hand = tiles("11123m456p789s11s東");
+  const obs = baseObs({ hand, drawn: hand[hand.length - 1], junme: 8, shanten: 0 });
+  const p = new HeuristicPolicy("cpu", 1, { weights: { keepTriplet: 1 } });
+  p.decide(obs);
+  assert(candidateTypes(p).includes(0), "標準形で最善の崩しは候補に残る");
+});
+
+Deno.test("heuristic: keepTriplet yields to a folding hand", () => {
+  // Same trap hand, but 12巡目 under a riichi with the hand two away: the gate
+  // folds, and a folding hand's triplet may be its only 現物 — the guard must
+  // not force a live tile out of it.
+  const obs = tripletTrapObs({
+    junme: 12,
+    shanten: 2,
+    seatWind: 28,
+    riichi: [false, true, false, false],
+    riichiJunme: [-1, 5, -1, -1],
+    danger: new Map([[GO_M, threat("安全")], [7, threat("危険度高")]]),
+  });
+  const p = new HeuristicPolicy("cpu", 1, { weights: { keepTriplet: 1 } });
+  const a = p.decide(obs);
+  assert(a.t === "discard");
+  assert(candidateTypes(p).includes(GO_M), "降り手では暗刻の現物を切ってよい");
+  assertEquals(tileType(a.tile), GO_M);
+});
+
 Deno.test("heuristic: never calls 明槓", () => {
   const hand = tiles("111m2345678p234s");
   const called = tiles("1111m")[3];

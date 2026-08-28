@@ -135,6 +135,32 @@ buffering seam). Flags a command would silently ignore are rejected by
 
 ## Decisions
 
+- **暗刻を崩して七対子に向かわない — the `keepTriplet` guard (2026-08-28,
+  owner's replay review)**: `kernel.shanten` is the MIN over standard/chiitoi,
+  so to the discard score a concealed triplet is a pair plus a spare and
+  cutting the third copy is free on the min line while the standard line
+  loses a step; the sense's `chiitoiTax` never reaches the case because it
+  exempts `sh < 2`, and the shape a break leaves is five pairs = 1向聴 (its
+  comment argues only the SIX-pair exemption — the mismatch is on the table
+  for the next sense re-grade; the trio was graded under the `< 2` guard).
+  Verified on the four ranked wire logs (5,254 live discards): 25 breaks of a
+  held triplet where the kept shape rode the pairs line strictly below
+  standard, 17 of them not even into tenpai (`5m5m5m 6m6m` cutting 5m at
+  4巡目). Fix: a CANDIDATE FILTER in `decide` beside `compliantDiscards`
+  (never a price — no fitted core or planner malus can outbid it), gated by
+  the `keepTriplet` heuristic weight: a 3→2 cut is struck when its standard
+  shanten is worse than the best on offer AND the shape it leaves is chiitoi-
+  below-standard at 1向聴 or worse. Exempt: breaking INTO 七対子聴牌 (単騎 is
+  sanctioned), a break that keeps the best standard shanten (a standard-form
+  decision), melded hands, and FOLDING hands (the triplet may be the only
+  現物). Isolated on the same logs it moves 12/5,347 decisions, every one a
+  triplet break replaced at equal-or-better standard shanten. DEFAULT 0
+  (`frozen.ts` carries an explicit 0, the league snapshot inherits the default 0; no pin moved); ships in `weights/arena.json`
+  as 1. Home paired grade (600 games, khhh, champion+guard vs champion, seed
+  20828): 道場順位差 −0.027 [−0.059, +0.006], A優位 28 / B優位 19 / 同着 553,
+  violations flat — a small gain, CI touching zero. Promotion into
+  champion.json is the owner's call.
+
 - **The assessor was fed DOUBLE-COUNTED own tiles (engine bug, found
   2026-08-28 in the ranked arena)**: `Table.visibleCounts(seat)` includes the
   seat's own hand (right for the ukeire `live` field), but `observe.ts`

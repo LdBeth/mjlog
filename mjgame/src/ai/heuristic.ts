@@ -131,6 +131,29 @@ export interface HeuristicWeights {
    */
   liveYakuhai: number;
   /**
+   * 暗刻を崩して七対子に向かわない — the triplet guard. Nonzero ⇒ ON: a discard
+   * that breaks a concealed triplet (3 → 2) is struck from the candidate set
+   * when the shape it leaves rides the 七対子 line (chiitoi shanten strictly
+   * below standard) at 1向聴 or worse AND some other discard keeps a better
+   * standard shanten. DEFAULT 0 — off, the seat plays bit-for-bit its prior
+   * game.
+   *
+   * Why the chooser needs it: `kernel.shanten` is the MIN over standard and
+   * chiitoi, so to the score a triplet is a pair plus a spare — cutting the
+   * third copy costs nothing on the min line while the standard line loses a
+   * whole step. The sense's `chiitoiTax` does not reach it: that tax exempts
+   * `sh < 2`, and five pairs (the shape the break leaves) is 1向聴. Arena wire
+   * logs 2026-08-28: 6 of 12 triplet-breaking discards traded a standard step
+   * for the pairs line (`5m5m5m 6m6m` cutting 5m at 4巡目). The exceptions are
+   * the doctrine's own: breaking INTO 七対子聴牌 stays allowed (七対子単騎 is a
+   * sanctioned wait), a break that keeps the best standard shanten is a
+   * standard-form decision and untouched, a melded hand is exempt by
+   * construction, and a FOLDING hand is exempt — its triplet may be the only
+   * 現物 it holds. Never a price: a filter, so no fitted core or planner malus
+   * can buy its way around it (the same reasoning as `compliantDiscards`).
+   */
+  keepTriplet: number;
+  /**
    * 順位効用. Absent by DEFAULT, and absent means off: every scale the layer
    * produces is 1 and the policy is bit-for-bit the point-EV agent it has always
    * been. Present, it prices this seat's points by what they do to the FINAL
@@ -158,6 +181,7 @@ export const DEFAULT_WEIGHTS: HeuristicWeights = {
   bufferTight: 0.35,
   bufferLow: 0.7,
   liveYakuhai: 0,
+  keepTriplet: 0,
 };
 
 /**
@@ -1074,7 +1098,10 @@ export class HeuristicPolicy implements SyncPolicy {
     // An empty result means every discard is charged, and the priced fallthrough
     // below (`dojoCost`) decides which charge to take.
     const clean = this.compliantDiscards(ctx, byTile);
-    const candidates = [...byTile.keys()].filter((t) => clean === null || clean.has(t));
+    const candidates = this.guardTriplets(
+      ctx,
+      [...byTile.keys()].filter((t) => clean === null || clean.has(t)),
+    );
     const shantenAfter = new Map<Tile, number>();
     let best = Infinity;
     for (const tile of candidates) {
@@ -1184,6 +1211,37 @@ export class HeuristicPolicy implements SyncPolicy {
       ok.add(tile);
     }
     return ok.size > 0 ? ok : null;
+  }
+
+  /**
+   * The triplet guard — see `HeuristicWeights.keepTriplet`. Returns the
+   * candidates with the doctrine's vetoes removed, or the input untouched when
+   * the guard is off, does not apply (open or folding hand, no triplet held),
+   * or would veto everything.
+   */
+  private guardTriplets(ctx: Ctx, candidates: Tile[]): Tile[] {
+    if (this.w.keepTriplet === 0 || ctx.folding || ctx.obs.melds[0].length > 0) return candidates;
+    const held = countsFromTiles(ctx.obs.hand);
+    if (!held.some((n) => n === 3)) return candidates;
+    // Standard shanten of every candidate's kept shape; the best of them is
+    // what a triplet break must match to stay a standard-form decision.
+    const std = new Map<Tile, number>();
+    let bestStd = Infinity;
+    for (const tile of candidates) {
+      const s = shanten(countsFromTiles(this.handWithout(ctx, tile)), 0, false);
+      std.set(tile, s);
+      if (s < bestStd) bestStd = s;
+    }
+    const kept = candidates.filter((tile) => {
+      if (held[tileType(tile)] !== 3) return true;
+      const s = std.get(tile)!;
+      if (s <= bestStd) return true;
+      const chi = chiitoiShanten(countsFromTiles(this.handWithout(ctx, tile)));
+      // Breaking into 七対子聴牌 is the sanctioned exception; a break whose
+      // shape does not even ride the pairs line is not this doctrine's business.
+      return chi === 0 || chi >= s;
+    });
+    return kept.length > 0 ? kept : candidates;
   }
 
   /** Would declaring on this discard stay off the ledger? */

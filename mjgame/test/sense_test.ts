@@ -253,6 +253,31 @@ Deno.test("liveYakuhai: a live weight changes the games", () => {
 });
 
 // ---------------------------------------------------------------------------
+// 暗刻 guard — `keepTriplet`, the discard chooser's doctrine filter (see
+// `HeuristicWeights.keepTriplet`): the same claim again, DEFAULT 0 ⇒ the prior
+// game bit for bit, 1 ⇒ different games.
+// ---------------------------------------------------------------------------
+
+Deno.test("keepTriplet: the default 0 plays the identical hanchan — kkkk", () => {
+  const plain = headless(GAMES, SEED, "kkkk", {});
+  const zeroed = headless(GAMES, SEED, "kkkk", {
+    ktune: { heuristic: { keepTriplet: 0 } },
+  });
+  assertEquals(zeroed.results, plain.results);
+});
+
+Deno.test("keepTriplet: the guard changes the games", () => {
+  const plain = headless(GAMES, SEED, "kkkk", {});
+  const guarded = headless(GAMES, SEED, "kkkk", {
+    ktune: { heuristic: { keepTriplet: 1 } },
+  });
+  assert(
+    JSON.stringify(guarded.results) !== JSON.stringify(plain.results),
+    "暗刻ガードが一局も動かさない — 候補の絞りに届いていない",
+  );
+});
+
+// ---------------------------------------------------------------------------
 // the block is live
 // ---------------------------------------------------------------------------
 

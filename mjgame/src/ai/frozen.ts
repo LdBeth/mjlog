@@ -56,6 +56,8 @@ export const FROZEN_HEURISTIC: HeuristicWeights = {
   // predates the term and must not learn it: 0 is the value that keeps this
   // seat playing exactly the game it played on 2026-08-25.
   liveYakuhai: 0,
+  // Added 2026-08-28 (暗刻 guard, `keepTriplet`). Same reasoning: 0 is off.
+  keepTriplet: 0,
 };
 
 /** The Reads-consumption weights, as augmented.ts's defaults stood. */

@@ -637,24 +637,47 @@ export class ShadowGame {
 
     const melds = d.melds;
     if (Array.isArray(melds) && melds.length === 4) {
+      const meldIds = (raw: unknown): Tile[] | null => {
+        const ids = Array.isArray(raw)
+          ? raw
+          : (raw && typeof raw === "object" && Array.isArray((raw as { tiles?: unknown }).tiles))
+          ? (raw as { tiles: unknown[] }).tiles
+          : null;
+        return ids && ids.every((x) => typeof x === "number") ? ids as Tile[] : null;
+      };
+      // A meld's type signature is invariant under `#relocate`, so it stays a
+      // valid matching key while the swaps below rewrite the live arrays.
+      const sig = (ids: readonly Tile[]) => ids.map(tileType).sort((a, b) => a - b).join(",");
       for (const s of SEATS) {
         const M = melds[s];
         if (!Array.isArray(M) || M.length !== t.melds[s].length) continue;
+        // Match by content, NOT by index: a 加槓 upgrade moves the meld to the
+        // END of our list (mjrender BoardState.applyMeld splices then pushes)
+        // while the server keeps it in the pon's original slot, so index
+        // pairing hands `#relocate` two different melds and kills the kyoku.
+        const taken = M.map(() => false);
         t.melds[s].forEach((meld, i) => {
-          const raw = M[i];
-          const ids = Array.isArray(raw)
-            ? raw
-            : (raw && typeof raw === "object" && Array.isArray((raw as { tiles?: unknown }).tiles))
-            ? (raw as { tiles: unknown[] }).tiles
-            : null;
-          if (
-            !ids || ids.length !== meld.tiles.length || !ids.every((x) => typeof x === "number")
-          ) {
-            return; // unreadable meld shape: skip, type-level already holds
+          const mine = sig(meld.tiles);
+          let j = -1;
+          let unreadable = false;
+          for (let x = 0; x < M.length && j < 0; x++) {
+            if (taken[x]) continue;
+            const ids = meldIds(M[x]);
+            if (!ids) unreadable = true;
+            else if (ids.length === meld.tiles.length && sig(ids) === mine) j = x;
           }
+          if (j < 0) {
+            // Unreadable shape: skip, the type level already holds. But a
+            // READABLE slot that matches nothing is a real divergence — the
+            // old index pairing threw here, and staying silent would leave the
+            // champion reading opponents off melds that are not on the table.
+            if (unreadable) return;
+            throw new ShadowDesyncError(`席${s} 副露#${i}: 一致する副露がない`);
+          }
+          taken[j] = true;
+          const theirsIds = meldIds(M[j])!;
           // Pair only the set differences: pairing full sorted snapshots
           // would go stale as each swap rewrites the live array.
-          const theirsIds = ids as Tile[];
           const extra = meld.tiles.filter((x) => !theirsIds.includes(x)).sort((a, b) => a - b);
           const missing = theirsIds.filter((x) => !meld.tiles.includes(x)).sort((a, b) => a - b);
           extra.forEach((id, k) => this.#relocate(id, missing[k], `席${s} 副露#${i}`));
