@@ -1,15 +1,17 @@
 # native/ — optional accelerators
 
-Two unrelated dylibs live here, built separately and loaded separately:
+Three unrelated dylibs live here, built separately and loaded separately:
 
-| source        | dylib               | build                    | what it accelerates               |
-| ------------- | ------------------- | ------------------------ | --------------------------------- |
-| `rlnet.c`     | `librlnet.dylib`    | `deno task build-native` | neural inference (Accelerate)     |
-| `mjkernel.cc` | `libmjkernel.dylib` | `deno task build-kernel` | shanten / ukeire / 待ち形 (C++17) |
+| source        | dylib               | build                    | what it accelerates                 |
+| ------------- | ------------------- | ------------------------ | ----------------------------------- |
+| `rlnet.c`     | `librlnet.dylib`    | `deno task build-native` | neural inference (Accelerate)       |
+| `mjkernel.cc` | `libmjkernel.dylib` | `deno task build-kernel` | shanten / ukeire / 待ち形 (C++17)   |
+| `mlp.c`       | `libmjmlp.dylib`    | `deno task build-mlp`    | the 計算 seat's small learned heads |
 
 They share the `MJGAME_NATIVE` gate and nothing else — no symbols, no headers, no build flags.
-Either can be absent; the TypeScript path behind each is the reference implementation. The kernel is
-documented at the bottom of this file; everything up to there is about `rlnet.c`.
+Either can be absent; the TypeScript path behind each is the reference implementation. The kernel
+and the head shim are documented at the bottom of this file; everything up to there is about
+`rlnet.c`.
 
 ## rlnet.c
 
@@ -354,3 +356,110 @@ Same gate as `rlnet.c`:
 The gate is resolved on first use rather than at import, so a test can set the variable and call
 `closeKernel()` to re-arm it. **mjrender never learns any of this exists**: the dependency points
 one way, mjgame → mjrender, and the acceleration lives entirely on the mjgame side of the fence.
+
+---
+
+# mlp.c — the small learned heads
+
+`mlp.c` is a self-contained C11 library with no dependencies at all — no BLAS, no framework, no data
+file. It runs the forward pass of the 計算 seat's learned decision rules (M13's fold head, M14's
+deal-in reads): dense nets of a few hundred to a few thousand weights that ship INLINE in a
+`--ktune` JSON and are built by `src/ai/mlp.ts`.
+
+```c
+int32_t mjmlp_abi(void);                                  /* ABI, currently 1 */
+int64_t mjmlp_create(int32_t n_layers,
+                     const int32_t *dims,   /* n_layers+1: in0, out0(=in1), … */
+                     const uint8_t *acts,   /* n_layers: 1 = relu, 0 = identity */
+                     const float   *blob);  /* packMlp layout; copied         */
+void    mjmlp_forward(int64_t h, const float *in, float *out);
+void    mjmlp_forward_batch(int64_t h, int32_t n, const float *in, float *out);
+void    mjmlp_destroy(int64_t h);
+```
+
+`blob` is `policy.f32`'s layout verbatim — per layer, in order, the row-major `[out][in]` weight
+matrix then the `[out]` bias, little-endian float32, no header and no padding — which is what
+`packMlp` writes and what `train/common.py`'s `export_mlp_block` describes in JSON. `mjmlp_create`
+returns 0 on bad arguments or a failed allocation, and the version is checked on every `dlopen`, so
+a stale dylib degrades the module to TypeScript rather than half-loading.
+
+`mjmlp_forward_batch` is `n` rows of `dims[0]` inputs to `n` rows of `dims[n_layers]` outputs,
+contiguous. It IS `n` calls of `mjmlp_forward`; it exists so that M14's 34 rows per opponent cost
+one FFI crossing instead of 34.
+
+## Why not `rlnet_create`
+
+`rlnet.c` already has a generic dense MLP, and reusing it would have been free. It is over
+Accelerate's `cblas_sgemv`, which **reorders the summation** — that is why `test/rl_native_test.ts`
+grades that path with a 1e-4 tolerance. A tolerance is fine for a policy net whose 78 logits are
+argmaxed; it is not fine for a gate whose SIGN decides a fold, because one flipped decision rewrites
+a whole hanchan and the seat's decision fingerprints are pinned. So this is a separate dylib of
+plain loops, graded at zero tolerance, and the only thing it buys is the removal of the interpreter
+overhead.
+
+## The floating-point contract
+
+The reference is JavaScript (`src/ai/mlp.ts`, itself `src/rl/net.ts`'s loop), so the arithmetic is
+JavaScript's, and the C mirrors it expression for expression:
+
+1. the accumulator is a **double** seeded with the float32 bias (`Float32Array` reads widen
+   exactly);
+2. the summation is **sequential and ascending**, `o` outer and `i` inner;
+3. relu is applied to the **double**, and the result is then stored **once as float32** — so doubles
+   never cross a layer boundary and layer k+1 reads exactly the float32 layer k wrote. C's `(float)`
+   cast is round-to-nearest-even, which is what a `Float32Array` store does.
+
+## Build
+
+```sh
+deno task build-mlp
+# = sh native/build_mlp.sh
+# = clang -std=c11 -O3 -ffp-contract=off -Wall -Wextra -fvisibility=hidden \
+#         -dynamiclib -o native/libmjmlp.dylib native/mlp.c
+```
+
+Warning-free under `-Wall -Wextra`. Portable C11 — the build script picks `.so` off Darwin.
+`-ffp-contract=off` is load-bearing, not hygiene: without it clang may fuse `acc + w*x` into an FMA,
+a different double from the multiply-then-add JavaScript performs. `test/mlp_native_test.ts`
+compiles with the same flags when it has to build the dylib itself; keep the two in step.
+
+## Test harness
+
+`test/mlp_native_test.ts` fuzzes 300 random nets (1–3 layers, widths 1–64, relu and identity mixed,
+four weight scales) × 10 inputs and demands **bit equality** on the float32 patterns — which also
+settles −0 and NaN — plus `batch(n) == n` single calls and the gate's behaviour (`0` ⇒ TypeScript;
+`1` with the dylib moved aside ⇒ a throw naming `deno task build-mlp`). It was mutation-checked:
+replacing the double accumulator with a float one fails it at once. Reversing the inner loop does
+**not** fail it — over a few dozen float32 products a reordering perturbs the double sum by ~1e-16
+and the store to float32 rounds it away — so rule 2 above is defence in depth against the
+reorderings a _library_ would perform (float32 partial sums, vector reductions), which do show.
+
+`test/mlp_test.ts` is the other half: it forces the TypeScript path and checks a hand-computed
+forward pass plus `test/fixtures/mlp-parity.json`, the fixture `train/mlp_selftest.py` writes from
+`common.mlp_forward_np` — the numpy/Python mirror of the same three rules, written as an explicit
+loop precisely because `np.dot` would reorder the sum.
+
+## Rules of use
+
+- **Not re-entrant**: a context owns two scratch buffers of the widest layer. One caller at a time,
+  which is how Deno FFI uses it; one context per head (`buildMlp` creates one per `Mlp`).
+- `in` and `out` must not overlap, and `out` must be `dims[n_layers]` long.
+- The handle is a pointer in disguise; never call `mjmlp_forward` after `mjmlp_destroy` (`closeMlp`
+  on the TypeScript side).
+- `mjmlp_create` refuses more than 16 layers or a dimension above 65536 — those are corrupt
+  arguments, not networks.
+
+## Using it from TypeScript
+
+`src/ai/mlp.ts` handles all of it: the dylib is resolved **relative to the module** (`src/ai/` →
+`../../native/`), so the working directory is irrelevant, and the gate is the usual one:
+
+| value | behaviour                                                     |
+| ----- | ------------------------------------------------------------- |
+| `0`   | force the TypeScript path even with the dylib built           |
+| `1`   | require native; a missing dylib throws, naming the build line |
+| unset | try native, fall back silently                                |
+
+The gate is resolved on the first `buildMlp` rather than at import, so a test can set the variable
+and call `closeMlpLib()` to re-arm it. Under `MJGAME_NATIVE=1` a missing dylib throws at
+construction, not on the first decision.

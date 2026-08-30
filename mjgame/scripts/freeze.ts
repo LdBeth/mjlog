@@ -35,6 +35,8 @@
 
 import { mergeAugmented } from "../src/ai/augmented.ts";
 import { mergeComputed } from "../src/ai/computed.ts";
+import { mergeDealin } from "../src/ai/dealin.ts";
+import { mergeFold } from "../src/ai/fold.ts";
 import { mergeHand } from "../src/ai/handvalue.ts";
 import { mergeHeuristic } from "../src/ai/heuristic.ts";
 import { mergeRiichi } from "../src/ai/riichi.ts";
@@ -94,6 +96,15 @@ function main() {
     // 色読み is a switch like the two above: absent stays absent (identity),
     // present is resolved through its merge so the dump is complete.
     ...(src.sense ? { sense: mergeSense(src.sense) } : {}),
+    // M13's fold head, likewise: absent stays absent (the incumbent gate),
+    // present is resolved through `mergeFold` so the snapshot is complete —
+    // and `mergeFold` VALIDATES, so a snapshot can never carry a block the
+    // live seat would refuse.
+    ...(src.fold ? { fold: mergeFold(src.fold) } : {}),
+    // M14 likewise. `mergeDealin` VALIDATES (and refuses `{}`, which has no
+    // identity here), so a snapshot can never carry a block the live seat
+    // would reject.
+    ...(src.dealin ? { dealin: mergeDealin(src.dealin) } : {}),
   };
 
   // The self-check: the resolved dump and the original configuration must be

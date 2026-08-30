@@ -1377,3 +1377,209 @@ def load_critic(path: str):
     assert off == need, f"consumed {off} of {need} floats"
     mx.eval(net.parameters())
     return net
+
+
+# ---------------------------------------------------------------------------
+# Small learned heads -- the `MlpSpec` contract shared with src/ai/mlp.ts
+# ---------------------------------------------------------------------------
+#
+# The 計算 seat's learned decision rules (M13 fold, M14 deal-in) are tiny dense
+# nets that ship INLINE in a --ktune JSON rather than as a manifest + .f32 blob:
+#
+#     {"fv": 1, "layers": [{"in": 37, "out": 16, "act": "relu",
+#                           "w": [...37*16...], "b": [...16...]}, ...]}
+#
+# `w` is row-major [out][in] -- the same layout policy.f32 uses, so nothing is
+# transposed anywhere in the chain.  Every number is written through
+# `float(np.float32(v))` so the JSON holds EXACTLY the float32 the engine will
+# read back: a float64 literal that rounds to a different float32 would make the
+# trainer's own reference disagree with the seat it trained.
+#
+# THE BIT-EXACT CONTRACT.  `src/ai/mlp.ts` (the reference), `native/mlp.c` and
+# `mlp_forward_np` below must produce IDENTICAL float32, not close ones -- a
+# head's sign decides a fold and the seat's decision streams are pinned.  The
+# rules, taken from the JavaScript:
+#
+#   * the accumulator is a DOUBLE seeded with the float32 bias;
+#   * the summation is SEQUENTIAL in ascending i -- which is why this reference
+#     is an explicit Python loop and NOT `np.dot`/`@`: BLAS reorders the sum and
+#     would agree only most of the time, the worst possible failure mode;
+#   * relu is applied to the double, and only then is the result stored as
+#     float32, so doubles never cross a layer boundary.
+#
+# `test/fixtures/mlp-parity.json` (written by `train/mlp_selftest.py`) is what
+# pins this file to the TypeScript.
+
+MLP_ACTS = ("relu", "none")
+
+
+class SmallMlp(nn.Module):
+    """A plain dense stack: `dims` widths, relu on every hidden layer, linear out.
+
+    `SmallMlp([37, 16, 1])` is 37 -> 16 -> relu -> 1.  Two dims means a single
+    linear layer and no activation at all, which is what the M13 identity init
+    (`INIT_FOLD`) needs.
+
+    mlx.nn.Linear stores `weight` as [out, in], which is already the row-major
+    [out][in] the block contract asks for, so export is a straight dump.
+    """
+
+    def __init__(self, dims: Sequence[int]) -> None:
+        super().__init__()
+        self.dims = [int(d) for d in dims]
+        if len(self.dims) < 2:
+            raise ValueError(f"SmallMlp needs at least an input and an output width: {dims}")
+        if any(d < 1 for d in self.dims):
+            raise ValueError(f"SmallMlp widths must be positive: {dims}")
+        self.n_layers = len(self.dims) - 1
+        for i in range(self.n_layers):
+            setattr(self, f"fc{i}", nn.Linear(self.dims[i], self.dims[i + 1]))
+
+    def __call__(self, x: mx.array) -> mx.array:
+        for i, layer in enumerate(self.ordered_layers):
+            x = layer(x)
+            if i < self.n_layers - 1:
+                x = nn.relu(x)
+        return x
+
+    @property
+    def ordered_layers(self) -> List[nn.Linear]:
+        """Layers in block order."""
+        return [getattr(self, f"fc{i}") for i in range(self.n_layers)]
+
+    @property
+    def acts(self) -> List[str]:
+        """The activation names the block will carry: relu on hidden, none out."""
+        return ["relu"] * (self.n_layers - 1) + ["none"]
+
+
+def _mlp_layer_arrays(layer):
+    """(W [out,in], b [out]) from an nn.Linear, a (W, b) pair, or a dict."""
+    if hasattr(layer, "weight") and hasattr(layer, "bias"):
+        w, b = layer.weight, layer.bias
+    elif isinstance(layer, dict):
+        w, b = layer["w"], layer["b"]
+    else:
+        w, b = layer
+    w = np.ascontiguousarray(np.array(w, copy=True), dtype=np.float32)
+    b = np.ascontiguousarray(np.array(b, copy=True), dtype=np.float32).reshape(-1)
+    if w.ndim != 2:
+        raise ValueError(f"weight must be [out, in], got shape {w.shape}")
+    if b.shape != (w.shape[0],):
+        raise ValueError(f"bias shape {b.shape} != {(w.shape[0],)}")
+    return w, b
+
+
+def export_mlp_block(layers, acts: Sequence[str], fv: int) -> dict:
+    """A JSON-ready `MlpSpec` from trained layers.
+
+    `layers` is anything `_mlp_layer_arrays` understands -- an `nn.Linear` list
+    (e.g. `SmallMlp.ordered_layers`) or plain (W, b) pairs.  `acts` names each
+    layer's activation ("relu" | "none") and must be as long as `layers`.
+
+    Every weight goes through `float(np.float32(v))`, so what lands in the JSON
+    is exactly the float32 `src/ai/mlp.ts` will build its Float32Array from.
+    """
+    layers = list(layers)
+    acts = list(acts)
+    if not layers:
+        raise ValueError("export_mlp_block: no layers")
+    if len(acts) != len(layers):
+        raise ValueError(f"{len(acts)} activations for {len(layers)} layers")
+    out_layers = []
+    prev_out = None
+    for i, (layer, act) in enumerate(zip(layers, acts)):
+        if act not in MLP_ACTS:
+            raise ValueError(f"layer {i}: act {act!r} is not one of {MLP_ACTS}")
+        w, b = _mlp_layer_arrays(layer)
+        n_out, n_in = int(w.shape[0]), int(w.shape[1])
+        if prev_out is not None and n_in != prev_out:
+            raise ValueError(f"layer {i}: in {n_in} != previous out {prev_out}")
+        prev_out = n_out
+        out_layers.append(
+            {
+                "in": n_in,
+                "out": n_out,
+                "act": act,
+                "w": [float(np.float32(v)) for v in w.reshape(-1)],
+                "b": [float(np.float32(v)) for v in b],
+            }
+        )
+    return {"fv": int(fv), "layers": out_layers}
+
+
+def load_mlp_block(block: dict):
+    """`(fv, [(act, W [out,in] float32, b [out] float32), ...])` from a block.
+
+    Refuses the same things `validateMlp` refuses -- an empty net, a broken
+    in/out chain, an unknown activation, a wrong-length array, a non-finite
+    number -- so a block this trainer writes and reads back cannot differ from
+    the one the engine accepts.
+    """
+    if not isinstance(block, dict):
+        raise ValueError("mlp block must be an object {fv, layers}")
+    fv = block.get("fv")
+    if not isinstance(fv, int):
+        raise ValueError(f"fv must be an int, got {fv!r}")
+    raw = block.get("layers")
+    if not isinstance(raw, list) or not raw:
+        raise ValueError("layers is empty")
+    layers = []
+    prev_out = None
+    for i, spec in enumerate(raw):
+        act = spec.get("act")
+        if act not in MLP_ACTS:
+            raise ValueError(f"layer {i}: act {act!r} is not one of {MLP_ACTS}")
+        n_in, n_out = int(spec["in"]), int(spec["out"])
+        if n_in < 1 or n_out < 1:
+            raise ValueError(f"layer {i}: in/out must be positive ({n_in}, {n_out})")
+        if prev_out is not None and n_in != prev_out:
+            raise ValueError(f"layer {i}: in {n_in} != previous out {prev_out}")
+        prev_out = n_out
+        w = np.asarray(spec["w"], dtype=np.float32)
+        b = np.asarray(spec["b"], dtype=np.float32)
+        if w.size != n_in * n_out:
+            raise ValueError(f"layer {i}: w has {w.size} floats, expected {n_in * n_out}")
+        if b.size != n_out:
+            raise ValueError(f"layer {i}: b has {b.size} floats, expected {n_out}")
+        if not np.isfinite(w).all() or not np.isfinite(b).all():
+            raise ValueError(f"layer {i}: non-finite weight")
+        layers.append((act, w.reshape(n_out, n_in), b))
+    return fv, layers
+
+
+def mlp_forward_np(block: dict, X) -> np.ndarray:
+    """The numpy/Python reference forward pass -- the third mirror of the loop.
+
+    `X` is [B, in] or a single [in] vector; the result is float32 [B, out] (or
+    [out]).  Deliberately an explicit loop over a Python float accumulator:
+    Python floats are IEEE doubles and `+=` is sequential, which is exactly what
+    the JavaScript does.  `np.dot` would be faster and WRONG (reordered sums),
+    and these nets are a few hundred weights, so speed is not a consideration.
+    """
+    _fv, layers = load_mlp_block(block)
+    x = np.asarray(X, dtype=np.float32)
+    single = x.ndim == 1
+    if single:
+        x = x.reshape(1, -1)
+    if x.ndim != 2:
+        raise ValueError(f"X must be [B, in] or [in], got shape {x.shape}")
+    if x.shape[1] != layers[0][1].shape[1]:
+        raise ValueError(f"X is {x.shape[1]} wide, net wants {layers[0][1].shape[1]}")
+
+    cur = x
+    for act, w, b in layers:
+        n_out, n_in = w.shape
+        nxt = np.empty((cur.shape[0], n_out), dtype=np.float32)
+        for r in range(cur.shape[0]):
+            row = cur[r]
+            for o in range(n_out):
+                wo = w[o]
+                acc = float(b[o])                      # float32 -> double, exact
+                for i in range(n_in):
+                    acc += float(wo[i]) * float(row[i])
+                if act == "relu" and not acc > 0.0:
+                    acc = 0.0
+                nxt[r, o] = np.float32(acc)            # the one rounding to f32
+        cur = nxt
+    return cur[0] if single else cur

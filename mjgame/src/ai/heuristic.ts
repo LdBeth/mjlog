@@ -46,6 +46,10 @@ import {
 import type { FieldSense, SenseWeights } from "./sense.ts";
 import type { ContextEvidence, EvidenceHooks } from "./evidence.ts";
 import { assembleCandidate, assembleContext } from "./evidence.ts";
+import { genbutsuSets } from "./computed.ts";
+import type { FoldFacts, FoldSample } from "./fold.ts";
+import { decideFold, FOLD_INPUTS, foldVector } from "./fold.ts";
+import type { Mlp } from "./mlp.ts";
 import type { HandSample } from "./handcalib.ts";
 import type { HandFacts, HandOutlook, HandWeights } from "./handvalue.ts";
 import { DEFAULT_HAND, handOutlook } from "./handvalue.ts";
@@ -254,6 +258,37 @@ export interface HeuristicOptions {
    */
   sense?: Partial<SenseWeights>;
   /**
+   * M13. The fold head (`fold.ts`) — the learned push/fold decision. ABSENT BY
+   * DEFAULT, and absent means `computeFold` ends in the comparison it always
+   * ended in, bit for bit. Present, it replaces exactly one thing: the sign of
+   * `margin` inside the region the two early-outs (declared riichi, zero
+   * pressure) admit. `INIT_FOLD` reproduces that sign exactly, so a `{}` block
+   * is the incumbent seat.
+   *
+   * A BUILT head and not a weight block, unlike `hand`/`riichi`/`sense`: it may
+   * hold a native context, so exactly one owner may build it and exactly one
+   * must free it. `harness.ts` builds it once per seat and closes it in the
+   * seat's `close()`; this policy only reads it.
+   */
+  fold?: Mlp;
+  /**
+   * M13's calibration lane: flip the fold verdict with probability `eps` on a
+   * stream of the policy's OWN, seeded from `seed` (see `foldRng`). Off (or
+   * `eps` 0) draws nothing at all, so a lane recorded at ε=0 is bit-identical
+   * to a run with no lane — which is what makes the recorder an observer.
+   */
+  foldExplore?: { eps: number };
+  /**
+   * M13's recorder, one sample per fold decision that reaches the head region
+   * (`foldcalib.ts` labels them from the 局's own settlement).
+   *
+   * DELIBERATELY INDEPENDENT of `fold`, for `handSink`'s reason: the first lane
+   * has to be played by the seat that ships, which — before the first fit — is
+   * the seat with no `fold` block at all. The sink then records the INCUMBENT
+   * gate's verdict, and the header says so (`head: "gate"`).
+   */
+  foldSink?: (rec: FoldSample) => void;
+  /**
    * M11's recorder, one sample per turn decision (`handcalib.ts` labels them
    * from the outcome of the 局).
    *
@@ -357,6 +392,8 @@ interface DecisionMemo {
   basis?: HandBasis;
   /** M11: one entry per resting shape, keyed by the discard that produced it. */
   outlooks?: Map<number, HandEntry>;
+  /** M13: the fold head's 37 facts — built only when a head or a sink exists. */
+  foldFacts?: FoldFacts;
 }
 
 /**
@@ -406,6 +443,20 @@ export interface DiscardTrace {
   mustCure: boolean;
 }
 
+/**
+ * The fold lane's stream, derived from the seat's own seed.
+ *
+ * A SEPARATE stream, not a fork of `rng`: `Rng.fork` is the wall's device and
+ * the flip must be independent of how many numbers `epsilon` consumed. The
+ * derivation is `Math.imul(seed, 0x9E3779B1) + 13`, the golden-ratio odd
+ * multiplier `rng.ts` itself uses (`imul`, so a seat seed of `seed*4+seat`
+ * cannot silently lose bits to float rounding the way `*` would), offset by 13
+ * for M13 so the fold stream and any later head's stream differ on every seed.
+ */
+function foldStream(seed: number): number {
+  return (Math.imul(seed, 0x9e3779b1) + 13) >>> 0;
+}
+
 export class HeuristicPolicy implements SyncPolicy {
   /** See `DiscardTrace`. Overwritten by every decision that scores discards. */
   lastTrace: DiscardTrace | null = null;
@@ -432,6 +483,23 @@ export class HeuristicPolicy implements SyncPolicy {
   private sw: SenseWeights;
   private senseOn: boolean;
   private handSink: ((rec: HandSample) => void) | null;
+  /** M13's head, or null for the incumbent `margin < 0`. Owned by the builder. */
+  private foldHead: Mlp | null;
+  /** The head's input row, reused for the life of the seat (see `decideFold`). */
+  private foldX: Float32Array | null;
+  /** ε of the fold-flip lane; 0 (the default) draws no random numbers at all. */
+  private foldEps: number;
+  /**
+   * The lane's OWN random stream, and the reason it is its own: the flip must
+   * not consume from `this.rng`, whose draws are `epsilon`'s and whose position
+   * is part of what makes a seed reproduce a run. Made only when ε > 0, so a
+   * seat with no lane holds null and cannot draw by accident.
+   *
+   * Seeded from the seat's seed by `foldStream` — a fixed derivation, so the
+   * flip schedule is a function of the match seed like everything else.
+   */
+  private foldRng: Rng | null = null;
+  private foldSink: ((rec: FoldSample) => void) | null;
   private memo: DecisionMemo | null = null;
   /**
    * The `tenpaiHeld` counter (see `riichiFeatures`): how long the current
@@ -456,7 +524,12 @@ export class HeuristicPolicy implements SyncPolicy {
     this.sw = mergeSense(opts.sense);
     this.senseOn = senseActive(this.sw);
     this.handSink = opts.handSink ?? null;
+    this.foldHead = opts.fold ?? null;
+    this.foldX = this.foldHead || opts.foldSink ? new Float32Array(FOLD_INPUTS) : null;
+    this.foldEps = opts.foldExplore?.eps ?? 0;
+    this.foldSink = opts.foldSink ?? null;
     this.rng = sfc32(seed);
+    if (this.foldEps > 0) this.foldRng = sfc32(foldStream(seed));
   }
 
   /**
@@ -480,6 +553,10 @@ export class HeuristicPolicy implements SyncPolicy {
 
   reset(seed: number): void {
     this.rng = sfc32(seed);
+    // The lane's stream restarts with the match, exactly as `rng` does — and
+    // stays null while ε is 0, so a headless seat cannot be handed a stream it
+    // would never draw from.
+    if (this.foldEps > 0) this.foldRng = sfc32(foldStream(seed));
     this.memo = null;
     this.riichiHold = null;
   }
@@ -780,44 +857,241 @@ export class HeuristicPolicy implements SyncPolicy {
     return m.fold ??= this.computeFold(obs);
   }
 
-  private computeFold(obs: Observation): boolean {
-    // Committed: after riichi the only legal discard is the drawn tile anyway.
-    if (obs.riichi[0]) return false;
-
-    const pressure = this.pressure(obs);
-    if (pressure === 0) return false;
-
+  /**
+   * The push/fold gate, as the code has always computed it — rearranged so its
+   * verdict is a NUMBER rather than a boolean (M13's D3).
+   *
+   * `margin = push·gain − 0.5·pressure·risk`, so `margin < 0` is the incumbent
+   * `push·gain < 0.5·pressure·risk` (`a − b < 0 ⇔ a < b` for finite doubles,
+   * including the tie), and the five parts it was built from come out with it
+   * as features. NOTHING here is new arithmetic: everything below the signature
+   * is the old body verbatim.
+   *
+   * `computeFold` does NOT call this on the plain path — see the early return
+   * there, which keeps the incumbent expression literally intact.
+   */
+  private foldMargin(
+    obs: Observation,
+    pressure: number,
+  ): { margin: number; push: number; gain: number; risk: number; buffer: number } {
     let push: number;
     if (this.hand) {
-      // M11. The table below is a four-step guess at exactly what `handOutlook`
-      // computes — P(this hand cashes) × what it cashes for — so with the model
-      // wired the guess goes and the EV comes in, divided by `pushScale` to land
-      // back in the units the comparison against `pressure` is written in.
-      //
-      // THE TWO ADJUSTMENTS GO WITH IT, and not because they were wrong: both
-      // are inside the model now, and continuously rather than as cliffs. 親 is
-      // `valueDealer` on the value; "late and far from tenpai" is `turnsLeft`
-      // (few own draws left to climb three levels) meeting `oppGrowth` (a table
-      // that has grown ready), which prices 3向聴 on 9巡目 too instead of
-      // switching at 10.
       const r = this.restingShape(obs);
       push = this.outlookOf(obs, r.rest, r.sh, { tile: r.tile }).ev / this.hand.pushScale;
     } else {
       push = obs.shanten <= 0 ? 1.0 : obs.shanten === 1 ? 0.45 : obs.shanten === 2 ? 0.15 : 0;
       push += 0.12 * obs.doraCount;
-      // Late and far from tenpai is not a hand worth defending with.
       if (obs.shanten >= 2 && obs.junme >= 10) push = 0;
-      // A dealer has more to lose by folding (連荘) — nudge, don't override.
       if (obs.seatWind === 27) push += 0.08;
     }
-
-    push *= this.buffer(obs);
-
-    // 順位効用: the same hand against the same table is worth pushing for a
-    // different amount depending on what the points would DO. Off (the default)
-    // both scales are 1 and this is the old `push < 0.5 * pressure`, exactly.
+    const buffer = this.buffer(obs);
+    push *= buffer;
     const st = this.standingsOf(obs);
-    return push * st.gain < 0.5 * pressure * st.risk;
+    return {
+      margin: push * st.gain - 0.5 * pressure * st.risk,
+      push,
+      gain: st.gain,
+      risk: st.risk,
+      buffer,
+    };
+  }
+
+  /**
+   * The 37 facts the head reads, once per decision.
+   *
+   * Built ONLY when a head or a sink exists — a seat with neither never touches
+   * `genbutsuSets`, never asks `handEntry` for an outlook it would not otherwise
+   * have wanted, and never allocates the row. Everything here is either already
+   * memoised on the decision (`threat`, `sensePressure`, `handEntry`) or a
+   * single pass over the hand.
+   */
+  private foldFeatures(
+    obs: Observation,
+    parts: { margin: number; push: number; gain: number; risk: number; buffer: number },
+    pressure: number,
+  ): FoldFacts {
+    const m = this.cache(obs);
+    if (m.foldFacts) return m.foldFacts;
+
+    // The hand, through the SAME memoised entry the discard score and the M11
+    // recorder use — under `handW`, i.e. `DEFAULT_HAND` when the seat carries
+    // no `hand` block, exactly as the hand lane is recorded.
+    const r = this.restingShape(obs);
+    const entry = this.handEntry(obs, r.rest, r.sh, { tile: r.tile });
+    const f = entry.facts;
+
+    // Threat: the declared half is a public count, the assessed furo half comes
+    // from the danger entries (the same seats `pressureOf` sums), and the
+    // per-seat vector is the hook — which an augmented seat answers with
+    // `tenpaiP` rather than with 1/0.5.
+    let oppRiichi = 0;
+    for (let s = 1; s < 4; s++) if (obs.riichi[s]) oppRiichi++;
+    const furo = new Set<number>();
+    for (const d of obs.danger.values()) {
+      for (const detail of d.details) if (detail.kind === "furo") furo.add(detail.seat);
+    }
+    const th = this.threat(obs);
+    const el = this.expLossOf(obs);
+
+    // The scoreboard, in thousands and relative to the field.
+    let top = -Infinity, bottom = Infinity;
+    for (let s = 1; s < 4; s++) {
+      if (obs.scores[s] > top) top = obs.scores[s];
+      if (obs.scores[s] < bottom) bottom = obs.scores[s];
+    }
+
+    // Defensive capacity: what the hand could throw if it did fold. Distinct
+    // TYPES, not tiles — three copies of one safe tile buy one turn of safety
+    // each, and the assessor speaks in types.
+    const seen = new Set<number>();
+    let safeTypes = 0, lowTypes = 0, unassessed = 0;
+    const gb = genbutsuSets(obs);
+    const riichiRel: number[] = [];
+    for (let s = 1; s < 4; s++) if (obs.riichi[s]) riichiRel.push(s);
+    const gbCount = riichiRel.map(() => 0);
+    let gbAll = 0;
+    for (const t of obs.hand) {
+      const ty = tileType(t);
+      if (seen.has(ty)) continue;
+      seen.add(ty);
+      const lvl = obs.danger.get(ty)?.level;
+      if (lvl === undefined) unassessed++;
+      else if (lvl === "安全") safeTypes++;
+      else if (lvl === "危険度低") lowTypes++;
+      let all = riichiRel.length > 0;
+      for (let i = 0; i < riichiRel.length; i++) {
+        if (gb[riichiRel[i]].has(ty)) gbCount[i]++;
+        else all = false;
+      }
+      if (all) gbAll++;
+    }
+
+    return m.foldFacts = {
+      margin: parts.margin,
+      push: parts.push,
+      pressure,
+      gain: parts.gain,
+      risk: parts.risk,
+      buffer: parts.buffer,
+      shanten: f.shanten,
+      ukeire: f.ukeire,
+      ukeireTypes: f.ukeireTypes,
+      dora: f.dora,
+      junme: f.junme,
+      turnsLeft: f.turnsLeft,
+      dealer: f.dealer ? 1 : 0,
+      open: f.open,
+      oppRiichi,
+      furoThreats: furo.size,
+      threat0: th[0] ?? 0,
+      threat1: th[1] ?? 0,
+      threat2: th[2] ?? 0,
+      expLoss0: (el[0] ?? 0) / 1000,
+      expLoss1: (el[1] ?? 0) / 1000,
+      expLoss2: (el[2] ?? 0) / 1000,
+      pwin: entry.out.pwin,
+      value: entry.out.value / 1000,
+      ev: entry.out.ev / 1000,
+      score: obs.scores[0] / 1000,
+      leadTop: (obs.scores[0] - top) / 1000,
+      leadBottom: (obs.scores[0] - bottom) / 1000,
+      kyoku: obs.kyoku,
+      honba: obs.honba,
+      kyotaku: obs.kyotaku,
+      safeTypes,
+      lowTypes,
+      unassessedTypes: unassessed,
+      genbutsuAll: gbAll,
+      genbutsuMin: gbCount.length === 0 ? 0 : Math.min(...gbCount),
+      sensePressure: this.sensePressure(obs),
+    };
+  }
+
+  /**
+   * What a deal-in to each opponent is expected to cost, in points, relative
+   * order. HOOK: the base policy reads no opponent model and answers zeros;
+   * `AugmentedHeuristic` answers the 計算 reader's `expLoss`.
+   *
+   * A FEATURE-ONLY hook — nothing in the base policy's arithmetic reads it, and
+   * it is called only when the fold head or its recorder is attached.
+   */
+  protected expLossOf(_obs: Observation): readonly number[] {
+    return [0, 0, 0];
+  }
+
+  private computeFold(obs: Observation): boolean {
+    // Committed: after riichi the only legal discard is the drawn tile anyway.
+    // OUTSIDE the head, permanently: a fact about the position, not a judgement.
+    if (obs.riichi[0]) return false;
+
+    const pressure = this.pressure(obs);
+    // …and so is this: with nothing loud there is nothing to fold FROM.
+    if (pressure === 0) return false;
+
+    // THE PLAIN PATH — no head, no recorder, no exploration. The expression
+    // below is the incumbent gate, character for character, and it is what a
+    // seat with no `fold` block runs: `foldMargin` is not called, no feature is
+    // built, no random number is drawn, and no pin can move.
+    if (this.foldHead === null && this.foldSink === null && this.foldEps === 0) {
+      let push: number;
+      if (this.hand) {
+        // M11. The table below is a four-step guess at exactly what `handOutlook`
+        // computes — P(this hand cashes) × what it cashes for — so with the model
+        // wired the guess goes and the EV comes in, divided by `pushScale` to land
+        // back in the units the comparison against `pressure` is written in.
+        //
+        // THE TWO ADJUSTMENTS GO WITH IT, and not because they were wrong: both
+        // are inside the model now, and continuously rather than as cliffs. 親 is
+        // `valueDealer` on the value; "late and far from tenpai" is `turnsLeft`
+        // (few own draws left to climb three levels) meeting `oppGrowth` (a table
+        // that has grown ready), which prices 3向聴 on 9巡目 too instead of
+        // switching at 10.
+        const r = this.restingShape(obs);
+        push = this.outlookOf(obs, r.rest, r.sh, { tile: r.tile }).ev / this.hand.pushScale;
+      } else {
+        push = obs.shanten <= 0 ? 1.0 : obs.shanten === 1 ? 0.45 : obs.shanten === 2 ? 0.15 : 0;
+        push += 0.12 * obs.doraCount;
+        // Late and far from tenpai is not a hand worth defending with.
+        if (obs.shanten >= 2 && obs.junme >= 10) push = 0;
+        // A dealer has more to lose by folding (連荘) — nudge, don't override.
+        if (obs.seatWind === 27) push += 0.08;
+      }
+
+      push *= this.buffer(obs);
+
+      // 順位効用: the same hand against the same table is worth pushing for a
+      // different amount depending on what the points would DO. Off (the default)
+      // both scales are 1 and this is the old `push < 0.5 * pressure`, exactly.
+      const st = this.standingsOf(obs);
+      return push * st.gain < 0.5 * pressure * st.risk;
+    }
+
+    // THE HEAD PATH. `foldMargin` is the same arithmetic, with its verdict left
+    // as a number so the head can read it as feature 0.
+    const parts = this.foldMargin(obs, pressure);
+    const facts = this.foldFeatures(obs, parts, pressure);
+    const x = this.foldX!;
+    const verdict = this.foldHead
+      ? decideFold(this.foldHead, facts, x)
+      : (foldVector(facts, x), parts.margin < 0);
+
+    // The ε-flip. ONE draw per decision at most: `shouldFold` memoises, so this
+    // body runs once per Observation however many callers ask.
+    let flipped = false;
+    if (this.foldRng !== null && this.foldRng.float() < this.foldEps) flipped = true;
+    const taken = flipped ? !verdict : verdict;
+
+    if (this.foldSink) {
+      this.foldSink({
+        x: Array.from(x),
+        verdict,
+        taken,
+        p: this.foldEps === 0 ? 1 : flipped ? this.foldEps : 1 - this.foldEps,
+        flipped,
+        turn: obs.drawn !== null,
+      });
+    }
+    return taken;
   }
 
   /**

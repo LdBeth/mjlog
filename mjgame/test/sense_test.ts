@@ -204,14 +204,14 @@ Deno.test("sense: `{}` (⇒ zero weights) plays the identical hanchan — kkkk",
   assertEquals(inited.results, plain.results);
 });
 
-Deno.test("sense: `{}` plays the identical hanchan — khhh + champion", () => {
-  const CHAMPION: KTune = loadKtune(
+Deno.test("sense: `{}` plays the identical hanchan — khhh + champion (block stripped)", () => {
+  // Since the 2026-08-29 promotion champion.json CARRIES a sense trio, so the
+  // claim is made on the champion with the block stripped: absent ≡ `{}`.
+  const { sense: _s, ...BARE } = loadKtune(
     new URL("../weights/champion.json", import.meta.url).pathname,
   );
-  const plain = headless(GAMES, SEED, "khhh", { ktune: CHAMPION });
-  const inited = headless(GAMES, SEED, "khhh", {
-    ktune: { ...CHAMPION, sense: {} },
-  });
+  const plain = headless(GAMES, SEED, "khhh", { ktune: BARE });
+  const inited = headless(GAMES, SEED, "khhh", { ktune: { ...BARE, sense: {} } });
   assertEquals(inited.results, plain.results);
 });
 
@@ -230,13 +230,17 @@ Deno.test("liveYakuhai: the default 0 plays the identical hanchan — kkkk", () 
   assertEquals(zeroed.results, plain.results);
 });
 
-Deno.test("liveYakuhai: the default 0 plays the identical hanchan — khhh + champion", () => {
+Deno.test("liveYakuhai: the default 0 plays the identical hanchan — khhh + champion (term stripped)", () => {
+  // champion.json carries liveYakuhai 200 since 2026-08-29; the identity claim
+  // is absent ≡ explicit 0, made on the champion with the term removed.
   const CHAMPION: KTune = loadKtune(
     new URL("../weights/champion.json", import.meta.url).pathname,
   );
-  const plain = headless(GAMES, SEED, "khhh", { ktune: CHAMPION });
+  const { liveYakuhai: _l, ...heur } = CHAMPION.heuristic ?? {};
+  const BARE: KTune = { ...CHAMPION, heuristic: heur };
+  const plain = headless(GAMES, SEED, "khhh", { ktune: BARE });
   const zeroed = headless(GAMES, SEED, "khhh", {
-    ktune: { ...CHAMPION, heuristic: { ...CHAMPION.heuristic, liveYakuhai: 0 } },
+    ktune: { ...BARE, heuristic: { ...heur, liveYakuhai: 0 } },
   });
   assertEquals(zeroed.results, plain.results);
 });

@@ -5,6 +5,7 @@
 
 import { CalibrationWriter } from "./ai/calibration.ts";
 import { mergeComputed } from "./ai/computed.ts";
+import { FoldCalibrationWriter } from "./ai/foldcalib.ts";
 import { HandCalibrationWriter } from "./ai/handcalib.ts";
 import { mergeHand } from "./ai/handvalue.ts";
 import { parseArgs } from "./cli/args.ts";
@@ -212,6 +213,38 @@ function makeHandCalibWriter(a: Args): HandCalibrationWriter | undefined {
   });
 }
 
+/**
+ * M13's fold recorder for a run, or nothing.
+ *
+ * `head` is the one thing the header cannot read off a flag: it says WHICH rule
+ * produced the `verdict` column, so a reader knows whether `x[0] < 0` must
+ * reproduce it (the incumbent gate) or not (a fitted head). It is exactly the
+ * presence of a `fold` block in the `--ktune` file — the same condition
+ * `makePolicy` builds the head on.
+ */
+function makeFoldCalibWriter(a: Args): FoldCalibrationWriter | undefined {
+  if (!a.foldcalib) return undefined;
+  return new FoldCalibrationWriter(a.foldcalib, {
+    seats: a.seats,
+    seed: a.seed,
+    games: a.games,
+    eps: a.foldEps,
+    head: a.ktune?.fold ? "mlp" : "gate",
+  });
+}
+
+/** What a fold-recording run wrote — rows, flips, and the D7 caveat's size. */
+function foldCalibReport(a: Args, cal?: FoldCalibrationWriter): void {
+  if (!cal) return;
+  const st = cal.stats();
+  const pct = st.rows > 0 ? (100 * st.flips / st.rows).toFixed(1) : "0.0";
+  console.log(
+    `押し引き ${a.foldcalib}: 判断 ${st.rows}行  (半荘 ${st.games}, 局 ${st.rounds})` +
+      `  反転 ${st.flips}回 (${pct}%)  複数反転局 ${st.multiFlipRounds}` +
+      (st.dropped > 0 ? `  未決着のゆえ破棄 ${st.dropped}行` : ""),
+  );
+}
+
 /** What a hand-recording run wrote, dropped samples included (see the writer). */
 function handCalibReport(a: Args, cal?: HandCalibrationWriter): void {
   if (!cal) return;
@@ -250,10 +283,13 @@ interface SeatTally {
 async function cmdSelfplay(a: Args): Promise<void> {
   const calibrate = makeCalibrationWriter(a);
   const handCalib = makeHandCalibWriter(a);
+  const foldCalib = makeFoldCalibWriter(a);
   try {
     const opts: HeadlessOptions = {
       calibrate,
       handCalib,
+      foldCalib,
+      foldEps: a.foldEps,
       weights: a.weights,
       temp: a.temp,
       record: a.record || undefined,
@@ -281,9 +317,11 @@ async function cmdSelfplay(a: Args): Promise<void> {
   } finally {
     calibrate?.close();
     handCalib?.close();
+    foldCalib?.close();
   }
   calibrationReport(a, calibrate);
   handCalibReport(a, handCalib);
+  foldCalibReport(a, foldCalib);
 }
 
 /**
@@ -420,25 +458,31 @@ function reportSelfplay(a: Args, { results, ms, traj }: RunReport): void {
 function cmdPaired(a: Args): void {
   const calibrate = makeCalibrationWriter(a);
   const handCalib = makeHandCalibWriter(a);
+  const foldCalib = makeFoldCalibWriter(a);
   try {
-    cmdPairedInner(a, calibrate, handCalib);
+    cmdPairedInner(a, calibrate, handCalib, foldCalib);
   } finally {
     calibrate?.close();
     handCalib?.close();
+    foldCalib?.close();
   }
   calibrationReport(a, calibrate);
   handCalibReport(a, handCalib);
+  foldCalibReport(a, foldCalib);
 }
 
 function cmdPairedInner(
   a: Args,
   calibrate?: CalibrationWriter,
   handCalib?: HandCalibrationWriter,
+  foldCalib?: FoldCalibrationWriter,
 ): void {
   if (a.games < 1) die("--games は1以上");
   const st = pairedRun(a.games, a.seed, a.table ?? a.seats, {
     calibrate,
     handCalib,
+    foldCalib,
+    foldEps: a.foldEps,
     weights: a.weights,
     temp: a.temp,
     oracle: a.oracle,

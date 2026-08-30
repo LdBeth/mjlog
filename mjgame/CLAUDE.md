@@ -19,6 +19,7 @@ deno task arena       # riichi.dev bot: --token-file=PATH [--ranked] [--games=N]
 # champion vs the frozen field: --seats=khhh --ktune=weights/champion.json
 deno task build-kernel  # native/mjkernel  (shanten/ukeire/shape-mass)
 deno task build-native  # native/librlnet  (policy net via Accelerate)
+deno task build-mlp     # native/libmjmlp  (小さな学習ヘッド, bit-exact)
 ```
 
 CLI commands: `play` / `selfplay` / `paired` / `bench`. Full flag reference
@@ -26,7 +27,11 @@ lives in `src/cli/usage.ts`. Notable: `--jobs=N` (selfplay only) plays games in
 worker threads with **byte-identical** output to sequential; `--export=PATH`
 (play/selfplay) writes a Tenhou mjlog XML + `.mjgame.json` sidecar per game;
 `--jobs` with `--calibrate` is refused (the calibration writer has no per-game
-buffering seam). Flags a command would silently ignore are rejected by
+buffering seam), and so is `--handcalib` / `--foldcalib` (both buffer per
+ROUND). `--foldcalib=PATH` (+ `--fold-eps=X`) records the M13 push/fold lane
+off a "k" seat 0; without `--fold-eps` it changes nothing it records.
+`--calibrate` is also refused beside a ktune carrying M14's `dealin` block (the
+lane must be recorded on the plain 計算 read). Flags a command would silently ignore are rejected by
 `argError` in `src/cli/args.ts` — keep it that way when adding flags.
 
 ## Layout
@@ -60,7 +65,24 @@ buffering seam). Flags a command would silently ignore are rejected by
   the discard score when a `--ktune` file carries a `hand` block — absent ⇒
   bit-identical to before; `handcalib.ts` its recorder (`--handcalib=PATH`,
   labels written at round end). Fit: `scripts/hand_fit.ts`, check:
-  `scripts/hand_report.ts`. Consumption scalars `pushScale`/`evWeight` are
+  `scripts/hand_report.ts`. `mlp.ts` the shared small-MLP runtime (one
+  forward pass, TS / native / numpy, bit-exact); `fold.ts` the M13 push/fold
+  head over it, `foldcalib.ts` its ε-flip bandit lane
+  (`--foldcalib=PATH --fold-eps=X`, rewards written at round end). Fit:
+  `train/fold_fit.py`, check: `scripts/fold_report.ts`.
+  `dealin.ts` the M14 learned deal-in read — two small MLPs (P(ron on each of
+  the 34 types) per opponent, plus a tenpai head) served as `Reads.dealinP` /
+  `tenpaiP` in place of the closed-form 計算 estimate, with `dealinValue` still
+  computed's (D5). Features are FROZEN and public-current-state only: the 河読み
+  ban is a test (permute a river, every feature must be bit-identical), and the
+  river reaches the tenpai head as a BAG. Absent ⇒ bit-identical play; `{}`
+  throws (a learned head has no identity). Lane: calibration v3 (a superset of
+  v2 — old lanes still re-score) → `scripts/dealin_export.ts` →
+  `train/dealin_fit.py` → `scripts/dealin_report.ts`, which reproduces the
+  trainer's logits in TypeScript bit for bit. FIT ONLY on a lane recorded
+  WITHOUT the block (`--calibrate` refuses one), for `handvalue.ts`'s reason:
+  labels recorded under the head are censored by its own reads.
+  Consumption scalars `pushScale`/`evWeight` are
   set by paired sweeps, not by the fit (see `runs/hand/SWEEP.md`). FIT ONLY
   on a lane played WITHOUT the hand block: labels recorded under the folding
   policy are censored by its own folds, and a refit on them measured +0.11
@@ -68,9 +90,12 @@ buffering seam). Flags a command would silently ignore are rejected by
   TUI 助言 advisor always reads it (`src/main.ts`; play's CPU seats carry no
   vector) — never point it elsewhere; improve the file. Promotion requires
   controlled paired evidence (opponents held fixed) and deliberately
-  regenerates the `test/champion_test.ts` pins. Since 2026-08-25 it is the
-  M10 computed calibration ALONE — the post-epoch sweep removed the M11 hand
-  block (see Decisions); `hand-calibrated.json` stays archived. Tracked under
+  regenerates the `test/champion_test.ts` pins. Since 2026-08-30 it is the
+  arena-proven vector: the M10 computed calibration, the 最終形 riichi head,
+  the 色読み sense trio, `liveYakuhai` 200, `keepTriplet` 1, the M14 learned
+  deal-in `dealin` block with `augment.floor` 0.25 — no M11 hand
+  block (the post-epoch sweep removed it, see Decisions;
+  `hand-calibrated.json` stays archived). Tracked under
   weights/: the three ktune JSONs plus `weights/league/` (frozen snapshots,
   see Decisions).
 - **`src/net/`**: the riichi.dev (RiichiLab) MJAI bridge — the arena owns the
@@ -92,8 +117,8 @@ buffering seam). Flags a command would silently ignore are rejected by
   `test/arena_replay_test.ts` replays a real captured wire log
   (`test/fixtures/arena-validate-0827.jsonl`). Bot tokens live outside the
   repo (`--token-file`); never log or commit them. Ranked play uses
-  `weights/arena.json` — the champion's computed block and 最終形 riichi
-  block plus arena-only heuristic overrides (`bufferTight`/`bufferLow` = 1:
+  `weights/arena.json` — champion.json plus ONLY the arena-only heuristic
+  overrides (`bufferTight`/`bufferLow` = 1:
   the 持ち点8000未満 buffer defends a HOME ledger rule the arena does not
   have; wire-log replay showed it was the dominant cause of folding live
   tenpai vs a single riichi). Do not fold arena-only overrides back into
@@ -112,8 +137,11 @@ buffering seam). Flags a command would silently ignore are rejected by
   Decisions). The JIS number row (`1-9 0 - ^ ¥`, `\` = ¥) discards hand slot
   1–13 in one keystroke; `t` is the drawn tile; ←→/Enter remain.
 - **`native/`**: `mjkernel.cc` (ABI 2: `mj_shanten`, `mj_ukeire_mask`,
-  `mj_shape_masses`) and `rlnet.c`. Built with `-ffp-contract=off` — required
-  for bit-exact parity with TS.
+  `mj_shape_masses`), `rlnet.c`, and `mlp.c` (ABI 1: the small learned heads
+  behind `src/ai/mlp.ts` — plain C loops, NOT Accelerate, because a head's sign
+  decides a fold and BLAS reorders sums; `test/mlp_native_test.ts` grades it at
+  zero tolerance). Built with `-ffp-contract=off` — required for bit-exact
+  parity with TS.
 
 ## Invariants (tests enforce these; do not weaken them)
 
@@ -134,6 +162,143 @@ buffering seam). Flags a command would silently ignore are rejected by
   reward — no per-decision penalty shaping.
 
 ## Decisions
+
+- **M14 — the learned deal-in read (`ai/dealin.ts`, 2026-08-29,
+  owner-directed)**: the other half of the pair M13 opened. Where the fold head
+  learns the DECISION, this learns the EVIDENCE: end-to-end
+  P(opponent i rons type t | public state) from a 54-column feature row per
+  (opponent, tile type), plus a 22-column tenpai head, served as `Reads.dealinP`
+  / `tenpaiP` in place of the counting model's closed form. `dealinValue` stays
+  computed's, rebuilt for ALL 34 types through `valueOnType` (D5) — the value
+  model is not being learned, and computed leaves a zero wherever its own q ≤ 0
+  that `riskOf`'s `?? expLoss` fallback would not rescue.
+  SWITCH SEMANTICS with ONE difference from `hand`/`riichi`/`sense`/`fold`: no
+  `dealin` section ⇒ no head is built, no trace is requested and the seat plays
+  bit-for-bit its prior game, but `{}` THROWS ("dealin ブロックには重みが要り
+  ます") — a learned head has no weight setting that reproduces the counting
+  model, so absent is the switch and an empty block can only be a mistake.
+  Routed to "k" seats ONLY (D11); the two heads are BUILT objects (they may hold
+  a native context), so `makePolicy` builds them once per seat outside the
+  `withReads` rebuild closure — building inside it would allocate a native
+  context per hanchan and free none — and frees them in the seat's `close()`.
+  FEATURES ARE FROZEN and public-current-state only: the 河読み ban is enforced
+  by a river-permutation test (permute a river keeping bag and 現物 ⇒ every
+  feature bit-identical), and the river reaches the tenpai head as a BAG.
+  THE LANE is calibration v3, a strict SUPERSET of v2 (`CALIB_ACCEPTED {2,3}`,
+  so the 598 MB v2 lanes and `calibrate_fit`/`calibrate_report` keep working):
+  new public-state fields `un`/`oh`/`ak`/`sc`/`ri`/`rj`, per opponent `gb`
+  (現物) and `rb` — the deliberate addition to the brief's field list: each
+  opponent's own discards as a BAG of type counts, because the tenpai head's
+  river columns cannot be derived from anything else the record carries and
+  `gb` is contaminated for a declarer; it carries no ORDER, by the same ban.
+  `fh` (a digest of the served feature rows) is written only when the recording
+  seat is running the heads — which the CLI refuses (D6: `--calibrate` beside a
+  `dealin` block, the third member of the `--jobs`/`--curriculum` family) — so
+  the first lane carries no digest and `dealin_export` says so out loud.
+  `train/dealin_fit.py` undoes the export's negative subsampling by weight
+  (`1/keep`) and, when `--pos-weight` ≠ 1, applies the PRIOR CORRECTION:
+  log(pos_weight) is subtracted from the output bias after training, because
+  `riskOf` multiplies the probability by a payment in points and a head
+  calibrated for a balanced table would price every tile hot. Holdout is seed
+  parity; `scripts/dealin_report.ts` reproduces the trainer's logits in
+  TypeScript bit for bit.
+  THE `floor` KNOB is the promotion plan's second half: `augment.floor` (0.5
+  today) keeps the rule ladder as a lower bound under the estimate, so 安全
+  stays a proof no head may price. As the head is graded the floor steps
+  0.5 → 0.25 → 0 — a separate, deliberate owner edit that must never ride in
+  with the block. `champion_test` asserts the block is present and the floor
+  is 0.25 (the promoted, arena-tested values); a different floor is a new
+  promotion, not a merge.
+  FIRST TRAINING ROUND (2026-08-29): v3 lane of 2,000 半荘 (371,731 decisions,
+  3.99M (opponent, tile) rows, 0.59% positives; tenpai rows 1.03M). Holdout
+  (odd seeds): learned P(ron) BCE 0.02402 vs computed 0.02461, Brier 0.005500
+  vs 0.005530, better in EVERY stratum (巡目 × riichi/furo/quiet); tenpai head
+  BCE 0.179 vs the prior's 0.197. TS reproduces the trainer's logits exactly
+  (10,000/10,000). Paired grades, 600 games vs champion, floor sweep:
+  0.5 → +0.008 [−0.073, +0.090]; 0.25 → −0.015 [−0.098, +0.068];
+  0 → −0.015 [−0.102, +0.072]; violations flat. NEUTRAL at home — note the
+  paired SD is ~1.0 vs the usual 0.4 (the learned reads move many more
+  discards), so this field needs ~6× the games for the usual CI; the
+  prediction gain is real but small (2.5% BCE) and the arena is where the
+  ladder's blind spots (closed flushes, quiet tables) actually cost. Nothing
+  ships in the champion; INSTALLED in `weights/arena.json` the same day
+  (owner: "install the improved component and get ready to arena test") with
+  `augment.floor` 0.25 — the arena is the test the home grade could not give.
+  Replay bench on two ranked logs: 133/1,581 decisions change, 81 at 巡≤5,
+  122 shanten-neutral (tie reorderings under the learned risk row).
+  ARENA RESULT (50 ranked games, 535 局, 2026-08-29/30; logs
+  `runs/arena/ranked-0829-dealin*.jsonl`) vs the pooled pre-M14 baseline
+  (15 games / 122 局): 放銃率 10.8% vs 13.9%, 平均放銃打点 4,924 vs 7,871,
+  満貫以上の放銃 21% of feeds vs 59%, 放銃失点/局 534 vs 1,097 — the feed
+  cost the ladder could not see roughly HALVED. Bought with 和了率 22.8% vs
+  28.7% and 平均点 25,282 vs 29,107; 平均順位 2.560 [2.26, 2.86] vs 2.667 —
+  placement neutral at n=50 (blocks ran 2.44 → 2.59, noise). The head does
+  what the fit predicted; the promotion question is which criterion decides:
+  placement needs several hundred arena games, feed cost/局 is already
+  decisive relative to its own variance.
+  PROMOTED 2026-08-30 (owner: "go ahead and promote 0.25"): champion.json =
+  arena.json minus the buffer overrides — the `dealin` block plus
+  `augment.floor` 0.25, the exact vector that played the 50 games. 0.5 was
+  never rejected (home grades could not separate the floors; 0.25 had the
+  best point estimates and the fewest 8000点未満 violations, 25 vs 32) — it
+  is simply untested in the arena. Champion pins re-captured; the frozen
+  "h" seat and the league pins are UNTOUCHED (frozen.ts has no dealin
+  support and `learnedReads` lives only in the k-branch), so seat 0 of
+  `khhh` no longer equals the field. `dealin_wiring_test` states its
+  "absent" claims against the champion with the block stripped.
+
+- **M13 — the fold head (`ai/fold.ts`, 2026-08-29, owner-directed)**: the
+  push/fold gate's whole verdict was one hand-written comparison,
+  `push·gain < 0.5·pressure·risk`, and every arena mangan feed was on one side
+  of it. `computeFold` is refactored so that comparison's number,
+  `margin = push·gain − 0.5·pressure·risk`, is FEATURE 0 of a 37-wide vector
+  (the gate's five parts, the resting shape's `HandFacts`, per-seat threat and
+  `expLoss`, the M11 outlook, the scoreboard, the hand's own defensive capacity
+  — safe/low/unassessed types and 現物 counts vs each riichi — and the 色読み
+  field pressure). SWITCH SEMANTICS, as `hand`/`riichi`/`sense`: no `fold`
+  block ⇒ `computeFold` takes an early return running the incumbent expression
+  character for character (no feature built, no rng touched, no pin moved);
+  `fold: {}` ⇒ `INIT_FOLD`, one linear layer with `w[margin] = −1`, so
+  `forward(x)[0] > 0` IS `margin < 0` — the identity is STRUCTURAL, not
+  measured. Routed to "k" seats ONLY (the frozen "h" letter is the baseline
+  this head must beat); built once per seat in `makePolicy` and freed in the
+  seat's `close()`, because it may hold a native context.
+  THE LANE is a contextual bandit, not a supervised set: no log says what
+  folding would have paid, so `--foldcalib=PATH --fold-eps=X` flips the verdict
+  with probability ε on a stream of the seat's OWN (derived
+  `imul(seed, 0x9E3779B1) + 13`, made only when ε>0, at most one draw per
+  decision — `shouldFold` is memoised) and writes the propensity down beside
+  the action. At ε 0 the recorder is invisible: same games, same bytes, no
+  draw. REWARD = the round's `deltas[0]/1000` and nothing else (D7); `vio0`,
+  `won`, `dealtIn` are recorded as DATA — a violation term here would be
+  exactly the per-decision shaping the reward philosophy forbids. The
+  per-round settlement is shared by every decision inside it, so the
+  independence assumption is stated in both the recorder and the fit, and the
+  multi-flip-round fraction is REPORTED rather than assumed away.
+  `train/fold_fit.py` fits q̂(x,a) (Huber δ=8), forms the doubly-robust
+  advantage of folding, and trains the head on `sign(Δ̂)` weighted `|Δ̂|` from
+  an init that is `INIT_FOLD` widened with a pass-through `relu(−margin)` unit
+  (epoch 0 ≡ the old gate, verified numerically in the script before training).
+  Holdout is seed parity. NO VECTOR SHIPS IT YET: `champion_test` asserts
+  `k.fold === undefined`, and promotion needs the pre-registered paired grade
+  (道場順位差 negative, 95% CI clear of zero, violations flat) and the owner's
+  word.
+  FIRST TRAINING ROUND (2026-08-29, same day): lane of 3,000 半荘 at ε=0.05
+  (203,458 gated decisions, 10,150 flips, 6.3% of rounds with >1 flip;
+  reproduction 0 mismatches). The lane's own quadrant table already says the
+  home field carries almost no fold signal: pushing where the gate folds costs
+  ~31 points on average (−1,509 vs −1,478), folding where it pushes ~324.
+  Holdout DR: old gate −0.688, always-push −0.687, always-fold −0.835, fitted
+  head (37→16→1, 40 epochs) −0.723; the paired grade agreed — champion+fold vs
+  champion **+0.108 [+0.037, +0.180]**, −1,978 点/半荘, violations +10: a clear
+  REGRESSION. A regularised refit (8 hidden, L2 1e-2, 10 epochs) collapsed to
+  1.8% fold rate with DR ≈ always-push. Reading: against three frozen copies of
+  itself deal-ins are cheap and the round-level reward is shared by ~7
+  decisions, so there is nothing for a head to beat the gate on at home; the
+  fold decision's cost shows only in the arena, which cannot be randomised.
+  Nothing ships; the next lever is a reward that prices the arena's feed
+  distribution (e.g. 道場順位/final-standings reward, or a lane against a
+  pusher field), not more epochs.
 
 - **暗刻を崩して七対子に向かわない — the `keepTriplet` guard (2026-08-28,
   owner's replay review)**: `kernel.shanten` is the MIN over standard/chiitoi,
@@ -158,8 +323,8 @@ buffering seam). Flags a command would silently ignore are rejected by
   (`frozen.ts` carries an explicit 0, the league snapshot inherits the default 0; no pin moved); ships in `weights/arena.json`
   as 1. Home paired grade (600 games, khhh, champion+guard vs champion, seed
   20828): 道場順位差 −0.027 [−0.059, +0.006], A優位 28 / B優位 19 / 同着 553,
-  violations flat — a small gain, CI touching zero. Promotion into
-  champion.json is the owner's call.
+  violations flat — a small gain, CI touching zero. Promoted into
+  champion.json 2026-08-29 with the rest of the arena vector.
 
 - **The assessor was fed DOUBLE-COUNTED own tiles (engine bug, found
   2026-08-28 in the ranked arena)**: `Table.visibleCounts(seat)` includes the
@@ -214,8 +379,8 @@ buffering seam). Flags a command would silently ignore are rejected by
   wire replay), and consumption prices heat only above `HEAT_BAR` 0.35 (linear
   consumption cost +0.08 道場順位 per arm at home; thresholded it is free:
   {someRisk 200, somePressure 0.5, chiitoiTax 500} graded +0.008 ±0.051 over
-  600 paired games, violations flat). NO vector ships it yet — adding `sense`
-  to champion.json is a promotion (pins regenerate) awaiting the owner's word.
+  600 paired games, violations flat). Promoted into champion.json (and the
+  frozen "h" seat) 2026-08-29 after the arena vector held ~1600 on riichi.dev.
 
 - **The sense is ORACLE-CALIBRATED, and the 場 is per-player (owner doctrine,
   2026-08-28)**: `scripts/sense_lane.ts` plays headless hanchan and records
@@ -272,7 +437,9 @@ buffering seam). Flags a command would silently ignore are rejected by
   wait, via `waitUpgradeExists`). INIT weights carry 0 for all three, so a
   headless vector still declares unconditionally; the doctrine ships as the
   `riichi` block in champion.json / arena.json
-  (`{bias 0.1, holdShape −1, tenpaiHeld 0.5}`), never in the frozen seats.
+  (`{bias 0.1, holdShape −1, tenpaiHeld 0.5}`); since the 2026-08-29 epoch
+  the frozen "h" seat carries the same head as a frozen object
+  (`FROZEN_RIICHI`).
 
 - **The M11 hand block was REMOVED from the champion 2026-08-25**: the
   post-epoch sweep re-grade (pre-registered rule: promote only on 道場順位差
@@ -304,14 +471,28 @@ buffering seam). Flags a command would silently ignore are rejected by
   — the opposite of `champion_test`'s, which regenerate on deliberate
   promotion (the champion is the present; the league is the past). When a new
   default field breaks a league pin, the fix is adding the explicit old value
-  to that snapshot's JSON, never re-pinning. `frozen-0825` is snapshot #1:
-  the same seat as the frozen "h" letter, pins equal by construction.
+  to that snapshot's JSON, never re-pinning. `frozen-0825` is snapshot #1
+  (the 08-25 default seat); `frozen-0829` is the promoted champion and the
+  same seat as the frozen "h" letter since the 08-29 re-bind, pins equal by
+  construction.
 
-- **The "h" seat was RE-BOUND 2026-08-25 (epoch)**: the original hand-written
-  heuristic agent is retired; the letter now builds a FROZEN copy of the
-  default 計算 seat (`src/ai/frozen.ts` — complete weight objects, snapshotted,
-  configurable by nothing; `test/frozen_test.ts` pins it and that pin NEVER
-  regenerates). Vectors route to "k" seats only; `loadTable`/`argError` refuse
+- **The "h" seat was RE-BOUND to the champion 2026-08-29 (second epoch,
+  owner's word: "we get a stable rank of 1600 on riichi.dev with k agent,
+  time to promote it to h agents again")**: `champion.json` became the
+  arena vector minus the arena-only buffer overrides, and `src/ai/frozen.ts`
+  became a complete frozen copy of THAT champion — generated through the
+  merge functions, never transcribed — now including `FROZEN_RIICHI` and
+  `FROZEN_SENSE`; `weights/league/frozen-0829.json` is its snapshot and
+  frozen-h ≡ frozen-0829 was verified on all three seeds; frozen-0825's pins
+  did not move (no shared code changed). DEFAULT_* constants did not move: a
+  bare "k" seat still plays the default game, so "h" is no longer a copy of
+  the defaults but of the champion. champion/frozen pins re-captured;
+  runs/ numbers before 08-29 were measured against the 08-25 h and are not
+  comparable forward. The first epoch, 2026-08-25: the original hand-written
+  heuristic agent was retired; the letter builds a FROZEN copy
+  (`src/ai/frozen.ts` — complete weight objects, snapshotted, configurable by
+  nothing; `test/frozen_test.ts` pins it and that pin NEVER regenerates
+  except by the owner's explicit word). Vectors route to "k" seats only; `loadTable`/`argError` refuse
   configuration aimed at an "h" seat. Consequences: numbers in `runs/`
   recorded before the epoch were measured against the old h population and are
   not comparable forward, and `--ktune-opp` under `paired` now requires an

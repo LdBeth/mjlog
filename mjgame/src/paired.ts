@@ -148,7 +148,17 @@ export function pairedRun(
   // `HeadlessOptions` later cannot reintroduce them by being spread. (A
   // `TableSpec` control arm gets this discipline for free: a spec is plain
   // JSON and cannot carry a writer at all.)
-  const { record: _record, calibrate: _calibrate, handCalib: _handCalib, ...shared } = opts;
+  // `foldCalib` goes with them, and for a third reason of its own: its ε-flip
+  // PERTURBS the seat, so a control arm carrying it would not be the incumbent
+  // at all. (`foldEps` alone is inert — `openArm` reads it only when a
+  // `foldCalib` writer is present.)
+  const {
+    record: _record,
+    calibrate: _calibrate,
+    handCalib: _handCalib,
+    foldCalib: _foldCalib,
+    ...shared
+  } = opts;
   let armB: Arm;
   if (opts.tableB !== undefined) {
     // `--table-b`: an EXPLICIT control table. The guard is the reason this form

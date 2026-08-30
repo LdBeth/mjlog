@@ -128,6 +128,7 @@ export const USAGE = `mjgame — 雀鬼流ルールの4人麻雀 (人間1 + CPU3
                       非依存の整数) ・副露の内容読み・打点の材料と、真値の聴牌/ロン牌
                       集合/打点。パラメータを変えた再評価は再対局なしで閉じた式で
                       できる。読むのは scripts/calibrate_report.ts。
+                      (dealin ブロックとは併用不可 — レーンは素の計算の読みの上で録る)
                       1半荘あたり約220KB (判断190行) — 出力先は作業用ディレクトリに
   --handcalib=PATH    M11: 席0 (k席 か h席) の自摸番ごとに「手牌価値の読み」と
                       「その局の結末」を対にした較正記録を JSONL で書き出す。
@@ -142,6 +143,23 @@ export const USAGE = `mjgame — 雀鬼流ルールの4人麻雀 (人間1 + CPU3
                       1半荘あたり約30KB (自摸番120行)。
                       読むのは scripts/hand_report.ts、当てはめは scripts/hand_fit.ts。
                       --jobs とは併用不可
+  --foldcalib=PATH    M13: 席0 (k席) の押し引き判断ごとに「ヘッドが読む37個の特徴量」
+                      「席の規則が出した判定」「実際に打った側」「局の収支」を
+                      対にした記録を JSONL で書き出す。selfplay / paired 専用で、
+                      paired では A腕だけ。
+                      --calibrate / --handcalib と違い、これは当てはめる先が
+                      教師データではなく反実仮想 — 降りていたらどうだったかは
+                      局の結末に書いてないので、--fold-eps で判定をわざと
+                      ひっくり返して両側を打ち、傾向スコア (p) と一緒に記録する。
+                      報酬は局の deltas[0] ただ一つ (道場の違反数 vio0 は
+                      データとして載るだけで目的関数には入らない)。
+                      --fold-eps なしなら打牌は一切変わらない (乱数も引かない)。
+                      読むのは scripts/fold_report.ts、当てはめは train/fold_fit.py。
+                      --jobs とは併用不可
+  --fold-eps=X        M13: 押し引きの判定を確率 X (0<X<1) で反転する。席が持つ
+                      専用の乱数列から1判断につき最大1回引く — 対局用の乱数
+                      (--epsilon) には触らないので、シードと打牌の対応は保たれる。
+                      X=0.05 が既定の目安。--foldcalib と併用必須
   --export=PATH       打った半荘を天鳳形式の牌譜XMLで書き出す (play / selfplay 専用)。
                       PATH は拡張子なしの基底名 (.xml で終えればそのまま使う)。
                       同じ基底名で .mjgame.json も並べて書く — 天鳳XMLに載らない
@@ -156,7 +174,7 @@ export const USAGE = `mjgame — 雀鬼流ルールの4人麻雀 (人間1 + CPU3
                       --jobs=1 とバイト単位で同一 (違うのは所要時間の行だけ)。
                       --games より大きい N は --games に丸める。
                       --record / --export とは併用可、
-                      --calibrate / --handcalib とは併用不可
+                      --calibrate / --handcalib / --foldcalib とは併用不可
   --json              paired の結果を1行のJSONで出す (表の代わり)。
                       scripts/tune.ts が読む機械可読出力
   --weights=PATH      n席が読む manifest.json (既定 weights/manifest.json)。

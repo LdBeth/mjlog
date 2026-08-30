@@ -74,12 +74,32 @@ function fingerprint(seed: number, ktune = loadKtune(CHAMPION)): string {
 // computed calibration alone: champion.json ≡ computed-calibrated.json as of
 // this date. The retired 08-23 champion pins ended
 // 101:#95fc878c 404:#3ceab9a1 505:#ef69d46c 606:#3fdda809 707:#285f37c5.
+// Re-captured 2026-08-30 — PROMOTION by the owner's word ("go ahead and
+// promote 0.25"): the M14 learned deal-in reads (`dealin` block, weights/
+// dealin-0829.json: P(ron | opp, tile) head 54→32→32→1 + tenpai head
+// 22→16→1) and `augment.floor` 0.25 join the champion. Evidence: 50 ranked
+// riichi.dev games (535 局) vs the pre-M14 arena baseline — 放銃率 10.8% vs
+// 13.9%, 平均放銃打点 4,924 vs 7,871, 満貫以上の放銃 21% vs 59% of feeds,
+// 放銃失点/局 534 vs 1,097; cost 和了率 22.8% vs 28.7%; 平均順位 2.56 vs 2.67
+// (neutral at n=50). Home paired grades at floor 0.5/0.25/0 were all inside
+// noise; 0.25 is the arena-tested floor. Frozen "h" and the league pins are
+// UNTOUCHED — seat 0 no longer equals seats 1-3. The retired 08-29 pins ended
+// 101:#4ca96e4f 404:#a66c8f04 505:#3941f846 606:#f077b710 707:#eb7da2d4.
+//
+// Re-captured 2026-08-29 — PROMOTION by the owner's word after a stable ~1600
+// rating on riichi.dev ranked play: champion.json is now the arena vector
+// minus its arena-only buffer overrides (M10 computed calibration + 最終形
+// riichi head + 色読み sense trio + liveYakuhai 200 + keepTriplet 1). The
+// same day the frozen "h" seat was re-bound to this champion (see
+// frozen_test), so seat 0 here plays the same seat as seats 1-3 — the scores
+// below equal frozen_test's EPOCH_PIN scores on the shared seeds by
+// construction (the hashes differ: this body carries `furo`).
 const PINNED: Record<number, string> = {
-  101: "52400/38300/14000/15300#521c1352",
-  404: "33900/33300/26100/26700#8828a996",
-  505: "39900/19400/28000/32700#4e7f8169",
-  606: "15500/46900/34200/23400#e0d15de4",
-  707: "79500/1700/39700/-900#d4e4ca7a",
+  101: "41600/41400/29300/7700#0fbe0d47",
+  404: "23800/46400/14800/35000#7c3e8a5c",
+  505: "57800/33000/11600/17600#de6d9435",
+  606: "17000/24800/32300/45900#432c9a52",
+  707: "28000/18900/39000/34100#4a402e07",
 };
 
 Deno.test("champion: the computed calibration, and NO hand block", () => {
@@ -92,6 +112,17 @@ Deno.test("champion: the computed calibration, and NO hand block", () => {
   // silently re-enable that — it takes new controlled paired evidence, not a
   // merge accident.
   assertEquals(k.hand, undefined, "hand ブロックは 2026-08-25 に除去済み (sweep 判定)");
+  // M13's fold head is a CANDIDATE, not the champion: promoting it takes the
+  // pre-registered paired grade (道場順位差 negative, 95% CI clear of zero) and
+  // the owner's word. A block appearing here by merge accident would silently
+  // re-crown an ungraded seat, exactly as a `hand` block would.
+  assertEquals(k.fold, undefined, "fold ブロックは未昇格 (M13 は対戦評価と主の判断待ち)");
+  // M14 PROMOTED 2026-08-30: the learned deal-in read is the champion's price
+  // of a tile. `augment.floor` (the rule ladder's floor under the estimate) is
+  // the owner's separate decision — 0.25 is the arena-tested value; 0.5 and 0
+  // were graded at home only. A change here is a promotion, not a merge.
+  assert(k.dealin, "champion.json must carry the M14 `dealin` block (2026-08-30)");
+  assertEquals(k.augment?.floor, 0.25, "augment.floor は主の裁定で 0.25 (2026-08-30)");
 });
 
 Deno.test("champion: whole-hanchan decision streams are pinned", () => {

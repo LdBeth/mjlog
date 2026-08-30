@@ -26,7 +26,8 @@ import { doraFromIndicatorType, tileType } from "mjrender/tiles.ts";
 import { countsFromTiles, shanten, ukeireTypes } from "../kernel.ts";
 import type { CalibRecord } from "./calibration.ts";
 import { buildCalibRecord } from "./calibration.ts";
-import type { ComputedTraceRef } from "./computed.ts";
+import type { ComputedTrace, ComputedTraceRef } from "./computed.ts";
+import type { DealinRecordExtras } from "./dealin.ts";
 import type { Ctx, HeuristicOptions } from "./heuristic.ts";
 import { HeuristicPolicy } from "./heuristic.ts";
 import type { PlannerOptions, TargetPlan } from "./planner.ts";
@@ -497,6 +498,14 @@ export function calibrationReads(
   traceRef: ComputedTraceRef,
   oracle: ReadsProvider,
   sink: (rec: CalibRecord) => void,
+  // M14: when the seat is RUNNING the deal-in heads, the record also carries
+  // `fh` — a digest of the 34×F rows it was served — so `dealin_export` can
+  // prove the offline features ARE the served features. Passed in by the
+  // harness (`dealinRecordExtras`) rather than imported here, so a plain
+  // `--calibrate` run builds no state and no feature rows: absent, the v3
+  // record is still complete, only model-free (`buildCalibRecord` fills
+  // `un/oh/ak/sc/ri/rj/gb/rb` with no model at all).
+  extras?: (obs: Observation, trace: ComputedTrace) => DealinRecordExtras,
 ): ReadsProvider {
   return (obs: Observation): Reads | null => {
     traceRef.t = null;
@@ -510,7 +519,7 @@ export function calibrationReads(
       throw new Error("calibrationReads: computedReads に同じ traceRef が渡されていません");
     }
     const truth = oracle(obs);
-    if (truth) sink(buildCalibRecord(obs, trace, truth));
+    if (truth) sink(buildCalibRecord(obs, trace, truth, extras?.(obs, trace)));
     return reads;
   };
 }
@@ -726,6 +735,19 @@ export class AugmentedHeuristic extends HeuristicPolicy {
       out[i] = clamp(Math.max(tenpaiP[i], obs.riichi[i + 1] ? 1 : 0), 0, 1);
     }
     return out;
+  }
+
+  /**
+   * M13's feature hook: what a deal-in to each opponent is expected to cost.
+   * The 計算 reader computes exactly this figure (`expLoss`, the per-seat
+   * payment without the per-type dora), and the fold head is the first thing to
+   * read it as a number of its own rather than through `riskOf`'s ladder.
+   *
+   * FEATURE-ONLY — no arithmetic of this class reads the return value; absent
+   * reads answer the base hook's zeros, which the head sees as "no estimate".
+   */
+  protected override expLossOf(_obs: Observation): readonly number[] {
+    return this.reads?.expLoss ?? [0, 0, 0];
   }
 
   /** The 8000点 buffer measured against what a deal-in would ACTUALLY cost. */

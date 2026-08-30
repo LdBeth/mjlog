@@ -10,6 +10,7 @@
     "test": "deno test --allow-read --allow-write --allow-ffi --allow-env=MJGAME_NATIVE --allow-run=clang,clang++",
     "build-native": "clang -O3 -dynamiclib -framework Accelerate -o native/librlnet.dylib native/rlnet.c",
     "build-kernel": "sh native/build_kernel.sh",
+    "build-mlp": "sh native/build_mlp.sh",
     "fmt": "deno fmt"
   },
   "imports": {

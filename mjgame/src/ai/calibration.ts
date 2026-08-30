@@ -29,7 +29,7 @@
 // ===========================================================================
 //
 // Header (line 1):
-//   {"v":2,"kind":"mjgame-calib","seats":"khhh","seed":N,"games":N,
+//   {"v":3,"kind":"mjgame-calib","seats":"khhh","seed":N,"games":N,
 //    "w":{…ComputedWeights…}}
 //   `w` is the weight vector the predictions were produced with; every
 //   re-evaluation below is a function of it, so a file is self-describing.
@@ -63,6 +63,39 @@
 //   gs  シャンポン C(u,2) (0,1,3,6)          gt  タンキ u (0..4)
 //   ph  FNV-1a/32 digest of the model's own `dealinP` row as float32 bits
 //
+// v3 (M14) is a SUPERSET of v2 — every field above keeps its meaning, and a
+// reader accepts both (`CALIB_ACCEPTED`), so the old lanes and
+// `calibrate_fit`/`calibrate_report` keep working untouched. What it adds is
+// the rest of the PUBLIC STATE, so that a lane recorded on the plain computed
+// champion can be replayed into `src/ai/dealin.ts`'s learned-head features
+// without replaying a single hand:
+//
+//   un  publicUnseen per tile TYPE, 34 base-36 digits (0..4)
+//   oh  our own hand as type counts, 34 base-36 digits (the drawn tile included)
+//   ak  red fives in our own hand
+//   sc  the four scores ÷ 100, RELATIVE order (index 0 = us)
+//   ri  riichi bitmask, relative (bit r = seat at relative index r has declared)
+//   rj  the four 立直宣言巡目, relative; −1 where nobody has declared
+//
+// and per opponent:
+//   gb  their 現物 as 34 characters of "0"/"1" — the set `genbutsuSets` builds
+//   rb  their own discards as a BAG of type counts, 34 base-36 digits. A SET is
+//       not enough (multiplicity is a feature of the tenpai head) and `gb` is
+//       contaminated for a declarer (it also holds everyone's discards since the
+//       declaration), so the bag is recorded separately. It carries no ORDER —
+//       see the 河読み ban in `dealin.ts`.
+//   fh  FNV-1a digest of the 34 × F learned feature rows this opponent was
+//       SERVED, present ONLY when the recording seat was running the M14 heads.
+//       Absent on a lane recorded by the plain computed seat, which is how the
+//       first lane must be recorded; `scripts/dealin_export.ts` then skips the
+//       reproduction check and says so.
+//
+// The deliberate deviation from the M14 brief: `rb` was not in its field list.
+// It is here because the tenpai head's river-bag columns cannot be derived from
+// anything else the record carries, and a feature the export cannot rebuild is a
+// head that trains on numbers it will never be served. Adding a field to v3 is
+// free today and costs a lane regeneration tomorrow.
+//
 // v2 (M10b) added `or`, `gd`, `gh`, `gf` — the features the upgraded model needs
 // and v1 did not carry. A v1 file cannot be re-scored under a v2 model (the
 // graded スジ residue and the dora conditioning are simply not in it), so it is
@@ -88,8 +121,10 @@
 // dora-bridge rows are three more 34-digit strings), and a drifted model shows up
 // as a loud number.
 //
-// SIZE. About 190 decisions per hanchan (turn AND claim decisions), so ~300KB
-// per game: a 2000-game lane is a few hundred megabytes. Nothing reads it whole
+// SIZE. About 190 decisions per hanchan (turn AND claim decisions). A v3 line
+// is ~2.0KB (v2 was ~1.6KB: `un`/`oh` plus a `gb`/`rb` pair per opponent are
+// five more 34-character strings), so ~400KB per game and a 2000-game lane is
+// most of a gigabyte. Nothing reads it whole
 // — `scanCalibration` streams — but it is worth pointing `--calibrate` at a
 // scratch directory rather than the repo.
 
@@ -104,15 +139,25 @@ import type {
 import {
   baseValueOf,
   DEFAULT_COMPUTED,
+  genbutsuSets,
   tenpaiPriorOf,
   valueOnType,
   waitRowFrom,
 } from "./computed.ts";
+import { publicUnseen } from "./planner.ts";
+import { tileType } from "mjrender/tiles.ts";
 import type { Reads } from "./augmented.ts";
+import type { DealinRecordExtras } from "./dealin.ts";
 import type { Observation } from "../observe.ts";
 
-/** Bumped whenever a field changes meaning. A reader refuses anything else. */
-export const CALIB_VERSION = 2;
+/** Bumped whenever a field changes meaning. What a WRITER stamps. */
+export const CALIB_VERSION = 3;
+/**
+ * What a READER takes. v3 is a strict superset of v2 (see the header), so an old
+ * lane still re-scores under `calibrate_fit`/`calibrate_report` — only v1, whose
+ * feature half is genuinely missing columns, is refused.
+ */
+export const CALIB_ACCEPTED: ReadonlySet<number> = new Set([2, 3]);
 export const CALIB_KIND = "mjgame-calib";
 
 /** One opponent's row of one decision. Short keys: see the schema above. */
@@ -143,9 +188,21 @@ export interface CalibOpp {
   tt: 0 | 1;
   R: number[];
   V: number[];
+  /** v3: 現物 as 34 × "0"/"1". Absent on a v2 lane. */
+  gb?: string;
+  /** v3: their own discards as a bag, 34 base-36 digits. Absent on a v2 lane. */
+  rb?: string;
+  /** v3: digest of the served M14 feature rows. Absent unless a head was on. */
+  fh?: string;
 }
 
-/** One decision. `s`/`n` are stamped by the writer, which owns the game loop. */
+/**
+ * One decision. `s`/`n` are stamped by the writer, which owns the game loop.
+ *
+ * The v3 fields are optional in the TYPE because a reader accepts v2 files,
+ * where they are genuinely absent — never because a v3 writer may omit them.
+ * `scripts/dealin_export.ts` refuses a record that is missing any of them.
+ */
 export interface CalibRecord {
   s?: number;
   n?: number;
@@ -159,6 +216,18 @@ export interface CalibRecord {
   sw: number;
   dr: string;
   o: CalibOpp[];
+  /** v3: `publicUnseen`, 34 base-36 digits. */
+  un?: string;
+  /** v3: our own hand as type counts, 34 base-36 digits. */
+  oh?: string;
+  /** v3: red fives in our own hand. */
+  ak?: number;
+  /** v3: the four scores ÷ 100, relative order. */
+  sc?: number[];
+  /** v3: riichi bitmask, relative. */
+  ri?: number;
+  /** v3: the four 立直宣言巡目, relative; −1 for none. */
+  rj?: number[];
 }
 
 interface CalibHeader {
@@ -230,7 +299,19 @@ export function digestRow(row: Float32Array): string {
 
 const SUIT_CODE: Record<string, 0 | 1 | 2 | 3> = { m: 1, p: 2, s: 3 };
 
-function oppRecord(tr: ComputedOppTrace, oracle: Reads, i: number): CalibOpp {
+/** 34 booleans as 34 characters of "0"/"1" — a SET, so there is no order in it. */
+function encodeSet34(has: (ty: number) => boolean): string {
+  let s = "";
+  for (let ty = 0; ty < 34; ty++) s += has(ty) ? "1" : "0";
+  return s;
+}
+
+function oppRecord(
+  tr: ComputedOppTrace,
+  oracle: Reads,
+  i: number,
+  pub?: { gb: string; rb: string; fh?: string },
+): CalibOpp {
   const gy: number[] = [];
   const gd: number[] = [];
   const gh: number[] = [];
@@ -293,6 +374,8 @@ function oppRecord(tr: ComputedOppTrace, oracle: Reads, i: number): CalibOpp {
     tt: (oracle.tenpaiP?.[i] ?? 0) > 0 ? 1 : 0,
     R,
     V,
+    ...(pub ? { gb: pub.gb, rb: pub.rb } : {}),
+    ...(pub?.fh !== undefined ? { fh: pub.fh } : {}),
   };
 }
 
@@ -308,9 +391,32 @@ export function buildCalibRecord(
   obs: Observation,
   trace: ComputedTrace,
   oracle: Reads,
+  dealin?: DealinRecordExtras,
 ): CalibRecord {
   const dora = new Array<number>(34);
   for (let ty = 0; ty < 34; ty++) dora[ty] = trace.dora[ty] ?? 0;
+
+  // The v3 public-state half. NONE of it needs a model: `dealin` only supplies
+  // `fh`, the digest of the feature rows a seat running the M14 heads was
+  // actually served. So a lane recorded on the plain computed champion — which
+  // is how the first one MUST be recorded — already carries everything
+  // `scripts/dealin_export.ts` needs to rebuild the features; the digest check
+  // is what it loses, and it says so rather than skipping quietly.
+  const st = dealin?.state;
+  const unseen = st ? Array.from(st.unseen) : publicUnseen(obs);
+  const own = new Array<number>(34).fill(0);
+  if (st) {
+    for (let ty = 0; ty < 34; ty++) own[ty] = st.own[ty];
+  } else {
+    for (const t of obs.hand) own[tileType(t)]++;
+  }
+  let aka = 0;
+  if (st) aka = st.aka;
+  else for (const t of obs.hand) if (obs.akaIds.has(t)) aka++;
+  const gen = genbutsuSets(obs);
+  let ri = 0;
+  for (let r = 0; r < 4; r++) if (obs.riichi[r]) ri |= 1 << r;
+
   return {
     k: obs.kyoku,
     b: obs.honba,
@@ -321,7 +427,21 @@ export function buildCalibRecord(
     rw: obs.roundWind,
     sw: obs.seatWind,
     dr: encode34(dora),
-    o: trace.opps.map((t, i) => oppRecord(t, oracle, i)),
+    un: encode34(unseen),
+    oh: encode34(own),
+    ak: aka,
+    sc: obs.scores.map((s) => Math.round(s / 100)),
+    ri,
+    rj: obs.riichi.map((r, q) => (r ? obs.riichiJunme[q] : -1)),
+    o: trace.opps.map((t, i) => {
+      const river = new Array<number>(34).fill(0);
+      for (const e of obs.rivers[t.rel]) river[tileType(e.tile)]++;
+      return oppRecord(t, oracle, i, {
+        gb: encodeSet34((ty) => gen[t.rel].has(ty)),
+        rb: encode34(river),
+        ...(dealin ? { fh: digestRow(dealin.feats(i)) } : {}),
+      });
+    }),
   };
 }
 
@@ -330,7 +450,7 @@ export function buildCalibRecord(
 // ---------------------------------------------------------------------------
 
 /** The per-type `ShapeBase` array a record's eight mass strings encode. */
-function basesFromRecord(o: CalibOpp): ShapeBase[] {
+export function basesFromRecord(o: CalibOpp): ShapeBase[] {
   const gy = decode34(o.gy);
   const gd = decode34(o.gd);
   const gh = decode34(o.gh);
@@ -551,11 +671,24 @@ export class CalibrationWriter {
  * lane is a selfplay run of a couple of minutes.
  */
 function versionError(path: string, v: number): Error {
+  const ok = [...CALIB_ACCEPTED].sort((a, b) => a - b).map((n) => `v${n}`).join("/");
   return new Error(
-    `${path}: 版が違います (v${v}, 期待 v${CALIB_VERSION})。` +
+    `${path}: 版が違います (v${v}, 読めるのは ${ok})。` +
       "M10b で素性が増えたため v1 の記録は再利用できません — " +
       "selfplay --calibrate で取り直してください",
   );
+}
+
+/**
+ * The one version gate, shared by `parseCalibration` and `scanCalibration`.
+ *
+ * v3 is a superset of v2 (see the header), so both are read; the fields v3 adds
+ * are absent rather than wrong on a v2 line, and every consumer of them
+ * (`scripts/dealin_export.ts`) checks for itself and names what is missing.
+ */
+function checkHeader(header: CalibHeader, path: string): void {
+  if (header.kind !== CALIB_KIND) throw new Error(`${path}: 較正記録ではありません`);
+  if (!CALIB_ACCEPTED.has(header.v)) throw versionError(path, header.v);
 }
 
 interface CalibFile {
@@ -568,10 +701,7 @@ export function parseCalibration(text: string, path = "<memory>"): CalibFile {
   const lines = text.split("\n").filter((l) => l.trim() !== "");
   if (lines.length === 0) throw new Error(`${path}: 空のファイルです`);
   const header = JSON.parse(lines[0]) as CalibHeader;
-  if (header.kind !== CALIB_KIND) throw new Error(`${path}: 較正記録ではありません`);
-  if (header.v !== CALIB_VERSION) {
-    throw versionError(path, header.v);
-  }
+  checkHeader(header, path);
   const records = lines.slice(1).map((l) => JSON.parse(l) as CalibRecord);
   return { header, records };
 }
@@ -605,10 +735,7 @@ export async function scanCalibration(
     if (line.trim() === "") return;
     if (header === null) {
       header = JSON.parse(line) as CalibHeader;
-      if (header.kind !== CALIB_KIND) throw new Error(`${path}: 較正記録ではありません`);
-      if (header.v !== CALIB_VERSION) {
-        throw versionError(path, header.v);
-      }
+      checkHeader(header, path);
       return;
     }
     onRecord(JSON.parse(line) as CalibRecord, header);

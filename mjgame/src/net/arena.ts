@@ -252,12 +252,16 @@ async function main() {
 
   const { ChampionChooser } = await import("./champion.ts");
   const ktune = brain === "champion" ? loadKtune(ktunePath) : undefined;
-  for (let g = 0; g < games; g++) {
+  // `games` counts COMPLETED games: a refused or dropped connection must not
+  // consume the budget, or one bad minute burns the whole batch in seconds.
+  let blanks = 0;
+  for (let g = 0; g < games;) {
     // A fresh brain per game: the shadow is per-game state, and champion
     // construction is two plain objects (no native memory).
     const chooser: ArenaChooser = brain === "champion"
       ? new ChampionChooser({ ktune })
       : new TsumogiriChooser();
+    let played = false;
     try {
       const r = await runArena(url, token, chooser, console.error, trace);
       if (r.rejections.length) {
@@ -266,14 +270,33 @@ async function main() {
       if (chooser instanceof ChampionChooser && chooser.fallbacks > 0) {
         console.error(`arena: フォールバック発動 ${chooser.fallbacks} 局`);
       }
+      played = r.games > 0;
       console.log(
-        r.games > 0
+        played
           ? `対局完了 (${g + 1}/${games}) 最終得点: ${r.scores?.join("/") ?? "?"}`
           : `対局は完了しなかった (${g + 1}/${games})`,
       );
+    } catch (e) {
+      // A transport failure mid-game used to kill the batch (main().catch →
+      // die). Survive it: the server holds the abandoned game for a while
+      // ("This bot is already connected to a game"), so back off before
+      // asking for the next one.
+      console.error(`arena: 対局が中断 (${String(e)})`);
     } finally {
       chooser.close?.();
     }
+    if (played) {
+      g++;
+      blanks = 0;
+      continue;
+    }
+    if (++blanks >= 6) {
+      console.error(`arena: 対局が始まらない状態が続く — ${g}/${games} で中断`);
+      break;
+    }
+    const wait = Math.min(30_000 * 2 ** (blanks - 1), 300_000);
+    console.error(`arena: ${wait / 1000}秒待って再接続 (${blanks}回目)`);
+    await new Promise((res) => setTimeout(res, wait));
   }
   logFile?.close();
 }

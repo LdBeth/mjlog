@@ -26,11 +26,28 @@ import {
 import type { AugmentedWeights, OracleChannel, ReadsProvider } from "./ai/augmented.ts";
 import type { CalibrationWriter } from "./ai/calibration.ts";
 import type { CalibRecord } from "./ai/calibration.ts";
-import { computedReads } from "./ai/computed.ts";
+import { computedReads, mergeComputed } from "./ai/computed.ts";
+import {
+  buildDealinHeads,
+  closeDealinHeads,
+  dealinRecordExtras,
+  learnedReads,
+  mergeDealin,
+} from "./ai/dealin.ts";
+import { mergeFold } from "./ai/fold.ts";
+import type { FoldSample } from "./ai/fold.ts";
+import type { FoldCalibrationWriter } from "./ai/foldcalib.ts";
+import { buildMlp, closeMlp } from "./ai/mlp.ts";
 import type { ComputedTraceRef, ComputedWeights } from "./ai/computed.ts";
 import { parseConsumerParams } from "./ai/consumer.ts";
 import type { ConsumerParams } from "./ai/consumer.ts";
-import { FROZEN_AUGMENT, FROZEN_COMPUTED, FROZEN_HEURISTIC } from "./ai/frozen.ts";
+import {
+  FROZEN_AUGMENT,
+  FROZEN_COMPUTED,
+  FROZEN_HEURISTIC,
+  FROZEN_RIICHI,
+  FROZEN_SENSE,
+} from "./ai/frozen.ts";
 import type { HandCalibrationWriter, HandSample } from "./ai/handcalib.ts";
 import { mergeHand } from "./ai/handvalue.ts";
 import type { HandWeights } from "./ai/handvalue.ts";
@@ -100,6 +117,17 @@ export interface MakePolicyOptions extends SeatSpec {
    * LABEL arrives later, from the round outcome, through the writer.
    */
   handSink?: (rec: HandSample) => void;
+  /**
+   * M13: where this seat's fold samples go, and how often the verdict is
+   * flipped on the way out. A "k" seat only (plan D11 — the frozen "h" letter
+   * takes no head and no lane).
+   *
+   * `foldEps` 0 (or absent) draws no random numbers, so a lane recorded at ε=0
+   * is bit-identical to a run with no lane at all — the recorder is an
+   * observer, exactly as `calibrate` and `handSink` are.
+   */
+  foldSink?: (rec: FoldSample) => void;
+  foldEps?: number;
 }
 
 /**
@@ -188,12 +216,33 @@ export function makePolicy(o: MakePolicyOptions): SeatPolicy {
     if (o.calibrate && !oracle) {
       die("--calibrate は selfplay / paired 専用です (真値を読む Table の tap が要ります)");
     }
+    // M14's deal-in heads. Same ownership rules as `foldHead` below — BUILT
+    // objects that may hold a native context, so they are constructed exactly
+    // once here (never inside `build`, which `withReads` re-runs every hanchan:
+    // a head built there would allocate a native context per game and free
+    // none of them) and freed in the seat's `close()`. "k" only (plan D11).
+    // `mergeDealin` throws on a malformed block — and on `{}`, which unlike
+    // every other section has NO identity: absent is the switch.
+    const dealinHeads = o.ktune?.dealin ? buildDealinHeads(mergeDealin(o.ktune.dealin)) : undefined;
+    // The seat's own value model, resolved once: `learnedReads` prices its
+    // rebuilt `dealinValue` (D5) through the same weights `computedReads`
+    // merges internally, so the head values a type exactly as this seat does.
+    const cw = dealinHeads
+      ? mergeComputed({ planner: o.plan ?? false, ...o.ktune?.computed })
+      : undefined;
     const build = (): ReadsProvider => {
       const traceRef: ComputedTraceRef = { t: null };
       const computed = computedReads(
         { planner: o.plan ?? false, ...o.ktune?.computed },
-        o.calibrate ? traceRef : undefined,
+        o.calibrate || dealinHeads ? traceRef : undefined,
       );
+      // M14: the learned read REPLACES computed's `dealinP`/`tenpaiP`, reading
+      // the trace `computed` fills — hence the same `traceRef`. It sits UNDER
+      // the recorder and the curriculum: those measure or mix what the seat
+      // actually consumes, which is this.
+      const reads = dealinHeads && cw
+        ? learnedReads(dealinHeads, cw, computed, traceRef)
+        : computed;
       // M9c curriculum. Still the 計算 seat — the reader is what changes: each
       // information group is answered by the oracle with probability 1−E and by
       // the counting reader with probability E, per decision. E=1 returns
@@ -203,25 +252,39 @@ export function makePolicy(o: MakePolicyOptions): SeatPolicy {
       // and `parseArgs` refuses the flag there rather than letting it be ignored.
       if (o.calibrate) {
         return calibrationReads(
-          computed,
+          reads,
           traceRef,
           // The recorder's own channel set, deliberately NOT `--oracle`: the three
           // truths the model makes claims about (tenpai, the ron mask, the
           // payment), whatever an "o" seat elsewhere in the run was allowed.
           oracleReads(oracle!.get, scorer, CALIBRATION_CHANNELS),
           o.calibrate,
+          // Only a seat RUNNING the heads can say what rows it was served, so
+          // the digest (`fh`) is gated on them: on a plain computed seat the
+          // callback is absent and the recorder costs exactly what it always
+          // did. (`--calibrate` beside a `dealin` block is refused at the CLI
+          // — D6 — so this is the in-code path only.)
+          dealinHeads ? dealinRecordExtras : undefined,
         );
       }
       if (o.curriculum !== undefined && oracle) {
         return curriculumReads(
           oracleReads(oracle.get, scorer, oracle.channels),
-          computed,
+          reads,
           o.curriculum,
         );
       }
-      return computed;
+      return reads;
     };
-    return withReads(build, (reads) =>
+    // M13's fold head. Unlike `hand`/`riichi` this is a BUILT object — it may
+    // hold a native context — so it is constructed exactly once, here, and
+    // freed in the seat's `close()` below. And unlike them it reaches a "k"
+    // seat ONLY (plan D11): the frozen "h" letter is the baseline this head has
+    // to beat, and a baseline that moved with the candidate would measure
+    // nothing. `mergeFold` throws on a malformed block; the loader's caller
+    // turns that into a die message.
+    const foldHead = o.ktune?.fold ? buildMlp(mergeFold(o.ktune.fold)) : undefined;
+    const seat = withReads(build, (reads) =>
       new AugmentedHeuristic(name, seed, reads, {
         // 順位効用 is merged AFTER the tuned vector so the two compose: a
         // `--ktune` file tunes the terms 順位効用 then scales.
@@ -236,7 +299,20 @@ export function makePolicy(o: MakePolicyOptions): SeatPolicy {
         riichi: riichiHead,
         sense: o.ktune?.sense,
         handSink: o.handSink,
+        fold: foldHead,
+        foldSink: o.foldSink,
+        ...(o.foldEps ? { foldExplore: { eps: o.foldEps } } : {}),
       }));
+    if (!foldHead && !dealinHeads) return seat;
+    // `withReads` returns a no-op `close`; the heads are the one thing this seat
+    // owns that the process would otherwise leak per seat, per run.
+    return {
+      ...seat,
+      close: () => {
+        if (foldHead) closeMlp(foldHead);
+        if (dealinHeads) closeDealinHeads(dealinHeads);
+      },
+    };
   }
   if (kind === "o") {
     // The oracle reads the round in play through `MatchOptions.tableRef`. There
@@ -271,10 +347,10 @@ export function makePolicy(o: MakePolicyOptions): SeatPolicy {
     // The one seat kind that holds memory the process does not free on its own.
     return { policy: p, reset: (s) => p.reset(s), close: () => p.close() };
   }
-  // "h" — 2026-08-25 EPOCH. The original hand-written heuristic seat is
-  // retired; the letter now builds a FROZEN copy of the default 計算 seat
-  // (`ai/frozen.ts`). Nothing configurable reaches it — no ktune, no hand
-  // block, no riichi head, no consumer/standings/planner/curriculum — which is
+  // "h" — 2026-08-29 EPOCH (first bound 2026-08-25). The letter builds a
+  // FROZEN copy of the champion (`ai/frozen.ts`): its riichi head and sense
+  // block are frozen objects, not ktune input. Nothing configurable reaches
+  // it — no ktune, no hand block, no consumer/standings/planner/curriculum — which is
   // the property that makes it a baseline: `resolveTable` routes the vectors
   // to "k" seats only, and `loadTable`/`argError` refuse the attempt loudly.
   // The one thing that still composes is `handSink`: a recording tap, not a
@@ -284,6 +360,8 @@ export function makePolicy(o: MakePolicyOptions): SeatPolicy {
     new AugmentedHeuristic(name, seed, reads, {
       weights: FROZEN_HEURISTIC,
       augment: FROZEN_AUGMENT,
+      riichi: FROZEN_RIICHI,
+      sense: FROZEN_SENSE,
       // Spelled out even though they equal today's constructor defaults: a
       // default is a LIVE value, and the frozen seat may not reference one —
       // if these ever drift for "k" experimentation, this seat must not move.
@@ -410,6 +488,23 @@ export interface HeadlessOptions {
    * heuristic-family code, and the pre-fit lane is played by plain `hhhh`.
    */
   handCalib?: HandCalibrationWriter;
+  /**
+   * M13: SEAT 0's fold recorder, one file for the whole run. A WRITER and not a
+   * path, for `handCalib`'s two reasons (a path would truncate at every seed of
+   * a `paired` run, and the label is the 局's own settlement, which only an
+   * object spanning the decision AND the outcome can attach).
+   *
+   * A "k" seat 0 only — narrower than `handCalib`'s k-or-h, because the head
+   * this lane fits reaches "k" alone (plan D11).
+   */
+  foldCalib?: FoldCalibrationWriter;
+  /**
+   * M13: the ε of the fold-flip lane, 0 < ε < 1. 0 (the default) is a pure
+   * observation lane: the recorder writes what the incumbent gate decided and
+   * nothing is perturbed. Only meaningful with `foldCalib`; the CLI refuses the
+   * flag on its own rather than letting it be ignored.
+   */
+  foldEps?: number;
 }
 
 /**
@@ -438,6 +533,8 @@ export interface Arm {
   readonly calibrate: CalibrationWriter | undefined;
   /** Set only when seat 0 is a heuristic-family seat under a 手牌価値 lane. */
   readonly handCalib: HandCalibrationWriter | undefined;
+  /** Set only when seat 0 is a "k" seat under an M13 fold lane. */
+  readonly foldCalib: FoldCalibrationWriter | undefined;
 }
 
 /**
@@ -469,6 +566,10 @@ export function openArm(seats: string | TableSpec, opts: HeadlessOptions = {}): 
   // — and "h" qualifies as well as "k": the pre-fit lane is plain `hhhh`.
   const handCalibOn = opts.handCalib !== undefined &&
     (table[0].kind === "k" || table[0].kind === "h");
+  // M13's lane. "k" ONLY: the head the lane fits is routed to "k" seats alone,
+  // and a lane recorded off the frozen baseline would fit a rule that seat can
+  // never carry.
+  const foldCalibOn = opts.foldCalib !== undefined && table[0].kind === "k";
   const wiring: OracleWiring = {
     get: () => ref.t,
     channels: opts.oracle ?? new Set(),
@@ -487,6 +588,8 @@ export function openArm(seats: string | TableSpec, opts: HeadlessOptions = {}): 
       oracle: wiring,
       calibrate: calibrateOn && seat === 0 ? opts.calibrate!.record : undefined,
       handSink: handCalibOn && seat === 0 ? opts.handCalib!.record : undefined,
+      foldSink: foldCalibOn && seat === 0 ? opts.foldCalib!.record : undefined,
+      foldEps: foldCalibOn && seat === 0 ? opts.foldEps : undefined,
     })
   );
   // Record ONLY neural seats: ppo.py recomputes behavior logp from --init, so a
@@ -510,6 +613,7 @@ export function openArm(seats: string | TableSpec, opts: HeadlessOptions = {}): 
     tableRef: writer || oracleSeats || curriculumOn || calibrateOn ? ref : undefined,
     calibrate: calibrateOn ? opts.calibrate : undefined,
     handCalib: handCalibOn ? opts.handCalib : undefined,
+    foldCalib: foldCalibOn ? opts.foldCalib : undefined,
   };
 }
 
@@ -521,6 +625,7 @@ export function openArm(seats: string | TableSpec, opts: HeadlessOptions = {}): 
 export function playGame(arm: Arm, seed: number): MatchResult {
   arm.calibrate?.beginGame(seed);
   arm.handCalib?.beginGame(seed);
+  arm.foldCalib?.beginGame(seed);
   for (const seat of SEATS) arm.built[seat].reset(seed * 4 + seat);
   // Without the hooks the ledger is always empty and the stats line would
   // report "違反 0件" no matter what actually happened.
@@ -530,6 +635,13 @@ export function playGame(arm: Arm, seed: number): MatchResult {
   // than replacing it, and strictly after it: the ledger entries the referee
   // adds there are part of the outcome the samples are labelled against.
   const handCalib = arm.handCalib;
+  // M13's labels arrive at the same seam and are attached in the same order:
+  // dojo referee first (its entries are part of the outcome), then the 手牌価値
+  // recorder, then the fold recorder. Both recorders read a finished Table and
+  // write nothing the other can see, so the order is a convention, not a
+  // dependency — but it is a FIXED convention, so two lanes of one run
+  // interleave the same way every time.
+  const foldCalib = arm.foldCalib;
   const r = runMatchSync(arm.policies, {
     seed,
     cfg: JANKI,
@@ -537,11 +649,12 @@ export function playGame(arm: Arm, seed: number): MatchResult {
     scorer,
     tableRef: arm.tableRef,
     ...hooks,
-    ...(handCalib
+    ...(handCalib || foldCalib
       ? {
         onRoundEnd: (t: Table, outcome: RoundOutcome) => {
           hooks.onRoundEnd(t, outcome);
-          handCalib.endRound(t, outcome);
+          handCalib?.endRound(t, outcome);
+          foldCalib?.endRound(t, outcome);
         },
       }
       : {}),
@@ -637,7 +750,14 @@ export function headless(
  */
 export type ArmSpec = Omit<
   HeadlessOptions,
-  "record" | "writer" | "calibrate" | "handCalib" | "ktuneB" | "consumerB" | "tableB"
+  | "record"
+  | "writer"
+  | "calibrate"
+  | "handCalib"
+  | "foldCalib"
+  | "ktuneB"
+  | "consumerB"
+  | "tableB"
 >;
 
 /** The one message a worker receives: its arm, and the games it owns. */

@@ -10,10 +10,11 @@
 // opposite of `test/champion_test.ts`, whose pins DO regenerate on deliberate
 // promotion: champion.json is the present, the league is the past.
 //
-// (frozen-0825, the first snapshot, is the same seat as the epoch-frozen "h"
-// letter — its fingerprints below EQUAL frozen_test's EPOCH_PIN. That equality
-// is the mechanism check of the JSON snapshot path, and it is expected to hold
-// forever: both are never-regenerate pins of the same 2026-08-25 seat.)
+// (The newest snapshot is the same seat as the epoch-frozen "h" letter — its
+// fingerprints below EQUAL frozen_test's EPOCH_PIN. That equality is the
+// mechanism check of the JSON snapshot path. It held for frozen-0825 from
+// 2026-08-25 to 08-29, and holds for frozen-0829 since the 08-29 re-bind;
+// frozen-0825 keeps its own pins forever regardless.)
 
 import { assertEquals } from "@std/assert";
 import { headless } from "../src/harness.ts";
@@ -47,6 +48,15 @@ const LEAGUE_PIN: Record<string, Record<number, string>> = {
     101: "61400/22200/18800/17600#b32bd33b",
     505: "32700/20100/21200/46000#03e1b70e",
     909: "65400/28600/10000/16000#8f05e7a0",
+  },
+  // 2026-08-29 — the promoted champion (arena vector minus the arena-only
+  // buffer overrides): calibrated computed block, 最終形 riichi head, 色読み
+  // sense trio, liveYakuhai 200, keepTriplet 1. Equals frozen_test's
+  // EPOCH_PIN (the "h" seat was re-bound to this champion the same day).
+  "frozen-0829.json": {
+    101: "42100/30500/36400/11000#03b3b4bb",
+    505: "40700/23500/41100/14700#07a81a00",
+    909: "26100/34500/22000/37400#6b052490",
   },
 };
 

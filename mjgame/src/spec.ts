@@ -19,7 +19,9 @@ import type { AugmentedWeights } from "./ai/augmented.ts";
 import type { ComputedWeights } from "./ai/computed.ts";
 import type { ConsumerParams } from "./ai/consumer.ts";
 import { parseConsumerParams } from "./ai/consumer.ts";
+import type { DealinWeights } from "./ai/dealin.ts";
 import type { HandWeights } from "./ai/handvalue.ts";
+import type { FoldWeights } from "./ai/fold.ts";
 import type { HeuristicWeights } from "./ai/heuristic.ts";
 import type { RiichiWeights } from "./ai/riichi.ts";
 import type { SenseWeights } from "./ai/sense.ts";
@@ -64,6 +66,25 @@ export interface KTune {
    * replaced.
    */
   sense?: Partial<SenseWeights>;
+  /**
+   * M13's fold head — the learned push/fold decision (`ai/fold.ts`). A switch
+   * like `hand`/`riichi`/`sense`: ABSENT means `computeFold` ends in the
+   * comparison it always ended in, bit for bit; `{}` merges to `INIT_FOLD`,
+   * which reproduces that same verdict by construction (one linear layer,
+   * `w[margin] = −1`). A weight BLOCK here, not a built head: `harness.ts`
+   * builds it once per seat, because the head may hold native memory.
+   */
+  fold?: Partial<FoldWeights>;
+  /**
+   * M14's learned deal-in read (`ai/dealin.ts`): P(opponent i rons type t) and
+   * its own tenpai head, served in place of the closed-form 計算 estimate.
+   * UNLIKE every other section `{}` is an ERROR, not an identity — a learned
+   * head has no weight setting that reproduces the counting model, so ABSENT is
+   * the switch (bit-identical play) and an empty block can only be a mistake.
+   * Two `MlpSpec`s plus an `fv`, inline (D2); like `fold` a weight BLOCK, built
+   * once per seat by `harness.ts` because a head may hold native memory.
+   */
+  dealin?: Partial<DealinWeights>;
 }
 
 /**
@@ -86,7 +107,8 @@ export function loadKtune(path: string, flag = "--ktune"): KTune {
   }
   if (typeof json !== "object" || json === null || Array.isArray(json)) {
     die(
-      `${flag} はオブジェクト {heuristic, augment, computed, hand, riichi, sense} である必要があります: ${path}`,
+      `${flag} はオブジェクト {heuristic, augment, computed, hand, riichi, sense, fold, dealin} ` +
+        `である必要があります: ${path}`,
     );
   }
   // Sections only — the contents pass through verbatim. (`riichi` was silently
@@ -100,6 +122,8 @@ export function loadKtune(path: string, flag = "--ktune"): KTune {
     hand: k.hand,
     riichi: k.riichi,
     sense: k.sense,
+    fold: k.fold,
+    dealin: k.dealin,
   };
 }
 

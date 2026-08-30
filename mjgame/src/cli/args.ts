@@ -146,6 +146,25 @@ export interface Args {
    */
   handcalib: string;
   /**
+   * `--foldcalib=PATH`: seat 0 (a "k" seat) writes one record per PUSH/FOLD
+   * decision to PATH — the 37 features the M13 head reads, what the seat's own
+   * rule decided, what was actually played, and the 局's own settlement as the
+   * reward. Unlike `--calibrate`/`--handcalib` this lane can PERTURB the seat:
+   * see `--fold-eps`. With ε 0 (the default) it is an observer like the other
+   * two and the run is bit-identical to one without the flag.
+   * `paired` records the A arm only.
+   */
+  foldcalib: string;
+  /**
+   * `--fold-eps=X`, 0 < X < 1: flip the fold verdict with probability X, on a
+   * random stream of the seat's own. This is the exploration that makes the
+   * lane a CONTEXTUAL BANDIT rather than a log of one policy's opinions — with
+   * no flips there is no counterfactual and nothing to fit. Refused without
+   * `--foldcalib`: a run that played worse and recorded nothing would be a
+   * waste nobody asked for.
+   */
+  foldEps: number;
+  /**
    * `--export=PATH`: write the played match(es) as Tenhou mjlog XML plus a
    * `.mjgame.json` sidecar, so ../mjrender can render and comment our own games.
    * PATH is a basename unless it already ends in `.xml`; a selfplay run of more
@@ -200,6 +219,8 @@ export function parseArgs(argv: string[]): Args {
     consumerBPath: "",
     calibrate: "",
     handcalib: "",
+    foldEps: 0,
+    foldcalib: "",
     exportPath: "",
     json: false,
     jobs: 1,
@@ -270,6 +291,15 @@ export function parseArgs(argv: string[]): Args {
     } else if (arg.startsWith("--handcalib=")) {
       a.handcalib = arg.slice(12);
       if (!a.handcalib) die("--handcalib には書き出し先のパスが要ります");
+    } else if (arg.startsWith("--foldcalib=")) {
+      a.foldcalib = arg.slice(12);
+      if (!a.foldcalib) die("--foldcalib には書き出し先のパスが要ります");
+    } else if (arg.startsWith("--fold-eps=")) {
+      const v = Number(arg.slice(11));
+      if (!Number.isFinite(v) || !(v > 0) || !(v < 1)) {
+        die(`--fold-eps は 0 < X < 1 の実数: ${arg.slice(11)}`);
+      }
+      a.foldEps = v;
     } else if (arg.startsWith("--export=")) {
       a.exportPath = arg.slice(9);
       if (!a.exportPath) die("--export には書き出し先のパス (拡張子なしでも可) が要ります");
@@ -306,10 +336,15 @@ export function parseArgs(argv: string[]): Args {
 /** The subset of `Args` the cross-flag rules below actually read. */
 export type ArgCheck =
   & Pick<Args, "cmd" | "seats" | "calibrate">
-  & Partial<Pick<Args, "handcalib">>
+  & Partial<Pick<Args, "handcalib" | "foldcalib" | "foldEps">>
   & Partial<
     Pick<
       Args,
+      // The LOADED seat-0 vectors, not just their paths: `parseArgs` reads the
+      // files before it calls `argError`, and M14's D6 rule is about a SECTION
+      // inside one of them (`dealin`), which a path cannot answer.
+      | "ktune"
+      | "table"
       | "curriculum"
       | "consumerBPath"
       | "ktuneBPath"
@@ -338,6 +373,13 @@ export type ArgCheck =
  * than one that is missing — and returning the message instead of calling
  * `die` is what lets a test read the rules without spawning a process.
  */
+/** The vector seat 0 will actually carry — from `--ktune`, or from a `--table`
+ *  file's `seats[0].ktune`. Both spellings reach the same seat, so a rule about
+ *  a section of that vector has to read both. */
+function ktuneOf(a: ArgCheck): KTune | undefined {
+  return a.table ? a.table[0].ktune : a.ktune;
+}
+
 export function argError(a: ArgCheck): string | null {
   // `--table` is the modular spelling of the whole per-seat surface, so every
   // flag it subsumes conflicts instead of composing: a table is a COMPLETE
@@ -480,6 +522,13 @@ export function argError(a: ArgCheck): string | null {
       // a curriculum would grade a seat nobody ships.
       return "--calibrate と --curriculum は併用できません (較正するのは素の計算の読みです)";
     }
+    if (ktuneOf(a)?.dealin) {
+      // M14 D6, and the third member of the same family as the two rules above:
+      // a lane recorded under the head being fitted is a lane censored by that
+      // head's own reads — `handvalue.ts`'s lesson, measured (+0.11 WORSE).
+      return "--calibrate と dealin ブロックは併用できません " +
+        "(較正レーンは素の計算の読みの上で録ります — 学習ヘッドは自分の出力で学習できません)";
+    }
   }
   // The hand recorder needs far less than the deal-in one — no oracle tap, since
   // the label is the round's own result — but it still needs a seat that HAS a
@@ -499,6 +548,27 @@ export function argError(a: ArgCheck): string | null {
       // rather than shipped with an ordering nobody can reproduce.
       return "--handcalib と --jobs は併用できません (手牌価値の記録は1スレッドで書きます)";
     }
+  }
+  // M13's lane. Narrower than the hand lane on one axis (the head routes to "k"
+  // seats only, so an "h" seat 0 has nothing to record) and wider on another:
+  // `--fold-eps` deliberately PERTURBS the seat, so it is refused on its own.
+  if (a.foldcalib) {
+    if (a.cmd !== "selfplay" && a.cmd !== "paired") {
+      return "--foldcalib は selfplay / paired 専用です (局の結末を報酬にするので、通しで打つ駆動が要ります)";
+    }
+    if (a.seats[0] !== "k") {
+      return `--foldcalib は席0が k席 (計算) のときだけ使えます: --seats=${a.seats}\n` +
+        "押し引きヘッドが載るのは k席だけなので、他の席で録っても当てはめる先がありません。";
+    }
+    if ((a.jobs ?? 1) > 1) {
+      // The same seam problem as `--handcalib`: a fold record is buffered until
+      // its round ends, so four workers would flush four independent buffers
+      // into one file in wall-clock order. Refused rather than shipped with an
+      // ordering nobody can reproduce.
+      return "--foldcalib と --jobs は併用できません (押し引きの記録は1スレッドで書きます)";
+    }
+  } else if (a.foldEps) {
+    return "--fold-eps は --foldcalib と一緒に使います (記録しないのに手を曲げても仕方がありません)";
   }
   return null;
 }

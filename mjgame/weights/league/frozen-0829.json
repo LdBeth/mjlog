@@ -1,0 +1,136 @@
+{
+  "heuristic": {
+    "shanten": 1000,
+    "ukeire": 12,
+    "ukeireType": 4,
+    "dora": 60,
+    "yakuhaiPair": 40,
+    "isolatedHonor": 6,
+    "danger": {
+      "安全": 0,
+      "危険度低": 30,
+      "危険度中": 90,
+      "危険度高": 200
+    },
+    "firstHonor": 4000,
+    "notenDora": 2500,
+    "katagari": 1500,
+    "yakulessTenpai": 4000,
+    "tsumogiriLock": 2500,
+    "foldEfficiency": 0.05,
+    "foldDanger": 10,
+    "bufferTight": 0.35,
+    "bufferLow": 0.7,
+    "liveYakuhai": 200,
+    "keepTriplet": 1
+  },
+  "augment": {
+    "lambda": 0.25,
+    "floor": 0.5,
+    "drawRealize": 150,
+    "futureDora": 30,
+    "futureGenbutsu": 120,
+    "planKeep": 5000,
+    "planAdvance": 200,
+    "planRelock": 1.18
+  },
+  "computed": {
+    "junmeBuckets": [
+      6,
+      9,
+      12
+    ],
+    "tenpaiPrior": [
+      [
+        0.008476169622625462,
+        0.034012918340418204,
+        0.06484941973915648,
+        0.086560433313427
+      ],
+      [
+        0.034256309775365285,
+        0.10750323831971202,
+        0.1830046191173242,
+        0.25414381796772045
+      ],
+      [
+        0.09461867303987682,
+        0.28548352714751346,
+        0.3734662907461872,
+        0.4462928558957687
+      ],
+      [
+        0.15026267689139716,
+        0.3838139685285288,
+        0.5304661888525666,
+        0.6007422173445008
+      ],
+      [
+        0.2930658967925937,
+        0.5065206587529641,
+        0.6928527303236185,
+        0.8059650060323581
+      ]
+    ],
+    "tenpaiFloor": 0.25,
+    "yakuhaiTenpai": 0.2058306228886018,
+    "tenpaiOtherRiichi": 0.5711428365918875,
+    "tenpaiMeldDora": 0.9979491965375276,
+    "shapePrior": {
+      "リャンメン": 0.45,
+      "カンチャン": 0.20377052961446657,
+      "ペンチャン": 0.08961927548799176,
+      "シャンポン": 0.11660918664922965,
+      "タンキ": 0.07975393562248119
+    },
+    "yakuhaiShanpon": 1.1955729343288835,
+    "honitsuHot": 1.6,
+    "honitsuCold": 0.9287666603741758,
+    "toitoiPair": 1.5,
+    "toitoiRun": 0.6712136369056616,
+    "sujiHalfSurvive": 0.019962244038466775,
+    "sujiFullSurvive": 0.019832688654681924,
+    "doraPair": 1.178733675111213,
+    "doraBridge": 1.047007270580399,
+    "dealinScale": 0.065,
+    "waitNormalize": true,
+    "expWaitMass": 1.4863907046363236,
+    "yakuFactor": {
+      "riichi": 1,
+      "open": 0.867177745357772,
+      "damaten": 0.5891695829719623
+    },
+    "valueRiichi": 5227.359936315767,
+    "valueDamaten": 3032.201916638026,
+    "valueOpen": 1523.5218844471492,
+    "valueHonitsu": 1410.5283334621101,
+    "valueYakuhai": 291.33660177049876,
+    "valuePerDora": 2041.965063394323,
+    "valueDealer": 1.428763959930773,
+    "valueCap": 16266.435799411049,
+    "valuePerHonba": 300,
+    "planner": false
+  },
+  "riichi": {
+    "bias": 0.1,
+    "ev": 0,
+    "pwin": 0,
+    "value": 0,
+    "liveWaits": 0,
+    "waitTypes": 0,
+    "junme": 0,
+    "turnsLeft": 0,
+    "dora": 0,
+    "dealer": 0,
+    "oppRiichi": 0,
+    "kyotaku": 0,
+    "improvable": 0,
+    "tenpaiHeld": 0.5,
+    "holdShape": -1
+  },
+  "sense": {
+    "someRisk": 200,
+    "somePressure": 0.5,
+    "chiitoiTax": 500
+  }
+}
