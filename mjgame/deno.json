@@ -11,6 +11,7 @@
     "build-native": "clang -O3 -dynamiclib -framework Accelerate -o native/librlnet.dylib native/rlnet.c",
     "build-kernel": "sh native/build_kernel.sh",
     "build-mlp": "sh native/build_mlp.sh",
+    "build-ev": "sh native/build_ev.sh",
     "fmt": "deno fmt"
   },
   "imports": {

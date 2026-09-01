@@ -83,8 +83,11 @@ export const USAGE = `mjgame — 雀鬼流ルールの4人麻雀 (人間1 + CPU3
                       両腕は席0だけが異なる、が対照実験の定義 (M11 の交絡の教訓)。
                       --ktune-b / --consumer-b とは併用不可
   --ktune=PATH        k席の感性ベクトル {heuristic, augment, computed, hand,
-                      riichi} のJSON。k席だけに効く (h席は凍結済み・2026-08-25 —
-                      hand/riichi の決定モデル節も k席専用になった)。
+                      riichi, sense, fold, dealin, ev} のJSON。k席だけに効く
+                      (h席は凍結済み・2026-08-25 — hand/riichi の決定モデル節も
+                      k席専用になった)。ev (M15の期待値核) は libmjev が必須で、
+                      ev.discard は consumer/hand/fold/--foldcalib と、
+                      ev.riichi は riichi 節と併用不可 (置き換える側なので)。
                       paired では A腕の k席だけに効き、対照の B腕 (hhhh) には
                       決して渡らない。play では k席と助言席 (既定は
                       weights/champion.json) に効く。
@@ -156,6 +159,20 @@ export const USAGE = `mjgame — 雀鬼流ルールの4人麻雀 (人間1 + CPU3
                       --fold-eps なしなら打牌は一切変わらない (乱数も引かない)。
                       読むのは scripts/fold_report.ts、当てはめは train/fold_fit.py。
                       --jobs とは併用不可
+  --evcalib=PATH      M15b: 席0 (k席) の自摸番ごとに「EV核が読む13枚形の全入力
+                      (ints/dbls の wire そのもの)」と「DEFAULT_EV の下での
+                      P(聴牌)/P(和了)/E[打点]/E[放銃コスト]」、そして局の結末を
+                      対にした記録を JSONL で書き出す。selfplay / paired 専用で、
+                      paired では A腕だけ。打牌は一切変わらない (記録は out-param —
+                      席は核を持たず、wire を組んで書き手に渡すだけ)。
+                      当てはめは母集団スカラー (ronFactor / oppHazard / oppGrowth /
+                      dealinRate / tsumoShare / foldHazard) で、読むのは
+                      scripts/ev_fit.ts。
+                      ev ブロックとは併用不可 — レーンは EV核 を積んでいない
+                      素の席で録る (自分の降りで打ち切った局は当てはめに使えない)。
+                      1行あたり約1.7KB (wire が528数値) なので 1半荘 約220KB
+                      (2000半荘のレーンで 448MB — 作業用ディレクトリに)。
+                      --jobs とは併用不可
   --fold-eps=X        M13: 押し引きの判定を確率 X (0<X<1) で反転する。席が持つ
                       専用の乱数列から1判断につき最大1回引く — 対局用の乱数
                       (--epsilon) には触らないので、シードと打牌の対応は保たれる。
@@ -174,7 +191,7 @@ export const USAGE = `mjgame — 雀鬼流ルールの4人麻雀 (人間1 + CPU3
                       --jobs=1 とバイト単位で同一 (違うのは所要時間の行だけ)。
                       --games より大きい N は --games に丸める。
                       --record / --export とは併用可、
-                      --calibrate / --handcalib / --foldcalib とは併用不可
+                      --calibrate / --handcalib / --foldcalib / --evcalib とは併用不可
   --json              paired の結果を1行のJSONで出す (表の代わり)。
                       scripts/tune.ts が読む機械可読出力
   --weights=PATH      n席が読む manifest.json (既定 weights/manifest.json)。

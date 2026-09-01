@@ -152,11 +152,15 @@ export function pairedRun(
   // PERTURBS the seat, so a control arm carrying it would not be the incumbent
   // at all. (`foldEps` alone is inert — `openArm` reads it only when a
   // `foldCalib` writer is present.)
+  // `evCalib` goes with them for `handCalib`'s reason plus one of its own: the
+  // writer OWNS an `EvCore`, and two arms sharing it would evaluate the control
+  // arm's wires into the candidate's file.
   const {
     record: _record,
     calibrate: _calibrate,
     handCalib: _handCalib,
     foldCalib: _foldCalib,
+    evCalib: _evCalib,
     ...shared
   } = opts;
   let armB: Arm;

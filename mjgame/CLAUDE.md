@@ -27,12 +27,15 @@ lives in `src/cli/usage.ts`. Notable: `--jobs=N` (selfplay only) plays games in
 worker threads with **byte-identical** output to sequential; `--export=PATH`
 (play/selfplay) writes a Tenhou mjlog XML + `.mjgame.json` sidecar per game;
 `--jobs` with `--calibrate` is refused (the calibration writer has no per-game
-buffering seam), and so is `--handcalib` / `--foldcalib` (both buffer per
-ROUND). `--foldcalib=PATH` (+ `--fold-eps=X`) records the M13 push/fold lane
-off a "k" seat 0; without `--fold-eps` it changes nothing it records.
-`--calibrate` is also refused beside a ktune carrying M14's `dealin` block (the
-lane must be recorded on the plain 計算 read). Flags a command would silently ignore are rejected by
-`argError` in `src/cli/args.ts` — keep it that way when adding flags.
+buffering seam), and so is `--handcalib` / `--foldcalib` / `--evcalib` (all
+three buffer per ROUND). `--foldcalib=PATH` (+ `--fold-eps=X`) records the M13
+push/fold lane off a "k" seat 0; without `--fold-eps` it changes nothing it
+records. `--evcalib=PATH` records M15b's EV核 lane off a "k" seat 0.
+`--calibrate` is also refused beside a ktune carrying M14's `dealin` block, and
+`--evcalib` beside one carrying an `ev` block (in both cases the lane must be
+recorded on the plain read, never under the component being fitted). Flags a
+command would silently ignore are rejected by `argError` in `src/cli/args.ts` —
+keep it that way when adding flags.
 
 ## Layout
 
@@ -86,7 +89,21 @@ lane must be recorded on the plain 計算 read). Flags a command would silently 
   set by paired sweeps, not by the fit (see `runs/hand/SWEEP.md`). FIT ONLY
   on a lane played WITHOUT the hand block: labels recorded under the folding
   policy are censored by its own folds, and a refit on them measured +0.11
-  WORSE. `weights/champion.json` is BY CONVENTION the current champion: the
+  WORSE.
+  `evcalib.ts` M15b's EV核 lane (`--evcalib=PATH`, one packed
+  `mjev_eval_rest` wire per turn decision + the 局's labels; the WRITER owns
+  the `EvCore`, the recording seat carries none, and the header stamps
+  `evAbi` + `engineHash` so a rebuilt DP makes the reproduction check a
+  NOTICE and never a refusal). Fit: `scripts/ev_fit.ts`.
+  `ev.ts` / `evparams.ts` / `evlayout.ts` / `evpack.ts` the M15
+  expected-value core's TypeScript half — the FFI front door (no
+  fallback: an `ev` block REQUIRES `native/libmjev`), the `ev` ktune
+  block, the ONE wire layout mirrored offset-for-offset by
+  `native/mjev.cc`, and the pure-TS packer that turns an `Observation`
+  plus three protected policy hooks (`dealinProbOf`, `dealinCostPts`,
+  `hiddenInfoOf`) into that wire. Absent block ⇒ no FFI is touched and
+  the seat is bit-identical.
+  `weights/champion.json` is BY CONVENTION the current champion: the
   TUI 助言 advisor always reads it (`src/main.ts`; play's CPU seats carry no
   vector) — never point it elsewhere; improve the file. Promotion requires
   controlled paired evidence (opponents held fixed) and deliberately
@@ -137,7 +154,10 @@ lane must be recorded on the plain 計算 read). Flags a command would silently 
   Decisions). The JIS number row (`1-9 0 - ^ ¥`, `\` = ¥) discards hand slot
   1–13 in one keystroke; `t` is the drawn tile; ←→/Enter remain.
 - **`native/`**: `mjkernel.cc` (ABI 2: `mj_shanten`, `mj_ukeire_mask`,
-  `mj_shape_masses`), `rlnet.c`, and `mlp.c` (ABI 1: the small learned heads
+  `mj_shape_masses`), `mjev.cc` (ABI 1: M15's expected-value core —
+  scorer, shanten, and the discard/fold DP; re-entrant, every cache
+  inside the context, no globals and no warm-up, so each worker dlopens
+  its own image and each seat owns its ctx), `rlnet.c`, and `mlp.c` (ABI 1: the small learned heads
   behind `src/ai/mlp.ts` — plain C loops, NOT Accelerate, because a head's sign
   decides a fold and BLAS reorders sums; `test/mlp_native_test.ts` grades it at
   zero tolerance). Built with `-ffp-contract=off` — required for bit-exact
@@ -155,6 +175,15 @@ lane must be recorded on the plain 計算 read). Flags a command would silently 
   **bit-for-bit** (no tolerance) — the TS path stays as reference and no-FFI
   fallback. FFI is gated on `MJGAME_NATIVE=1` + `--allow-ffi`; a stale dylib
   degrades silently to TS unless the env var demands native.
+  *Exception (M15, owner decision 2026-08-30)*: `native/mjev.cc` has NO
+  TypeScript twin; its scorer and shanten are bit-exact against
+  `yaku.ts`/`fu.ts`/`score.ts`/`kernel.ts`, the DP is graded by analytic
+  cases and paired play. A ktune carrying `ev` REQUIRES the dylib +
+  `--allow-ffi` and refuses `MJGAME_NATIVE=0`; absent, the seat is
+  bit-identical and no FFI is touched. Determinism holds the way it does
+  everywhere else here: the DP is a pure function of its inputs, with a
+  fixed exploration order, a node cap that truncates deterministically,
+  per-context caches and no threads — so `--jobs=N` identity is unaffected.
 - **Pinned fingerprints**: `computed_test`/`calibration_test` pin whole-hanchan
   decision streams. A legitimate behavior change must regenerate them
   deliberately, with the reason documented in the test.
@@ -163,6 +192,292 @@ lane must be recorded on the plain 計算 read). Flags a command would silently 
 
 ## Decisions
 
+- **M15 — 計算の極致 (2026-08-30, owner-directed)**: the 計算 seat's discard
+  choice was still a hand-written linear surrogate (`−1000·shanten +
+  12·ukeire + 4·types + 60·dora + …`) glued to a defence term by two
+  multipliers — nothing in it a probability or a point value. Two earlier
+  results were symptoms of the FORM being wrong rather than of the weights:
+  M10's post-calibration searches all returned the defaults ("the surface is
+  flat"), and M11's correct value estimate had no place to act when poured in
+  through one scalar. The replacement is an exact expected-value DP in C++
+  (`native/mjev.cc`, `libmjev`) over the state `(hand counts, own draws taken,
+  aka held, riichi)`: exact enumeration to 2向聴 with a closed-form tail
+  beyond, a fold option at every state, and a root that reports `{total, dama,
+  riichi, foldLine}` per candidate plus `bestPush`/`bestFold`.
+  **D1 pool by net absorption** — own future draws are a uniform sequence
+  without replacement from `publicUnseen`, keyed by the hand's counts.
+  **D2 re-entrant** — the shanten group-word cache lives INSIDE the context
+  (no globals, no lock, no warm-up), unlike `mjkernel.cc`.
+  **D3 `ev` refuses what it supersedes** — sub-switches
+  `ev.discard`/`riichi`/`calls`; `discard` refuses
+  `consumer`/`hand`/`fold`/`--foldcalib`, `riichi` refuses the M12 `riichi`
+  block, so unit C is graded as `champion − riichi + ev` and the substitution
+  is explicit.
+  **D4 units are points** — `pointsPerScore` (4 = 1/`augment.lambda`) converts
+  `dojoCost`/`senseLineTax`/the planner bonuses into points, so a 4000-score
+  veto is a 16,000-point one.
+  **D5 deterministic budget** — `maxNodes` 200k value states and a fixed
+  exploration order; beyond the budget every state takes the closed-form tail,
+  so the answer stays a pure function of the inputs.
+  **D6 the "h" seat is untouched** — `frozen.ts` gains nothing.
+  **D7 hidden information is first-class and optional** — `drawDist[K][34]`,
+  `poolOverride[34]`, `uraDist[34]`, `nextDoraDist[34]`, each behind its own
+  flag so absence stays distinguishable from a uniform vector. The oracle's
+  one-hots and a future LEARNED hidden-information module reach the engine
+  through the same `hiddenInfoOf` hook and the engine never learns which
+  producer filled them; `riichiNextDraw` is deliberately NOT consumed (it is
+  per-opponent sequential information).
+  THE CONSTITUTION HOLDS: 計算 stays exact counting over public facts,
+  opponent hazards are POPULATION rates over M14's
+  `tenpaiP`/`dealinP`/`dealinValue`/`expLoss` (never sequential inference),
+  and the doctrine filters (`compliantDiscards`, `keepTriplet`, `dojoCost`,
+  `senseLineTax`, `hasYakuProspect`, the kan vetoes) stay OUTSIDE the price as
+  vetoes — `chooseDiscard` argmaxes the DP's price over the set the filters
+  already narrowed, and the root deal-in cost is packed by TypeScript
+  (`dealinCostPts` = `riskOf`'s arithmetic in points, 安全 free) so no dojo
+  ruling gets a second home in C++.
+  APPROXIMATIONS, all flagged in the code: the pool is off by ≤1 copy on
+  draw-then-cut-same-type paths (D1); calls and rinshan draws do not shift
+  turns; aka are not depleted from the pool; future (non-root) discards take a
+  base deal-in rate rather than a per-tile estimate; the fold line ignores
+  held 現物 beyond the root; ura is a counting expectation unless `uraDist` is
+  supplied; 流局 carries no 連荘 value.
+  STATUS: units A–D are BUILT. A = scorer + shanten in C++; B = discard +
+  fold (the packer, `computeFold`, `chooseDiscard`, the three hooks, the
+  wiring tests, a 決定/秒 + nodes line on `bench`); C = riichi — inside
+  `wantRiichi`'s four unchanged gates the verdict is
+  `ev.riichi[ty] > ev.dama[ty] + riichiMargin` for the CHOSEN tile and the
+  M12 head is not consulted (a non-finite pair means "riichi is not on offer
+  for that candidate" and reads as no); D = calls — `chooseCall` keeps
+  `hasYakuProspect` and the referee's compliance test as VETOES but REPLACES
+  the "must improve shanten" acceptance rule with
+  `bestPush(post-call) − V_pass > callMargin` (a 役牌ポン that buys no step
+  can still be worth taking), and `chooseKan` prices the 暗槓 the dojo
+  already cleared as `eval_rest(post-kan, kanDoraOn) − bestPush >
+  callMargin`; `mandatoryKan` is untouched and the C7 planner's `chooseCall`
+  override keeps precedence while a target is locked. The extra call/kan
+  roots are counted in `evStats`, so the bench line stays honest.
+  FIRST GRADE (2026-08-30, unit B only: champion + `ev{riichi:false,
+  calls:false}` vs champion, 600 paired games, seed 20901): 道場順位差
+  **+0.475 [+0.362, +0.588]** — the EV seat is clearly WORSE (席0 平均点
+  24,951 vs 31,038; 和了率 ~9% vs ~21%; 聴牌率 ~20% vs ~32%; 放銃率 ~10% vs
+  ~12%; 平均和了打点 8,300-11,300 vs 6,300; 8000点未満 43 vs 25). Getting
+  here took four engine rounds, each found by replaying decisions against the
+  champion (scratchpad diag scripts): a tail that priced worse shanten higher
+  (rung collapse), a root deal-in cost ADDED instead of subtracted, the fold
+  option absorbed into `O_TOTAL` (every candidate collapsed to one number), a
+  shape-arena starvation freezing shapes at 0, the growth term tripled (my
+  plan text), and a single tail calibration that was 2-3× too generous at
+  3向聴+ (now `TAIL_CAL[s]` per rung, measured against the exact DP: advance
+  beats keep on 100%/93% of random 3/4向聴 roots). The engine is now
+  INTERNALLY CONSISTENT (seam ratio ~1.0 at 1-4向聴, no truncation at
+  `maxNodes` 60000, `handOutlook` parity for the tail chain, scorer bit-exact,
+  ~600 決定/秒). What remains is the MODEL: the seat builds expensive slow
+  hands — E[value|win] is realistic (a doraless standard hand ≈ 1,800, a
+  七対子 shape ≈ 7,800) while the incumbent's flat 4,200-7,000 value never
+  discriminates, so speed wins there and value wins here; and the population
+  hazard scalars (`ronFactor` 0.5 gives P(win) 0.89 from a ryanmen tenpai in
+  12 turns — ≈0.19 would give 0.65; `oppGrowth` retires a third of a quiet
+  hand's mass) were never fitted to THIS model — a 18-cell screen over
+  ronFactor × oppGrowth × dealinRate moved nothing (all cells 3.0-3.2 on a
+  60-game smoke). Next lever: FIT the `ev` scalars (and the value/speed
+  realism) against recorded ground truth — the handcalib lane records
+  HandFacts + won/tenpai/dealt-in per decision — rather than screening; and
+  audit whether the exact path's P(win) from tenpai matches the champion's
+  realised rates. The champion is UNTOUCHED — `champion_test` asserts
+  `k.ev === undefined` until the owner's word, no frozen/league pin moves at
+  any step, and `weights/ev-default.json` is a bench/smoke vector, never a
+  candidate.
+
+  M15b FIT — THE LANE AND THE FITTER ARE BUILT, THE FIT IS ON HOLD
+  (2026-08-30). The FIRST GRADE's next lever was "fit the `ev` scalars against
+  recorded ground truth rather than screening", and the machinery for it now
+  exists end to end. What does NOT exist is a fitted vector worth carrying: a
+  full review of `native/mjev.cc` found defects (root-discard furiten
+  unpriced, the tail/exact seam still deciding the fold, the fold verdict
+  inert), so every number below is an artefact of an engine that is being
+  repaired. NOTHING WAS GRADED — no paired run against the champion, no
+  candidate in `weights/` (the fit's output sits in `runs/ev/ev-0830-MOOT.json`
+  under that name on purpose), and the champion is untouched.
+  THE LANE (`ai/evcalib.ts`, `--evcalib=PATH`, selfplay/paired, "k" seat 0, no
+  `--jobs`) writes one line per TURN decision of seat 0: the FULL packed
+  `mjev_eval_rest` wire of the resting 13-tile shape the seat chose — `ints`
+  (208) and `dbls` (320, hidden block zero), which is by construction
+  everything the DP is allowed to see (`evlayout.ts` IS that specification) —
+  plus the 局's ground truth for that seat (`won`/`winPoints`/`dealtIn`/
+  `dealtInPoints`/`oppWon`/`outcome`/`endJunme`/`tenpaiEnd`) and the bucket
+  keys (`sh`/`junme`/`T`). `tenpaiEnd` is judged the way the 局 ended: the
+  table's own 流局 judgement, 1 when we won, and `shanten(seat 0's hand) ≤ 0`
+  when somebody else ended it.
+  THE M11 LESSON, ENFORCED: `--evcalib` REFUSES any `ev` block (sub-switches
+  included) — the lane must be the PLAIN champion's continuation of the hand,
+  because a lane played by the DP is censored by the DP's own folds. So the
+  recording seat holds no core at all: `evFactsForRest` builds the mode-1
+  facts through the same hooks an `ev` seat uses (`dealinProbOf`/
+  `dealinCostPts`/`threatOf`/`expLossOf`/`standingsOf`/`hiddenInfoOf`) and
+  packs them into a scratch `EvWire`, and the WRITER owns the one `EvCore`
+  that evaluates them. `--evcalib` with the lane on plays BIT-IDENTICALLY to
+  the same seed without it (a test), and `paired` strips it from the control
+  arm.
+  THE ENGINE'S IDENTITY IS IN THE HEADER (v2): `evAbi` and `engineHash`, the
+  sha256 of `native/mjev.cc` at record time. The two are treated differently
+  ON PURPOSE. The ABI governs whether the wire can be read at all and is a
+  REFUSAL; the engine hash governs only whether the stored `pT`/`pW`/`eV`/
+  `eCost` still reproduce, and is a NOTICE — `ev_fit.ts` skips its
+  reproduction check, prints why, and fits on. A record carries two
+  independent things, and only one of them is the engine's: the WIRE and the
+  LABELS are facts about the game and survive any repair to the DP, while the
+  four stored predictions are one engine's answers and are SUPPOSED to change
+  when it is corrected. Refusing the lane would throw away the half that is
+  still true. v1 lanes (recorded before the hash) read the same way.
+  THE FITTER (`scripts/ev_fit.ts`) optimises SIX population scalars —
+  `ronFactor`, `oppHazard`, `oppGrowth`, `dealinRate`, `tsumoShare`,
+  `foldHazard` — against `L = BCE(pW, won) + BCE(pT, tenpaiEnd)` on the train
+  half, by replaying each stored wire through a real `EvCore` built from the
+  candidate vector (the honesty rule: never a second implementation of the
+  model). Bounded-logit parametrisation, so three scalars whose lower bound is
+  exactly 0 stay reachable and no step can propose a negative hazard;
+  deterministic Nelder-Mead, because the DP's fold and riichi choices are
+  argmaxes and the surface has a step at every decision boundary. `meanUkeire`
+  and the eight `value*` scalars are NOT fitted (the tail's shape was
+  calibrated against the exact DP in C++, and 打点 is `handvalue.ts`'s lane);
+  `eCost` is REPORTED, never fitted — it is an expectation over a continuation
+  that did not happen and has no per-record Bernoulli label. Split by seed
+  parity. Reservoir sampling, seeded, so a 448 MB lane answers from 4,000 rows.
+  THE ONE MEASUREMENT THAT SURVIVES the engine review, because it is a
+  statement about the MODEL and not about the DP's bugs: at `DEFAULT_EV` the
+  core's P(win) for the shape the champion actually chose is over-predicted
+  everywhere and catastrophically so far from tenpai. Holdout (6,000 rows,
+  odd seeds, 2,000-半荘 lane): predicted 和了 25.1% against a realised 15.0%;
+  predicted 聴牌-at-end 53.0% against 37.9%. The 向聴 × 残り自摸 audit says
+  where: at 聴牌 the prediction is close and honest (T6-10: 53.6% vs 48.1%),
+  at 1向聴 it is 20-30% relative high, and at 3向聴+ with 11+ draws left it
+  predicts 40.7% and the realised rate is 10.7% — the shapeless-hand tail is
+  the wrong end of the model, exactly where M15's `TAIL_CAL` work stopped.
+  E[打点|和了] is the half that is ALREADY RIGHT (0.90-1.16× realised at
+  聴牌/1向聴/2向聴; only 3向聴+ is off at 0.54×), which is the same finding the
+  FIRST GRADE recorded from the other direction. A 279-evaluation fit moved
+  holdout BCE 0.462 → 0.386 (和了) and 0.730 → 0.534 (聴牌) with
+  `ronFactor` 0.50 → 0.61, `oppHazard` 0.12 → 0.35, `oppGrowth` 0.040 →
+  0.075, `dealinRate` 0.050 → 0.020, `tsumoShare` 0.30 → 0.025,
+  `foldHazard` 0.010 → 0.026 — READ AS DIRECTION ONLY, since the engine those
+  numbers correct is the one under repair.
+  THE LANE ON DISK is `runs/ev/lane-800000.jsonl`: 2,000 半荘, 264,035 rows,
+  448 MB, seed 800000, `khhh` + `weights/champion.json`, v1 (recorded before
+  the hash landed). Its wires and labels stay valid; its stored predictions do
+  not, and the fitter now says so instead of dying.
+  COST, and a flag for whoever owns the repair: `mjev_eval_rest` on this lane
+  cost 0.93 ms per call at 17:50 and 246-353 ms at 18:25 after the rewrite —
+  250-300× — which is why the lane was NOT re-recorded under the new header
+  (2,000 半荘 would be ~21 h) and why a 280-evaluation fit is days rather than
+  15 minutes. A fresh, hashed lane is cheap again the moment a rest evaluation
+  is back in the ~1 ms range.
+  **REVIEW 2026-08-30** (a full read of the integration, after the first grade;
+  every finding below carries a test that fails without its fix):
+  FATAL — a folding seat threw the PUSH tile: `computeFold` decides by
+  `bestFold > bestPush` and `chooseDiscard` then ranked every candidate by
+  `O_TOTAL`, which is the push line and holds no fold option; the two argmaxes
+  are different tiles by construction. FIXED — `evPriceOf` ranks by
+  `O_FOLDLINE` while `ctx.folding`. This alone can account for a large part of
+  the +0.475: the seat folded and kept feeding the shape it had abandoned.
+  FATAL — an ev seat CRASHED near 河底: 計算's `wallComposition` is
+  `unseen × wallRemaining/unseenTotal`, so on the last discards of every hand
+  that gets there the vector is all zeros (wall 0) or sums to 0.99999998 in
+  float32 (wall 1), and `hiddenInfoOf` handed that over as a REPLACEMENT pool;
+  `mjev.cc` refuses `Nroot < 1` and `evEvalDiscard` turns the refusal into a
+  throw mid-match — `headless(3, 8191, "kkkk", {ev:{}})` reproduced it, i.e.
+  the DEFAULT ev configuration, in most hands. FIXED — the channel is filled
+  only when the composition holds at least one tile as the DP counts it (same
+  sum, same order as `parseEval`); below four live tiles `T` is 0, so nothing
+  in that pool is ever drawn and the uniform `unseen` prices the identical
+  hand. ⚑ The native side still treats an empty pool as fatal rather than as
+  "no override"; a future producer that sends one has no other guard.
+  MATERIAL — the planner's `keepBonus`/`drawBonus` rode on the EV path, and
+  `planKeep` 5000 × `pointsPerScore` 4 = a 20,000-point steering term over a
+  price whose whole hand is usually worth less. FIXED — both hooks are off the
+  EV path (the DP prices the shape; C4/C5's hidden information reaches it
+  through `hiddenInfoOf`'s channels instead, and C6 has no channel by D7 and is
+  dropped). `dojoCost`/`senseLineTax` stay, as vetoes-by-price.
+  MATERIAL — `O_TOTAL` is `max(dama, riichi)`, but the declaration can still
+  be refused by `riichiBanned` (地獄単騎/即引っかけ) or the referee, or simply
+  not be on offer. FIXED — such a candidate is priced at its `O_DAMA`.
+  MATERIAL — `kanWorthIt` compared `eval_rest` (a hold, paying no discard
+  cost) against `bestPush` (whose every candidate paid `−costIn`), so on a
+  loud table every kan looked cheaper than every push by the price of a
+  deal-in. FIXED — the cheapest held type's `dealinCostPts` comes off the hold
+  line first.
+  MATERIAL — `hiddenInfoOf`'s channels were reused for HYPOTHETICAL roots
+  (post-call, post-kan), where "the next own draw" is not what we would draw.
+  FIXED — `evPolicyFacts` takes `hidden` as a parameter; hypotheticals pass
+  null, the real root and the PASS line keep it.
+  MATERIAL — `akaHeld` ignored aka in our OWN melds (`score.ts` counts hand +
+  melds) and read `obs.hand` even when the root overrode it. FIXED —
+  `EvFactOpts.tiles` names the root's own tiles and melds are counted;
+  `akaUnseen` is read off the Observation alone. (⚑ `mjev.cc` then clamps
+  `I_AKA_HELD` to the CONCEALED 5p count, so a melded aka is still dropped
+  inside the engine — a modelling gap, not a wiring one.)
+  MATERIAL — `dealinCostPts` zeroed the 安全 rung on its own while `riskOf`
+  charged `w.danger["安全"]`, so any vector pricing that rung gave one tile
+  two prices in one decision. FIXED — base and augmented no-read branches are
+  `riskOf` term for term; the 安全 exit stays only where an ESTIMATE could
+  outrank the proof.
+  MINOR — the D4 equivalence (`dealinCostPts` = `riskOf` in points) holds only
+  while `augment.lambda = 1/pointsPerScore`; nothing enforced it. FIXED —
+  `makePolicy` refuses `pointsPerScore × lambda ≠ 1` before `buildEv`.
+  INVESTIGATED, NO CHANGE — the root count rule. A 槓 is ONE set: its fourth
+  tile is paid for by the rinshan draw, so a post-kan discard root holds
+  `14 − 3·melds` concealed tiles exactly as a pon's does (measured over 40
+  hanchan of the engine's own stream). The TypeScript test is now that
+  equality rather than `hand.length % 3 === 2` — the same rule `mjev.cc`'s
+  `parseEval` states — and `evRestRoot` guards the rest root the same way.
+  Subtracting the kan count on either side would refuse every kan hand the
+  engine produces; both files carry the reasoning at the check.
+  SUITE BUDGET — with the crash fixed, `ev_wiring`'s identity arms stopped
+  ending early and ran the DP at the default `maxNodes` 60,000: one test took
+  over ten minutes. They now carry `maxNodes: 250` like the unit C/D
+  aggregates already did (7s), which does not weaken them — the claim is that
+  the block REACHES the seat, and a truncated DP is still the DP.
+  The native half's own findings are listed at their fixes in `native/mjev.cc`.
+  SECOND GRADE (2026-08-30, after the full review + the brute-force oracle;
+  champion + `ev{fitted scalars of weights/ev-0830b.json, riichi:false,
+  calls:false}` vs champion, 600 paired games, seed 20901): 道場順位差
+  **+0.215 [+0.103, +0.327]** — still worse, but half the first grade's
+  +0.475 (席0 平均点 27,734 vs 31,038; A優位 164 / B優位 235; 8000点未満
+  38 vs 25). Runtime 76 min (0.3 半荘/秒: per-candidate independent search at
+  maxNodes 60000 is ~22 決定/秒). What the oracle settled: the recursion is
+  exact (0 ulp vs brute force on 240 tiny instances); what remains is the
+  MODEL — the closed-form tail (every root at 4向聴+, and 3向聴 roots when the
+  budget is short) is calibrated only for silent reads (exact/tail 1.9-10×
+  with live tenpaiP), the hazard scalars were fitted on the champion's play,
+  and the seat still wins 12% vs 21% at equal 聴牌率. Scalar fits: `deno run …
+  scripts/ev_fit.ts --in=runs/ev/lane-800000.jsonl --base=default`.
+  QUALITY-FIRST PASS (2026-08-31, owner: "sacrifice speed for the best
+  result"): pruning widened (keep-ALL shanten-keeping discards at ≤1向聴,
+  top-6+dora at 2向聴, 2 待ち替え candidates), safe cross-candidate sharing
+  restored (shape GEOMETRY shared — pool-independent; mass/edges per
+  candidate generation; 1.39× with byte-identical nodes), the tail's hazard
+  half now rides `turnValue`'s own arithmetic (cal scales the win term only;
+  live-reads exact/tail within 3-11% where the tail governs), defaults
+  maxNodes 1.2M / exactShanten 3 (≈3.6-7 決定/秒, p95 0.9s). Smoke 3.00 →
+  2.55; 放銃 9.9%, 聴牌 36.5%. Residual divergence is a MODEL question: at
+  巡1-4 the exact DP prefers the wider worse-shanten shape 45/232 times
+  (champion never) — acceptance compounds while the win-value half
+  under-discriminates; the next lever is the win-value model, not the
+  search. Pruning residual = the 待ち替え acceptance-mass gate (8): 6% mean
+  at T=2 on 1向聴 rests; gate→0 costs 25× nodes for 0.7%.
+  THIRD GRADE (2026-09-01, quality-first engine + fitted scalars, discard/
+  fold only, 600 paired games): 道場順位差 **+0.103 [−0.007, +0.214]** — the
+  CI touches zero for the first time (+0.475 → +0.215 → +0.103 across the
+  three grades; 席0平均点 29,326 vs 31,038; 違反 39 vs 26, mostly 8000点未満
+  37 vs 25). ~4.3h per arm at 0.1 半荘/秒. The full vector (EV riichi +
+  calls, `champ-ev-full.json`) is graded separately.
+  FULL-VECTOR GRADE (2026-09-01, same engine, champion − riichi +
+  `ev{fitted}` with ALL THREE switches on, 600 paired games): 道場順位差
+  **+0.012 [−0.104, +0.127]** — statistical PARITY with the champion
+  (席0平均点 30,907 vs 31,038; A優位 202 / B優位 209; 違反 36 vs 26, the gap
+  is 8000点未満 35 vs 25 — the home dojo buffer the arena does not have).
+  The EV riichi + call decisions recovered what the discard-only vector
+  left on the table (+0.103 → +0.012). ~6h per arm.
 - **M14 — the learned deal-in read (`ai/dealin.ts`, 2026-08-29,
   owner-directed)**: the other half of the pair M13 opened. Where the fold head
   learns the DECISION, this learns the EVIDENCE: end-to-end

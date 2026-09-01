@@ -10,3 +10,4 @@ native/*.so
 !weights/hand-calibrated.json
 !weights/league/
 !weights/arena.json
+!weights/ev-default.json

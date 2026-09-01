@@ -99,6 +99,11 @@ Deno.test("frozen h: configuration is inert even when smuggled past the loaders"
           dealin: { fv: 1, layers: [{ in: 54, out: 1, act: "none", w: ZERO54, b: [1000] }] },
           tenpai: { fv: 1, layers: [{ in: 22, out: 1, act: "none", w: ZERO22, b: [1000] }] },
         },
+        // M15, and the sharpest of the family: a "k" seat carrying `ev` REQUIRES
+        // `libmjev` and dlopens it at construction. The frozen letter must not
+        // reach that line at all — this test runs green on a machine where the
+        // dylib was never built, which is exactly the assertion.
+        ev: { maxNodes: 1 },
       },
     },
     { kind: "h", plan: true, standings: true },

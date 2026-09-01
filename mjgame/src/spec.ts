@@ -20,6 +20,7 @@ import type { ComputedWeights } from "./ai/computed.ts";
 import type { ConsumerParams } from "./ai/consumer.ts";
 import { parseConsumerParams } from "./ai/consumer.ts";
 import type { DealinWeights } from "./ai/dealin.ts";
+import type { EvParams } from "./ai/evparams.ts";
 import type { HandWeights } from "./ai/handvalue.ts";
 import type { FoldWeights } from "./ai/fold.ts";
 import type { HeuristicWeights } from "./ai/heuristic.ts";
@@ -85,6 +86,22 @@ export interface KTune {
    * once per seat by `harness.ts` because a head may hold native memory.
    */
   dealin?: Partial<DealinWeights>;
+  /**
+   * M15's expected-value core (`ai/ev.ts` + `native/mjev.cc`). A switch like
+   * `hand`/`riichi`/`fold`, with one difference that has teeth: it REQUIRES
+   * `libmjev`. ABSENT means the seat never touches FFI and plays bit-for-bit
+   * its prior game; `{}` means every `DEFAULT_EV` and all three sub-switches
+   * on; a missing/stale dylib (or `MJGAME_NATIVE=0`) is a REFUSAL, not a
+   * silent fallback — a seat that quietly went back to the linear surrogate
+   * would be measured as the DP.
+   *
+   * And it refuses what it SUPERSEDES (plan D3): with `ev.discard` on, the
+   * `consumer`/`hand`/`fold` blocks (and `--foldcalib`) are refused, because
+   * the DP replaces the discard score core and the push/fold verdict outright;
+   * with `ev.riichi` on, the `riichi` block is refused. A flag that silently
+   * does nothing is worse than one that is missing.
+   */
+  ev?: Partial<EvParams>;
 }
 
 /**
@@ -107,7 +124,7 @@ export function loadKtune(path: string, flag = "--ktune"): KTune {
   }
   if (typeof json !== "object" || json === null || Array.isArray(json)) {
     die(
-      `${flag} はオブジェクト {heuristic, augment, computed, hand, riichi, sense, fold, dealin} ` +
+      `${flag} はオブジェクト {heuristic, augment, computed, hand, riichi, sense, fold, dealin, ev} ` +
         `である必要があります: ${path}`,
     );
   }
@@ -124,6 +141,7 @@ export function loadKtune(path: string, flag = "--ktune"): KTune {
     sense: k.sense,
     fold: k.fold,
     dealin: k.dealin,
+    ev: k.ev,
   };
 }
 

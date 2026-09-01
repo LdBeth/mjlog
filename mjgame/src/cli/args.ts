@@ -156,6 +156,17 @@ export interface Args {
    */
   foldcalib: string;
   /**
+   * `--evcalib=PATH`: seat 0 (a "k" seat) writes one EV核 record per TURN
+   * decision to PATH — the FULL packed `mjev_eval_rest` wire of the resting
+   * shape it chose, the four numbers the core answers for it under
+   * `DEFAULT_EV`, and how the 局 ended. The lane M15b's population scalars are
+   * fitted on, so it is refused beside an `ev` block: a lane played by the DP
+   * would be censored by the DP's own folds (`handvalue.ts`'s lesson, measured
+   * at +0.11 WORSE). The seat plays EXACTLY as it would without the flag.
+   * `paired` records the A arm only.
+   */
+  evcalib: string;
+  /**
    * `--fold-eps=X`, 0 < X < 1: flip the fold verdict with probability X, on a
    * random stream of the seat's own. This is the exploration that makes the
    * lane a CONTEXTUAL BANDIT rather than a log of one policy's opinions — with
@@ -221,6 +232,7 @@ export function parseArgs(argv: string[]): Args {
     handcalib: "",
     foldEps: 0,
     foldcalib: "",
+    evcalib: "",
     exportPath: "",
     json: false,
     jobs: 1,
@@ -294,6 +306,9 @@ export function parseArgs(argv: string[]): Args {
     } else if (arg.startsWith("--foldcalib=")) {
       a.foldcalib = arg.slice(12);
       if (!a.foldcalib) die("--foldcalib には書き出し先のパスが要ります");
+    } else if (arg.startsWith("--evcalib=")) {
+      a.evcalib = arg.slice(10);
+      if (!a.evcalib) die("--evcalib には書き出し先のパスが要ります");
     } else if (arg.startsWith("--fold-eps=")) {
       const v = Number(arg.slice(11));
       if (!Number.isFinite(v) || !(v > 0) || !(v < 1)) {
@@ -336,7 +351,7 @@ export function parseArgs(argv: string[]): Args {
 /** The subset of `Args` the cross-flag rules below actually read. */
 export type ArgCheck =
   & Pick<Args, "cmd" | "seats" | "calibrate">
-  & Partial<Pick<Args, "handcalib" | "foldcalib" | "foldEps">>
+  & Partial<Pick<Args, "handcalib" | "foldcalib" | "foldEps" | "evcalib">>
   & Partial<
     Pick<
       Args,
@@ -567,8 +582,54 @@ export function argError(a: ArgCheck): string | null {
       // ordering nobody can reproduce.
       return "--foldcalib と --jobs は併用できません (押し引きの記録は1スレッドで書きます)";
     }
+    // M15 D3, and the same family as `--calibrate` beside a `dealin` block:
+    // with `ev.discard` on, the EV核 OWNS the push/fold verdict, so the lane
+    // would record a gate nobody consults and fit a head the seat refuses to
+    // carry. (`discard` defaults to true, so only an explicit `false` opts out.)
+    const kf = ktuneOf(a);
+    if (kf?.ev && kf.ev.discard !== false) {
+      return "--foldcalib と ev ブロック (discard) は併用できません " +
+        "(M15: 押し引きの判断は EV核 が持つので、録っても当てはめる先がありません — " +
+        'どうしても録るなら ev: {"discard": false} にします)';
+    }
   } else if (a.foldEps) {
     return "--fold-eps は --foldcalib と一緒に使います (記録しないのに手を曲げても仕方がありません)";
+  }
+  // M15b's lane. The narrowest of the four: a "k" seat 0, one thread, and — the
+  // rule the whole fit rests on — a vector with NO `ev` block.
+  if (a.evcalib) {
+    if (a.cmd !== "selfplay" && a.cmd !== "paired") {
+      return "--evcalib は selfplay / paired 専用です (局の結末で札を貼るので、通しで打つ駆動が要ります)";
+    }
+    if (a.seats[0] !== "k") {
+      return `--evcalib は席0が k席 (計算) のときだけ使えます: --seats=${a.seats}\n` +
+        "EV核が載るのは k席だけなので、他の席で録っても当てはめる先がありません。";
+    }
+    if ((a.jobs ?? 1) > 1) {
+      // The same seam problem as `--handcalib`, and the writer additionally
+      // owns a native EvCore that four workers would each have to build.
+      return "--evcalib と --jobs は併用できません (EV核の記録は1スレッドで書きます)";
+    }
+    // THE RULE THE FIT RESTS ON, and the fourth member of the family that
+    // already holds `--calibrate`+`dealin` and `--foldcalib`+`ev.discard`: a
+    // lane recorded under the block being fitted is censored by that block's
+    // own decisions. M11 measured the refit on such a lane at +0.11 WORSE.
+    if (ktuneOf(a)?.ev) {
+      return "--evcalib と ev ブロックは併用できません " +
+        "(M15b: レーンは EV核 を積んでいない素の席で録ります — " +
+        "自分の降りで打ち切った局を自分の当てはめに使えません)";
+    }
+  }
+  // M15 D3, the ktune-internal half: `ev.riichi` replaces the declare-vs-damaten
+  // decision INSIDE the same gates the M12 head sits in, so a vector carrying
+  // both would load one of them and never consult it. Refused here as well as in
+  // `makePolicy` so the CLI answers with a message instead of a stack trace.
+  // (`riichi` defaults to true; an explicit `false` is how unit B/D opt out.)
+  const kev = ktuneOf(a);
+  if (kev?.ev && kev.ev.riichi !== false && kev.riichi) {
+    return "ev ブロック (riichi) と riichi ブロックは併用できません " +
+      "(M15 D3: リーチ判断を置き換えるのは EV核 なので、M12 のヘッドは参照されません — " +
+      'どちらか一方にします。EV核 の他の部分だけ使うなら ev: {"riichi": false})';
   }
   return null;
 }

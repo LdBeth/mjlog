@@ -49,6 +49,27 @@ import { assembleCandidate, assembleContext } from "./evidence.ts";
 import { genbutsuSets } from "./computed.ts";
 import type { FoldFacts, FoldSample } from "./fold.ts";
 import { decideFold, FOLD_INPUTS, foldVector } from "./fold.ts";
+import type { EvCore } from "./ev.ts";
+import { evEvalDiscard, evEvalRest } from "./ev.ts";
+import {
+  DBLS_LEN,
+  INTS_LEN,
+  O_BEST_FOLD,
+  O_BEST_PUSH,
+  O_DAMA,
+  O_FOLDLINE,
+  O_NODES,
+  O_RIICHI,
+  O_STRIDE,
+  O_TOTAL,
+  O_TRUNC,
+  R_NODES,
+  R_TRUNC,
+} from "./evlayout.ts";
+import type { EvFacts, EvHidden, EvWire } from "./evpack.ts";
+import { evFactsFromObservation, packEvInputs } from "./evpack.ts";
+import type { EvSample } from "./evcalib.ts";
+import { DEFAULT_EV } from "./evparams.ts";
 import type { Mlp } from "./mlp.ts";
 import type { HandSample } from "./handcalib.ts";
 import type { HandFacts, HandOutlook, HandWeights } from "./handvalue.ts";
@@ -299,6 +320,32 @@ export interface HeuristicOptions {
    * were given, which is exactly the header a writer records.
    */
   handSink?: (rec: HandSample) => void;
+  /**
+   * M15. The expected-value core (`ev.ts` + `native/mjev.cc`), ALREADY BUILT —
+   * like `fold`, and for the same reason twice over: it holds a native context
+   * and a set of reused wire buffers, so exactly one owner may build it and
+   * exactly one must free it. `harness.ts` builds it once per seat and closes
+   * it in the seat's `close()`; this policy only reads it.
+   *
+   * ABSENT BY DEFAULT, and absent means no FFI is touched and every decision is
+   * the one this class has always made, bit for bit. The DECISION INTEGRATION
+   * (unit B onward) lands separately — this field is the seam it will read.
+   */
+  ev?: EvCore;
+  /**
+   * M15b's recorder: one sample per turn decision, carrying the FULL packed
+   * wire of the resting 13-tile shape the seat chose (`evcalib.ts` labels them
+   * from the outcome of the 局).
+   *
+   * DELIBERATELY INDEPENDENT of `ev`, which is `handSink`'s reason raised to
+   * the level of a refusal: the lane that fits the population scalars has to be
+   * played by the seat that ships — the PLAIN champion, with no core at all —
+   * because a lane recorded under the DP is censored by the DP's own folds.
+   * The CLI refuses `--evcalib` beside an `ev` block for exactly that, and this
+   * sink accordingly builds its wire through the same hooks an `ev` seat would
+   * use WITHOUT needing a core to do it.
+   */
+  evSink?: (rec: EvSample) => void;
 }
 
 /**
@@ -394,6 +441,23 @@ interface DecisionMemo {
   outlooks?: Map<number, HandEntry>;
   /** M13: the fold head's 37 facts — built only when a head or a sink exists. */
   foldFacts?: FoldFacts;
+  /** M15: the EV core's whole verdict on this decision — one native call. */
+  ev?: EvResult;
+  /**
+   * M15 unit D: the PASS side of a call — what holding the current 13-tile
+   * hand is worth (`mjev_eval_rest`). One per decision, because every call on
+   * offer is compared against the same alternative.
+   */
+  evRest?: number;
+  /**
+   * M15 unit D: the ACCEPT side, keyed by the meld the call would make.
+   *
+   * A SEPARATE map rather than more fields on `ev`: `ev` is the verdict on THIS
+   * hand, and a caller reading `memo.ev.bestPush` must never be handed the
+   * value of a hypothetical post-call shape. The key is the meld's tile ids,
+   * which name the call uniquely inside one decision.
+   */
+  evCalls?: Map<string, number>;
 }
 
 /**
@@ -441,6 +505,45 @@ export interface DiscardTrace {
   riichi: boolean;
   /** 片和了り cure: riichi was forced by the dojo, not chosen on merit. */
   mustCure: boolean;
+  /**
+   * M15. What `score` is denominated in. Absent (the incumbent path) it is the
+   * hand-written score unit; `"points"` is the EV core's own currency.
+   *
+   * The TUI reads score DIFFERENCES between candidates and never the absolute
+   * number, so both units render — but a reader comparing a logged trace across
+   * two seats has to know which scale it is looking at, and a factor of
+   * `pointsPerScore` between them is not something to infer from magnitudes.
+   */
+  units?: "points";
+  /** M15: the fold line the chosen discard was compared against, in points. */
+  foldValue?: number;
+  /** M15: what declaring on the chosen discard is worth, in points (unit C reads it). */
+  riichiValue?: number;
+}
+
+/**
+ * M15. One evaluation of the expected-value core, copied out of the wire buffer.
+ *
+ * COPIED, deliberately: `EvCore.out` is reused by the next decision (it is the
+ * only per-decision allocation the FFI path makes), so a memo holding the live
+ * buffer would answer the NEXT board's numbers to this board's questions. Four
+ * 34-vectors per decision is the price of a memo that cannot lie.
+ */
+export interface EvResult {
+  /** Per type: the price of letting it go, in points. −Infinity outside `candMask`. */
+  total: Float64Array;
+  /** Per type: the value of the resulting shape played damaten. */
+  dama: Float64Array;
+  /** Per type: the value of declaring riichi on it (unit C's input). */
+  riichi: Float64Array;
+  /** Per type: what abandoning the hand after this discard is worth. */
+  foldLine: Float64Array;
+  /** The best push line and the best fold line over the priced candidates. */
+  bestPush: number;
+  bestFold: number;
+  /** Search accounting (plan D5): value states visited, and whether the cap bit. */
+  nodes: number;
+  truncated: boolean;
 }
 
 /**
@@ -460,6 +563,17 @@ function foldStream(seed: number): number {
 export class HeuristicPolicy implements SyncPolicy {
   /** See `DiscardTrace`. Overwritten by every decision that scores discards. */
   lastTrace: DiscardTrace | null = null;
+  /**
+   * INSTRUMENTATION, for `bench` and nothing else: how many decisions this seat
+   * has been asked for, and what the EV core spent answering them.
+   *
+   * Deliberately NOT cleared by `reset` — a bench run wants the whole run's
+   * total, and a per-match counter would report the last hanchan. Nothing in
+   * any decision reads either object, so they cannot move a game: `RunReport`
+   * keeps its byte-identity claims because the counters are not in it.
+   */
+  decisions = 0;
+  readonly evStats = { calls: 0, nodes: 0, truncated: 0, maxNodes: 0 };
   readonly name: string;
   readonly sync = true;
   protected w: HeuristicWeights;
@@ -483,8 +597,16 @@ export class HeuristicPolicy implements SyncPolicy {
   private sw: SenseWeights;
   private senseOn: boolean;
   private handSink: ((rec: HandSample) => void) | null;
+  /** M15b's recorder, and the one scratch wire it packs into (see `evSink`). */
+  private evSink: ((rec: EvSample) => void) | null;
+  private evWire: EvWire | null;
   /** M13's head, or null for the incumbent `margin < 0`. Owned by the builder. */
   private foldHead: Mlp | null;
+  /**
+   * M15's EV core, or null for the hand-written surrogate. Owned by the
+   * builder (`harness.ts`), read by the subclass — hence `protected`.
+   */
+  protected readonly ev: EvCore | null;
   /** The head's input row, reused for the life of the seat (see `decideFold`). */
   private foldX: Float32Array | null;
   /** ε of the fold-flip lane; 0 (the default) draws no random numbers at all. */
@@ -524,7 +646,14 @@ export class HeuristicPolicy implements SyncPolicy {
     this.sw = mergeSense(opts.sense);
     this.senseOn = senseActive(this.sw);
     this.handSink = opts.handSink ?? null;
+    this.evSink = opts.evSink ?? null;
+    // One pair of buffers for the life of the seat, exactly as `EvCore` keeps
+    // its own: the sink hands them to the writer, which COPIES before returning.
+    this.evWire = opts.evSink
+      ? { ints: new Int32Array(INTS_LEN), dbls: new Float64Array(DBLS_LEN) }
+      : null;
     this.foldHead = opts.fold ?? null;
+    this.ev = opts.ev ?? null;
     this.foldX = this.foldHead || opts.foldSink ? new Float32Array(FOLD_INPUTS) : null;
     this.foldEps = opts.foldExplore?.eps ?? 0;
     this.foldSink = opts.foldSink ?? null;
@@ -728,6 +857,7 @@ export class HeuristicPolicy implements SyncPolicy {
   }
 
   decide(obs: Observation): Action {
+    this.decisions++;
     const { legal } = obs;
     if (legal.length === 1) return legal[0];
     if (this.epsilon > 0 && this.rng.float() < this.epsilon) {
@@ -834,7 +964,7 @@ export class HeuristicPolicy implements SyncPolicy {
    * `rankStats` evaluations — not free enough to run three times for one
    * discard.
    */
-  private standingsOf(obs: Observation): { gain: number; risk: number } {
+  protected standingsOf(obs: Observation): { gain: number; risk: number } {
     const w = this.w.standings;
     if (!w) return { gain: 1, risk: 1 };
     const m = this.cache(obs);
@@ -1019,10 +1149,406 @@ export class HeuristicPolicy implements SyncPolicy {
     return [0, 0, 0];
   }
 
+  // ---------------------------------------------------------------- EV核 (M15)
+  //
+  // Three protected hooks and one memoised call. Everything the DP is told
+  // about the OPPONENTS crosses through the hooks, so the doctrine stays in
+  // TypeScript (plan §1: "packed by TS so the doctrine stays in TS") and the
+  // C++ side never grows a second, invisible home for a dojo ruling.
+
+  /**
+   * Σ_i P(opponent i rons this tile NOW) — the probability half of what the DP
+   * is told about the root discard.
+   *
+   * HOOK. The base policy reads no opponent model and answers 0, which is not
+   * the claim "nothing can deal in": it is "this seat holds no estimate". The
+   * COST half below still carries the rule ladder, so a base seat's root
+   * discard is priced exactly the way `riskOf` prices it, only in points.
+   * `AugmentedHeuristic` answers the 計算/M14 reader's `dealinP`.
+   */
+  protected dealinProbOf(_ctx: Ctx, _tile: Tile): number {
+    return 0;
+  }
+
+  /**
+   * What letting this tile go NOW costs, in POINTS: `riskOf`'s arithmetic with
+   * the units changed (plan D4).
+   *
+   * WHY A SECOND HOOK RATHER THAN `riskOf × pointsPerScore`. `riskOf` answers
+   * in score units, and the conversion is only exact because `augment.lambda`
+   * is 1/`pointsPerScore` by construction — a coincidence of two defaults, not
+   * a contract. Naming the points figure separately makes the DP's input a
+   * quantity in its own right: a vector that retunes λ (which is a CONSUMPTION
+   * scalar of the linear surrogate) then moves the surrogate without silently
+   * rescaling the DP's deal-in cost.
+   *
+   * IDENTICAL TO `riskOf`, TERM FOR TERM (2026-08-30 review). This body used to
+   * zero the ladder at 安全 on its own — "no estimate outranks a proof" — but
+   * the base policy HOLDS no estimate: its whole price IS the ladder, and
+   * `riskOf` charges `w.danger["安全"]` there like every other rung. With the
+   * shipped vector's 0 the two agreed by coincidence; a tuned vector that
+   * priced 安全 at all made the DP and the surrogate disagree about the same
+   * tile in the same decision. The 安全 exit belongs where the estimate is —
+   * `AugmentedHeuristic` keeps it, in both of its own two methods, because
+   * there it means "no ESTIMATE outranks a proof".
+   *
+   * The 感性 surcharges are ADDED for the reason `riskOf` documents — they
+   * price hands the assessor holds no entry for. 順位効用's `risk` multiplies
+   * the whole thing, as `Ctx.def` does on the incumbent path.
+   */
+  protected dealinCostPts(ctx: Ctx, tile: Tile): number {
+    const pps = this.pointsPerScore();
+    // Spelled out rather than `this.riskOf(...) * pps`: an override of `riskOf`
+    // alone must not silently redefine the DP's input (that is what the second
+    // hook exists for), so the two bodies are the same EXPRESSION, not a call.
+    const ladder = this.ruleRisk(this.dangerLevelOf(ctx, tile));
+    return (ladder + this.surcharge(ctx, tile)) * pps * this.standingsOf(ctx.obs).risk;
+  }
+
+  /**
+   * The DP's hidden-information overrides (plan D7), or null for the computed
+   * seat — which is the base policy, always: 計算 is exact counting over public
+   * facts, and a channel here is by definition not a public fact.
+   *
+   * HOOK. `AugmentedHeuristic` maps whatever its `Reads` carry; a future
+   * learned hidden-information module returns soft distributions through the
+   * same signature, and the engine never learns which producer filled them.
+   */
+  protected hiddenInfoOf(_obs: Observation): EvHidden | null {
+    return null;
+  }
+
+  /**
+   * Points per hand-written score unit (plan D4) — the exchange rate that lets
+   * `dojoCost`, `senseLineTax` and the two bonus hooks stand beside a price in
+   * points. `DEFAULT_EV`'s value when no core is loaded, so the hooks above are
+   * callable (and testable) on a machine with no dylib.
+   */
+  protected pointsPerScore(): number {
+    return this.ev?.params.pointsPerScore ?? DEFAULT_EV.pointsPerScore;
+  }
+
+  /**
+   * The light `Ctx` the two pricing hooks are called through.
+   *
+   * It cannot be the real one. `context()` builds `Ctx` with `folding` already
+   * decided, and the fold verdict is one of the things the DP DECIDES — asking
+   * for a `Ctx` here would be a cycle. Everything `riskOf`/`surcharge` actually
+   * read is present and identical (`obs`, `unseen`, `doraTypes`,
+   * `valueHonors`); the two multipliers `eff`/`def` are 1 because the DP is
+   * handed the un-multiplied facts and applies 順位効用 itself.
+   */
+  private evCtx(obs: Observation): Ctx {
+    return {
+      obs,
+      open: obs.melds[0].length,
+      closed: obs.melds[0].every((m) => m.kind === "ankan"),
+      doraTypes: doraTypesOf(obs),
+      valueHonors: valueHonorsOf(obs.roundWind, obs.seatWind),
+      unseen: publicUnseen(obs),
+      folding: false,
+      canRiichi: obs.legal.some((a) => a.t === "discard" && a.riichi),
+      eff: 1,
+      def: 1,
+    };
+  }
+
+  /**
+   * Is there a 14-tile root to price? A turn decision (and a post-call discard)
+   * rests on `3n + 2` concealed tiles; a claim decision — pon/chi/pass on
+   * somebody else's tile — rests on `3n + 1` and has no discard to price.
+   *
+   * Unit B serves the DISCARD and the FOLD verdict only. The call comparisons
+   * (`eval_rest` on the 13-tile shape vs `eval_discard` on the post-call one)
+   * are unit D and are where this test stops being the whole story.
+   *
+   * THE EXACT COUNT, not `% 3 === 2` (2026-08-30 review). Both tests admit the
+   * same well-formed roots — `14 − 3m` is `2 mod 3` for every m — but the
+   * modulus also admits a malformed one, and the DP answers a malformed root
+   * with a return code, which `evEvalDiscard` turns into a throw in the middle
+   * of a match. The rule here is `mjev.cc`'s own (`parseEval`: `sum != (mode ==
+   * 0 ? 14 : 13) - 3 * nMelds`), stated the same way on both sides.
+   *
+   * A KAN IS ONE SET AND NOTHING MORE. Its fourth tile is paid for by the
+   * rinshan draw, so the concealed count after an 暗槓/加槓/大明槓 is what it
+   * would be after a pon — 11 concealed beside one meld at a discard root, 10
+   * at rest. (Measured over 40 hanchan: every kan root in the engine's own
+   * stream satisfies `14 − 3m` exactly, none of them `14 − 3m − kans`.)
+   */
+  private evRoot(obs: Observation): boolean {
+    return obs.hand.length === 14 - 3 * obs.melds[0].length;
+  }
+
+  /**
+   * The same test for a 13-tile REST root (`mjev_eval_rest`, mode 1) — the PASS
+   * side of a call comparison. `chooseCall` only ever runs on a claim decision,
+   * where the shape is at rest by construction, so this is a guard rather than
+   * a branch: a caller that gets it wrong gets "the DP has no opinion" instead
+   * of a mid-match throw.
+   */
+  private evRestRoot(obs: Observation): boolean {
+    return obs.hand.length === 13 - 3 * obs.melds[0].length;
+  }
+
+  /**
+   * The core's verdict for THIS decision, or null when it is not this seat's
+   * job (no core, `ev.discard` off, or no discard root to price).
+   */
+  private evDiscard(obs: Observation): EvResult | null {
+    if (!this.ev?.params.discard || !this.evRoot(obs)) return null;
+    return this.evOf(obs);
+  }
+
+  /**
+   * One native evaluation, memoised on the Observation's identity like every
+   * other per-decision fact — the fold gate and the discard chooser both ask,
+   * and the DP is the most expensive thing in the decision by two orders of
+   * magnitude.
+   *
+   * Protected so a test can read the numbers the seat acted on without
+   * re-deriving them (which would be a second, differently-wrong witness).
+   */
+  /**
+   * The POLICY half of one evaluation's facts — everything the Observation
+   * cannot answer by counting (plan §1: "packed by TS so the doctrine stays in
+   * TS"), for a root whose concealed part is `tiles`.
+   *
+   * Factored out of `evOf` for unit D: a call comparison prices a DIFFERENT
+   * concealed shape (the hand minus the tiles the call spends) off the same
+   * board, and the deal-in hooks must be asked about the tiles that shape
+   * actually holds — not about the ones it just gave away.
+   *
+   * `hidden` IS A PARAMETER, not a call to the hook (2026-08-30 review). The
+   * channels describe a FUTURE — the next own draw, the next kan-dora, the live
+   * wall — and that future is a function of what the seat does next: after a
+   * pon the tile `ownNextDraw` names is not what we draw, and after a kan the
+   * rinshan tile comes first. Handing a hypothetical root the real root's
+   * channels is not extra information, it is wrong information, so every
+   * hypothetical passes `null` and prices its shape by counting.
+   */
+  private evPolicyFacts(obs: Observation, tiles: readonly Tile[], hidden: EvHidden | null) {
+    // The root deal-in facts, per HELD TYPE. A representative tile of each type
+    // is enough and is exact: every term of both hooks reads the tile through
+    // `tileType`. The types not held are left at 0 — they are outside
+    // `candMask` and the DP never prices them as a root discard.
+    const ctx = this.evCtx(obs);
+    const pIn = new Array<number>(34).fill(0);
+    const costIn = new Array<number>(34).fill(0);
+    const seen = new Set<number>();
+    for (const t of tiles) {
+      const ty = tileType(t);
+      if (seen.has(ty)) continue;
+      seen.add(ty);
+      pIn[ty] = this.dealinProbOf(ctx, t);
+      costIn[ty] = this.dealinCostPts(ctx, t);
+    }
+    const st = this.standingsOf(obs);
+    return {
+      pIn,
+      costIn,
+      tenpaiP: this.threat(obs),
+      expLoss: this.expLossOf(obs),
+      gain: st.gain,
+      risk: st.risk,
+      hidden,
+    };
+  }
+
+  /**
+   * M15b. The facts of the 13-tile REST left by `chosenTile` — `mjev_eval_rest`
+   * mode 1, built through the very hooks an `ev` seat would use, and WITHOUT an
+   * `EvCore`.
+   *
+   * That last clause is the whole reason it exists as its own method. The
+   * calibration lane is recorded on a seat carrying NO `ev` block (the M11
+   * lesson: never fit on a lane played by the block being fitted), so nothing
+   * in this path may touch the FFI — but the wire it produces has to be the
+   * wire the DP would have been handed, hook for hook, or the fit would be
+   * calibrating a model against inputs the seat never presents. Everything it
+   * calls (`evCtx`, `dealinProbOf`, `dealinCostPts`, `threat`, `expLossOf`,
+   * `standingsOf`, `hiddenInfoOf`) is pure TypeScript, and `pointsPerScore`
+   * falls back to `DEFAULT_EV`'s value when no core is loaded.
+   *
+   * Protected so the recorder's test can build one off a hand-made Observation.
+   */
+  protected evFactsForRest(obs: Observation, chosenTile: Tile): EvFacts {
+    // `handWithout`'s removal, without a `Ctx`: the last copy of the id, so a
+    // hand holding two of a type loses exactly one of them.
+    const rest = [...obs.hand];
+    const at = rest.lastIndexOf(chosenTile);
+    if (at < 0) throw new Error(`evFactsForRest: ${chosenTile} は手牌にありません`);
+    rest.splice(at, 1);
+    return evFactsFromObservation(obs, {
+      mode: 1,
+      hand: countsFromTiles(rest),
+      tiles: rest,
+      ...this.evPolicyFacts(obs, rest, this.hiddenInfoOf(obs)),
+    });
+  }
+
+  /** One evaluation's accounting, for `bench` — every native call, unit D's included. */
+  private noteEv(nodes: number, truncated: boolean): void {
+    this.evStats.calls++;
+    this.evStats.nodes += nodes;
+    if (truncated) this.evStats.truncated++;
+    if (nodes > this.evStats.maxNodes) this.evStats.maxNodes = nodes;
+  }
+
+  protected evOf(obs: Observation): EvResult {
+    const m = this.cache(obs);
+    if (m.ev) return m.ev;
+    const core = this.ev;
+    if (!core) throw new Error("evOf: EV核が積まれていません (ev ブロックが無い席)");
+
+    packEvInputs(
+      core,
+      evFactsFromObservation(obs, {
+        mode: 0,
+        ...this.evPolicyFacts(obs, obs.hand, this.hiddenInfoOf(obs)),
+      }),
+    );
+    evEvalDiscard(core);
+
+    const out = core.out;
+    const total = new Float64Array(34);
+    const dama = new Float64Array(34);
+    const riichi = new Float64Array(34);
+    const foldLine = new Float64Array(34);
+    for (let ty = 0; ty < 34; ty++) {
+      const at = ty * O_STRIDE;
+      total[ty] = out[at + O_TOTAL];
+      dama[ty] = out[at + O_DAMA];
+      riichi[ty] = out[at + O_RIICHI];
+      foldLine[ty] = out[at + O_FOLDLINE];
+    }
+    const nodes = out[O_NODES];
+    const truncated = out[O_TRUNC] !== 0;
+    this.noteEv(nodes, truncated);
+
+    return m.ev = {
+      total,
+      dama,
+      riichi,
+      foldLine,
+      bestPush: out[O_BEST_PUSH],
+      bestFold: out[O_BEST_FOLD],
+      nodes,
+      truncated,
+    };
+  }
+
+  /**
+   * UNIT C. The core's verdict when the RIICHI question is the core's to answer,
+   * or null when it is not (no core, `ev.riichi` off, or a decision with no
+   * 14-tile root — riichi is only ever offered on one).
+   *
+   * A separate accessor from `evDiscard` on purpose: `ev.riichi` and
+   * `ev.discard` are independent sub-switches, and a seat carrying
+   * `{discard:false, riichi:true}` must get the DP's declaration verdict over
+   * the incumbent's linear discard score. The evaluation itself is the SAME
+   * one — `evOf` is memoised on the Observation — so a seat carrying both pays
+   * for one native call, not two.
+   */
+  private evRiichiPrice(obs: Observation): EvResult | null {
+    if (!this.ev?.params.riichi || !this.evRoot(obs)) return null;
+    return this.evOf(obs);
+  }
+
+  /**
+   * UNIT D. What the best push line of a hypothetical 14-tile root is worth —
+   * the ACCEPT side of a call comparison, `mjev_eval_discard` on the post-call
+   * hand (melds + 1, open).
+   *
+   * NOT memoised on `memo.ev`: that slot holds the verdict on the hand we
+   * actually have, and a hypothetical must never be able to answer in its
+   * place. Callers memoise by meld signature in `memo.evCalls`.
+   */
+  private evPushOf(obs: Observation, rest: readonly Tile[], melds: readonly Meld[]): number {
+    const core = this.ev;
+    if (!core) throw new Error("evPushOf: EV核が積まれていません");
+    packEvInputs(
+      core,
+      evFactsFromObservation(obs, {
+        mode: 0,
+        hand: countsFromTiles([...rest]),
+        tiles: rest,
+        melds,
+        // A POST-CALL root: `hiddenInfoOf`'s channels are about the hand we
+        // have, and taking the call moves the draw order out from under them.
+        ...this.evPolicyFacts(obs, rest, null),
+      }),
+    );
+    evEvalDiscard(core);
+    this.noteEv(core.out[O_NODES], core.out[O_TRUNC] !== 0);
+    return core.out[O_BEST_PUSH];
+  }
+
+  /**
+   * UNIT D. What HOLDING a 13-tile rest is worth (`mjev_eval_rest`) — the PASS
+   * side of a call, and the post-暗槓 root (`kanDoraOn`, which is what makes a
+   * kan worth anything at all).
+   *
+   * Returns NaN when the core refuses the root; every caller treats a
+   * non-finite answer as "the DP has no opinion" and keeps the incumbent one.
+   */
+  private evHoldOf(
+    obs: Observation,
+    rest: readonly Tile[],
+    melds: readonly Meld[],
+    kanDoraOn = false,
+    hidden: EvHidden | null = null,
+  ): number {
+    const core = this.ev;
+    if (!core) throw new Error("evHoldOf: EV核が積まれていません");
+    packEvInputs(
+      core,
+      evFactsFromObservation(obs, {
+        mode: 1,
+        hand: countsFromTiles([...rest]),
+        tiles: rest,
+        melds,
+        kanDoraOn,
+        ...this.evPolicyFacts(obs, rest, hidden),
+      }),
+    );
+    const v = evEvalRest(core);
+    this.noteEv(core.meta[R_NODES], core.meta[R_TRUNC] > 0);
+    return v;
+  }
+
+  /**
+   * UNIT D. The PASS line of this decision: hold the hand as it stands.
+   *
+   * The ONE root that is not hypothetical, so it keeps the hidden-information
+   * channels: they are true of the hand that is actually sitting there. (The
+   * call side is priced blind — see `evPushOf` — which leaves the comparison
+   * asymmetric in the oracle's favour by exactly the value of knowing our own
+   * next draw. That is the honest asymmetry: the alternative is to price the
+   * pass line with a future the calling line would not have had.)
+   */
+  private evPassValue(obs: Observation): number {
+    const m = this.cache(obs);
+    if (m.evRest !== undefined) return m.evRest;
+    if (!this.evRestRoot(obs)) return m.evRest = NaN;
+    return m.evRest = this.evHoldOf(obs, obs.hand, obs.melds[0], false, this.hiddenInfoOf(obs));
+  }
+
   private computeFold(obs: Observation): boolean {
     // Committed: after riichi the only legal discard is the drawn tile anyway.
     // OUTSIDE the head, permanently: a fact about the position, not a judgement.
     if (obs.riichi[0]) return false;
+
+    // M15. With the core serving discards the verdict is a comparison of two
+    // PRICES at the root — the best push line against the best fold line, both
+    // in points, both out of the same sweep the discard score reads — and the
+    // quiet-table early-out below is deliberately bypassed (plan §4.2):
+    // "nothing loud" is a statement about the ASSESSED threats, while the DP
+    // runs its own hazard sweep over `tenpaiP` and prices the fold option at
+    // every state. No feature is built and no random number is drawn on this
+    // path. A claim decision has no discard root, so it falls through to the
+    // incumbent gate (the call comparisons are unit D).
+    const evd = this.evDiscard(obs);
+    if (evd) return evd.bestFold > evd.bestPush;
 
     const pressure = this.pressure(obs);
     // …and so is this: with nothing loud there is nothing to fold FROM.
@@ -1392,6 +1918,30 @@ export class HeuristicPolicy implements SyncPolicy {
       run = { hooks, context: assembleContext(hooks, ctx) };
     }
 
+    // M15. With the core on, THE PRICE IS THE DP's and `scoreDiscard` is not
+    // called at all — the linear surrogate it computes is precisely what the
+    // core replaces (plan §4.3). What survives beside it is only what was never
+    // a valuation: the two judgments no fitted core may buy its way around
+    // (`dojoCost`, `senseLineTax`), converted from score units into points by
+    // `pointsPerScore` (D4) so a 4000-score veto is still a 16,000-point one.
+    // The candidate SET is untouched: `compliantDiscards` and `guardTriplets`
+    // ran above, and a price never re-admits what a veto struck out.
+    //
+    // THE PLANNER'S TWO BONUS HOOKS ARE NOT HERE (2026-08-30 review). They are
+    // the INCUMBENT's steering terms — `keepBonus` alone carries C7's `planKeep`
+    // 5000, which at `pointsPerScore` 4 is a 20,000-point thumb on a scale whose
+    // whole hand is usually worth less than that — and steering is precisely
+    // what the DP replaces: it prices the SHAPE, so "keep the tiles the plan is
+    // built from" is either already true of the price or an instruction to
+    // ignore it. What the two hooks knew that the DP does not is the
+    // hidden-information half (C4's incoming draw, C5's coming dora), and that
+    // reaches the DP properly, through `hiddenInfoOf`'s channels. C6 (a tile
+    // about to become genbutsu) is the one term with no channel — plan D7 bars
+    // per-opponent sequential information from the 計算 seat — and it is dropped
+    // rather than smuggled in as a 20,000-point tiebreak.
+    const evd = this.evDiscard(ctx.obs);
+    const pps = this.pointsPerScore();
+
     let bestTile = candidates[0];
     let bestScore = -Infinity;
     const ranked: DiscardTrace["candidates"] = [];
@@ -1399,7 +1949,10 @@ export class HeuristicPolicy implements SyncPolicy {
       const sh = shantenAfter.get(tile)!;
       // Ukeire is the expensive part (34 shanten probes); only the tiles that
       // actually hold the best shanten can win on it.
-      const score = this.scoreDiscard(ctx, tile, sh, sh === best, run);
+      const score = evd
+        ? this.evPriceOf(ctx, evd, byTile, tile) -
+          pps * (this.dojoCost(ctx, tile, sh) + this.senseLineTax(ctx, tile, sh))
+        : this.scoreDiscard(ctx, tile, sh, sh === best, run);
       ranked.push({ tile, shanten: sh, score });
       if (score > bestScore || (score === bestScore && tile < bestTile)) {
         bestScore = score;
@@ -1423,6 +1976,24 @@ export class HeuristicPolicy implements SyncPolicy {
       this.handSink({ facts: e.facts, pwin: e.out.pwin, value: e.out.value });
     }
 
+    // M15b's lane, and the same discipline one layer over: one sample per TURN
+    // decision, for the resting shape the policy actually chose. The WIRE is
+    // recorded, not a verdict — the seat holds no core to ask — so the fit
+    // replays it under any candidate parameter vector and the labels are this
+    // seat's own continuation of the hand.
+    if (this.evSink && this.evWire && ctx.obs.drawn !== null) {
+      packEvInputs(this.evWire, this.evFactsForRest(ctx.obs, bestTile));
+      this.evSink({
+        ints: this.evWire.ints,
+        dbls: this.evWire.dbls,
+        shanten: shantenAfter.get(bestTile)!,
+      });
+    }
+
+    // The evaluation the trace reports from. Normally the discard sweep's; a
+    // riichi-only seat has the same evaluation without having priced with it.
+    const evTrace = evd ?? this.evRiichiPrice(ctx.obs);
+
     const group = byTile.get(bestTile)!;
     const plain = group.find((d) => !d.riichi);
     const riichi = group.find((d) => d.riichi);
@@ -1432,6 +2003,22 @@ export class HeuristicPolicy implements SyncPolicy {
       chosen: bestTile,
       riichi: false,
       mustCure: false,
+      // The core's own two numbers for the tile actually chosen: what folding
+      // after it is worth, and what declaring on it is worth. Unit C makes the
+      // second one a DECISION (`wantRiichi` reads the same pair off the same
+      // evaluation); here it is the record of what that decision saw.
+      //
+      // `units` marks the SCORE column only, so it is set by `evd` alone: a
+      // seat carrying `{discard:false, riichi:true}` still ranks candidates
+      // with the linear surrogate, and mislabelling that column would be worse
+      // than leaving the two point-valued fields unlabelled.
+      ...(evd ? { units: "points" as const } : {}),
+      ...(evTrace
+        ? {
+          foldValue: evTrace.foldLine[tileType(bestTile)],
+          riichiValue: evTrace.riichi[tileType(bestTile)],
+        }
+        : {}),
     };
     this.lastTrace = trace;
     if (riichi && !this.riichiBanned(ctx, bestTile) && this.riichiClean(ctx, riichi)) {
@@ -1446,6 +2033,50 @@ export class HeuristicPolicy implements SyncPolicy {
       }
     }
     return plain ?? group[0];
+  }
+
+  /**
+   * M15. WHICH of the core's four numbers prices this candidate — the one line
+   * the seat is actually going to play.
+   *
+   * FOLDING TAKES THE FOLD LINE (2026-08-30 review; this was the fatal one).
+   * `computeFold` decides by `bestFold > bestPush`, so a seat that has decided
+   * to fold has decided that the fold line is the better of the two — and then
+   * ranked its candidates by `O_TOTAL`, which is the PUSH line and does not
+   * even contain a fold option. The two argmaxes are different tiles by
+   * construction: `O_TOTAL` pays for the shape's future and `O_FOLDLINE` pays
+   * for surviving without one, so the folding seat threw the tile that best
+   * advanced a hand it had just abandoned. `O_FOLDLINE` is the same root
+   * arithmetic (`−costIn − endCost + surv·fold`), so the two are comparable
+   * numbers in the same units and the dojo/sense taxes subtract off either.
+   *
+   * PUSHING TAKES `O_TOTAL`, which is `max(dama, riichi)` — but the riichi half
+   * of that max is only real if the seat would be ALLOWED to declare. The
+   * dojo's 禁じ手 (地獄単騎, 即引っかけ) and the referee's own reading are
+   * vetoes applied AFTER the tile is chosen, and the DP knows nothing about
+   * either, so a candidate whose riichi is forbidden must be priced at its dama
+   * line: otherwise the seat picks a tile for a declaration it will then be
+   * refused, and plays the shape damaten at a price it never compared.
+   * `wantRiichi`'s own preferences (furiten, 純カラ) are deliberately NOT
+   * applied here — those are judgements the DP prices for itself; these two are
+   * rules it cannot see.
+   */
+  private evPriceOf(
+    ctx: Ctx,
+    evd: EvResult,
+    byTile: Map<Tile, Extract<Action, { t: "discard" }>[]>,
+    tile: Tile,
+  ): number {
+    const ty = tileType(tile);
+    if (ctx.folding) return evd.foldLine[ty];
+    // The declaration is not what the max would take: nothing to check.
+    if (!(evd.riichi[ty] > evd.dama[ty])) return evd.total[ty];
+    // Not on offer at all (open, already declared, under 1000 点, wall < 4, or
+    // the discard does not leave tenpai) — `legal.ts` is the authority.
+    const decl = byTile.get(tile)?.find((d) => d.riichi);
+    if (!decl) return evd.dama[ty];
+    if (this.riichiBanned(ctx, tile) || !this.riichiClean(ctx, decl)) return evd.dama[ty];
+    return evd.total[ty];
   }
 
   /**
@@ -1771,10 +2402,32 @@ export class HeuristicPolicy implements SyncPolicy {
 
     if (obs.wallRemaining < 4) return false;
 
-    // M12. The four gates above are exactly the pre-head policy and stay so —
-    // the head is consulted only INSIDE the region they admit, and only to pick
-    // declare over damaten. Absent, declaring unconditionally is the answer the
-    // gates have always given.
+    // M15 UNIT C. The four gates above are untouched — they are dojo doctrine
+    // and a price never re-admits what a veto struck out — but INSIDE them the
+    // question "declare or stay damaten" is a comparison of two prices for the
+    // shape this discard leaves behind, and the core answers it exactly:
+    // `V_riichi` against `V_dama` for the CHOSEN tile's type, both out of the
+    // same sweep the discard score was read from. The M12 head is not consulted
+    // (D3: a vector carrying both is refused at load), and the 最終形 doctrine
+    // it encoded is re-expressed by the DP's own hold-for-upgrade branch plus
+    // `riichiMargin` — whether that reproduces the 2026-08-27 ruling is what
+    // the paired grade of unit C measures.
+    //
+    // The DP reports `O_RIICHI` as −inf (or simply equal to dama) where riichi
+    // is not available for a candidate, so a non-finite pair is read as "no
+    // declaration on offer here" rather than as a comparison.
+    const evr = this.evRiichiPrice(obs);
+    if (evr) {
+      const ty = tileType(discard);
+      const r = evr.riichi[ty];
+      const d = evr.dama[ty];
+      if (!Number.isFinite(r) || !Number.isFinite(d)) return false;
+      return r > d + this.ev!.params.riichiMargin;
+    }
+
+    // M12. Absent the core, the head is consulted only INSIDE the region the
+    // gates admit, and only to pick declare over damaten. Absent both,
+    // declaring unconditionally is the answer the gates have always given.
     if (!this.riichiHead) return true;
     return decideRiichi(this.riichiFeatures(ctx, discard), this.riichiHead);
   }
@@ -1961,6 +2614,22 @@ export class HeuristicPolicy implements SyncPolicy {
     if (calls.length === 0) return null;
     if (ctx.folding) return null;
 
+    // M15 UNIT D. With the core serving calls the ACCEPTANCE RULE changes and
+    // the VETOES do not: `hasYakuProspect` (inside `callShape`) and the
+    // referee's compliance test (applied by `decide`, outside this hook) strike
+    // out exactly what they always struck out, and the surviving calls are
+    // ranked by price instead of by shanten.
+    //
+    // THE SHANTEN-IMPROVEMENT REQUIREMENT IS WHAT GOES. "Only a call that buys
+    // a step" is a rule about SPEED, and speed is one term of a value the DP
+    // computes in full — a 役牌ポン that leaves shanten alone can still be the
+    // better hand, because it converts a yakuless shape into a scoring one and
+    // takes the tile off the table; conversely a step bought into a cheap,
+    // open, defenceless hand can price below simply holding. So the comparison
+    // is the plan's: `bestPush(post-call) − V_pass > callMargin`, with V_pass
+    // the value of holding the 13 tiles we have.
+    if (this.ev?.params.calls) return this.chooseCallByEv(ctx, calls);
+
     let best: Action | null = null;
     let bestSh = ctx.obs.shanten;
     for (const a of calls) {
@@ -1975,11 +2644,59 @@ export class HeuristicPolicy implements SyncPolicy {
     return best;
   }
 
-  /** Shanten after taking the call, or null if the call is one we refuse. */
-  private shantenAfterCall(
+  /**
+   * M15 unit D: the priced call choice. The best-priced admissible call, or
+   * null when none of them beats passing by `callMargin`.
+   *
+   * Ties go to the call that appears first in `legal`, which is the driver's
+   * own deterministic order — the same tie-break discipline as the incumbent
+   * loop, which keeps its first strict improvement.
+   */
+  private chooseCallByEv(ctx: Ctx, calls: Action[]): Action | null {
+    const { obs } = ctx;
+    const pass = this.evPassValue(obs);
+    // The DP refused the root (an ill-formed rest can only be a caller bug, but
+    // a refusal is not a reason to call): with no PASS line to compare against
+    // there is no comparison, and not calling is the null action.
+    if (!Number.isFinite(pass)) return null;
+
+    const m = this.cache(obs);
+    const memo = m.evCalls ?? (m.evCalls = new Map<string, number>());
+
+    let best: Action | null = null;
+    let bestValue = -Infinity;
+    for (const a of calls) {
+      if (a.t !== "pon" && a.t !== "chi") continue;
+      const shape = this.callShape(ctx, a);
+      if (!shape) continue; // 役の見込み無し / 取れない — a veto, not a price
+      const key = shape.melds[shape.melds.length - 1].tiles.join(",");
+      let v = memo.get(key);
+      if (v === undefined) {
+        v = this.evPushOf(obs, shape.rest, shape.melds);
+        memo.set(key, v);
+      }
+      if (!Number.isFinite(v)) continue;
+      if (v > bestValue) {
+        bestValue = v;
+        best = a;
+      }
+    }
+    if (!best) return null;
+    return bestValue - pass > this.ev!.params.callMargin ? best : null;
+  }
+
+  /**
+   * The shape a call would leave — concealed rest, melds including the new one,
+   * and its shanten — or null if the call is one we refuse.
+   *
+   * The refusals are the doctrine's, and they are the same two whichever
+   * acceptance rule runs afterwards: a call whose tiles we do not hold (a
+   * driver bug), and one that opens a hand with no route to a yaku at all.
+   */
+  private callShape(
     ctx: Ctx,
     a: Extract<Action, { t: "pon" | "chi" }>,
-  ): number | null {
+  ): { rest: Tile[]; melds: Meld[]; shanten: number } | null {
     const { obs } = ctx;
     const rest = [...obs.hand];
     for (const t of a.tiles) {
@@ -2003,7 +2720,15 @@ export class HeuristicPolicy implements SyncPolicy {
       return null;
     }
 
-    return shanten(countsFromTiles(rest), melds.length, false);
+    return { rest, melds, shanten: shanten(countsFromTiles(rest), melds.length, false) };
+  }
+
+  /** Shanten after taking the call, or null if the call is one we refuse. */
+  private shantenAfterCall(
+    ctx: Ctx,
+    a: Extract<Action, { t: "pon" | "chi" }>,
+  ): number | null {
+    return this.callShape(ctx, a)?.shanten ?? null;
   }
 
   /**
@@ -2090,8 +2815,10 @@ export class HeuristicPolicy implements SyncPolicy {
     const ankan = legal.find((a) => a.t === "ankan");
 
     if (!this.dojo) {
-      // Off the dojo leash, a kan is just value: take whichever is offered.
-      return ankan ?? legal.find((a) => a.t === "kakan") ??
+      // Off the dojo leash, a kan is just value: take whichever is offered —
+      // subject, with the core on, to it actually BEING value (unit D).
+      if (ankan && ankan.t === "ankan") return this.kanWorthIt(ctx, ankan) ? ankan : null;
+      return legal.find((a) => a.t === "kakan") ??
         legal.find((a) => a.t === "daiminkan") ?? null;
     }
 
@@ -2101,7 +2828,70 @@ export class HeuristicPolicy implements SyncPolicy {
     if (!ankan || ankan.t !== "ankan") return null;
     if (!ctx.closed || obs.shanten > 0) return null;
     if (this.kanChangesWait(ctx, ankan.type)) return null;
-    return ankan;
+    return this.kanWorthIt(ctx, ankan) ? ankan : null;
+  }
+
+  /**
+   * M15 unit D: is this 暗槓 worth taking? The vetoes above have already run —
+   * this is the PRICE, and only the price: the post-kan rest (10 concealed
+   * tiles, melds + 1, with the kan-dora reveal pending) against the best push
+   * line of the hand as it stands.
+   *
+   * Answers "yes" — the incumbent verdict — whenever the core has no opinion:
+   * the switch is off, this is not a 14-tile root (a 大明槓 claim has no
+   * discard root to compare against, and unit D does not price one), the hand
+   * is being abandoned, or either line came back non-finite. A kan the DP
+   * cannot price is a kan the doctrine already cleared.
+   */
+  private kanWorthIt(ctx: Ctx, ankan: Extract<Action, { t: "ankan" }>): boolean {
+    const { obs } = ctx;
+    if (!this.ev?.params.calls || ctx.folding || !this.evRoot(obs)) return true;
+
+    const rest: Tile[] = [];
+    const four: Tile[] = [];
+    for (const t of obs.hand) {
+      if (tileType(t) === ankan.type && four.length < 4) four.push(t);
+      else rest.push(t);
+    }
+    if (four.length < 4) return true; // not actually a concealed four
+
+    const meld: Meld = {
+      kind: "ankan",
+      who: obs.seat,
+      fromWho: obs.seat,
+      tiles: four,
+      calledTile: four[0],
+    };
+    // `kanDoraOn`: the new indicator is what a kan BUYS, and the DP prices it
+    // by counting over the unseen pool. Without it the comparison could only
+    // ever come out negative — a kan freezes the wait and hands the table a
+    // dora. The channels of `hiddenInfoOf` do NOT ride along (`evHoldOf`
+    // defaults to none): the rinshan tile comes before the draw they describe.
+    const hold = this.evHoldOf(obs, rest, [...obs.melds[0], meld], true);
+    const push = this.evOf(obs).bestPush;
+    if (!Number.isFinite(hold) || !Number.isFinite(push)) return true;
+
+    // THE TWO LINES HAVE TO PAY THE SAME TOLL (2026-08-30 review). `bestPush`
+    // is a DISCARD root: every candidate it maxes over has already paid
+    // `−costIn` for the tile it lets go. `mjev_eval_rest` is a 13-tile hold and
+    // pays nothing — but the kan line does not skip the discard, it defers it
+    // by one draw (kan → rinshan → discard). Comparing the two raw made every
+    // kan look cheaper than every push by the price of a deal-in, which on a
+    // loud table is the whole decision. The cheapest tile the post-kan hand
+    // could let go is the floor of what that deferred discard will cost, so it
+    // comes off the hold line before the margin is applied.
+    let toll = Infinity;
+    const priced = new Set<number>();
+    for (const t of rest) {
+      const ty = tileType(t);
+      if (priced.has(ty)) continue;
+      priced.add(ty);
+      const c = this.dealinCostPts(ctx, t);
+      if (c < toll) toll = c;
+    }
+    if (!Number.isFinite(toll)) toll = 0;
+
+    return (hold - toll) - push > this.ev.params.callMargin;
   }
 
   /** Does declaring this ankan change what the hand is waiting on? */

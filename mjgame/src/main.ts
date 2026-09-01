@@ -7,6 +7,8 @@ import { CalibrationWriter } from "./ai/calibration.ts";
 import { mergeComputed } from "./ai/computed.ts";
 import { FoldCalibrationWriter } from "./ai/foldcalib.ts";
 import { HandCalibrationWriter } from "./ai/handcalib.ts";
+import { EvCalibrationWriter } from "./ai/evcalib.ts";
+import { mergeEv } from "./ai/evparams.ts";
 import { mergeHand } from "./ai/handvalue.ts";
 import { parseArgs } from "./cli/args.ts";
 import type { Args } from "./cli/args.ts";
@@ -14,7 +16,15 @@ import { die } from "./cli/die.ts";
 import { USAGE } from "./cli/usage.ts";
 import { makeDojoHooks } from "./dojo.ts";
 import { writeExport } from "./export.ts";
-import { headless, headlessParallel, loadKtune, makePolicy } from "./harness.ts";
+import {
+  closeArm,
+  headless,
+  headlessParallel,
+  loadKtune,
+  makePolicy,
+  openArm,
+  playGame,
+} from "./harness.ts";
 import type { HeuristicPolicy } from "./ai/heuristic.ts";
 import type { HeadlessOptions, RunReport, SeatPolicy } from "./harness.ts";
 import { kindString } from "./spec.ts";
@@ -233,6 +243,36 @@ function makeFoldCalibWriter(a: Args): FoldCalibrationWriter | undefined {
   });
 }
 
+/**
+ * M15b's EV核 recorder for a run, or nothing.
+ *
+ * The header states the parameter vector the stored predictions were made
+ * under, and it is `DEFAULT_EV` by construction: `argError` refuses the flag
+ * beside an `ev` block, so the recording seat carries none and the writer's own
+ * core is the only one in the process. `mergeEv({})` spells that out rather
+ * than leaving it implicit — a file has to be self-describing.
+ */
+function makeEvCalibWriter(a: Args): EvCalibrationWriter | undefined {
+  if (!a.evcalib) return undefined;
+  return new EvCalibrationWriter(a.evcalib, {
+    seats: a.seats,
+    seed: a.seed,
+    games: a.games,
+    ev: mergeEv({}),
+  });
+}
+
+/** What an EV-recording run wrote, dropped samples and truncations included. */
+function evCalibReport(a: Args, cal?: EvCalibrationWriter): void {
+  if (!cal) return;
+  const st = cal.stats();
+  console.log(
+    `EV核 ${a.evcalib}: 自摸番 ${st.rows}行  (半荘 ${st.games})` +
+      (st.truncated > 0 ? `  節点上限に当たった評価 ${st.truncated}件` : "") +
+      (st.dropped > 0 ? `  未決着のゆえ破棄 ${st.dropped}行` : ""),
+  );
+}
+
 /** What a fold-recording run wrote — rows, flips, and the D7 caveat's size. */
 function foldCalibReport(a: Args, cal?: FoldCalibrationWriter): void {
   if (!cal) return;
@@ -284,11 +324,13 @@ async function cmdSelfplay(a: Args): Promise<void> {
   const calibrate = makeCalibrationWriter(a);
   const handCalib = makeHandCalibWriter(a);
   const foldCalib = makeFoldCalibWriter(a);
+  const evCalib = makeEvCalibWriter(a);
   try {
     const opts: HeadlessOptions = {
       calibrate,
       handCalib,
       foldCalib,
+      evCalib,
       foldEps: a.foldEps,
       weights: a.weights,
       temp: a.temp,
@@ -318,10 +360,12 @@ async function cmdSelfplay(a: Args): Promise<void> {
     calibrate?.close();
     handCalib?.close();
     foldCalib?.close();
+    evCalib?.close();
   }
   calibrationReport(a, calibrate);
   handCalibReport(a, handCalib);
   foldCalibReport(a, foldCalib);
+  evCalibReport(a, evCalib);
 }
 
 /**
@@ -459,16 +503,19 @@ function cmdPaired(a: Args): void {
   const calibrate = makeCalibrationWriter(a);
   const handCalib = makeHandCalibWriter(a);
   const foldCalib = makeFoldCalibWriter(a);
+  const evCalib = makeEvCalibWriter(a);
   try {
-    cmdPairedInner(a, calibrate, handCalib, foldCalib);
+    cmdPairedInner(a, calibrate, handCalib, foldCalib, evCalib);
   } finally {
     calibrate?.close();
     handCalib?.close();
     foldCalib?.close();
+    evCalib?.close();
   }
   calibrationReport(a, calibrate);
   handCalibReport(a, handCalib);
   foldCalibReport(a, foldCalib);
+  evCalibReport(a, evCalib);
 }
 
 function cmdPairedInner(
@@ -476,12 +523,14 @@ function cmdPairedInner(
   calibrate?: CalibrationWriter,
   handCalib?: HandCalibrationWriter,
   foldCalib?: FoldCalibrationWriter,
+  evCalib?: EvCalibrationWriter,
 ): void {
   if (a.games < 1) die("--games は1以上");
   const st = pairedRun(a.games, a.seed, a.table ?? a.seats, {
     calibrate,
     handCalib,
     foldCalib,
+    evCalib,
     foldEps: a.foldEps,
     weights: a.weights,
     temp: a.temp,
@@ -591,7 +640,13 @@ function cmdPairedInner(
 // ---------------------------------------------------------------------------
 
 function cmdBench(a: Args): void {
-  const { results, ms } = headless(a.games, a.seed, a.table ?? a.seats, {
+  // `openArm`/`playGame` rather than `headless`, for one reason: the throughput
+  // this command exists to report is per DECISION, and only the seat knows how
+  // many it was asked for. The counters live on the policy (see
+  // `HeuristicPolicy.decisions` / `evStats`), never in `MatchResult` — a
+  // `RunReport` that carried them would put wall-clock-shaped numbers inside
+  // the object every byte-identity claim in the suite is stated against.
+  const arm = openArm(a.table ?? a.seats, {
     weights: a.weights,
     oracle: a.oracle,
     noise: a.noise,
@@ -602,10 +657,33 @@ function cmdBench(a: Args): void {
     standings: a.standings,
     consumer: a.consumer,
   });
-  const rounds = results.reduce((n, r) => n + r.rounds.length, 0);
-  const secs = ms / 1000;
+  let rounds = 0;
+  let secs: number;
+  // Read BEFORE `closeArm`: closing frees the seat's native EV context.
+  let seat0: Pick<HeuristicPolicy, "decisions" | "evStats"> | null = null;
+  try {
+    const t0 = performance.now();
+    for (let g = 0; g < a.games; g++) rounds += playGame(arm, a.seed + g).rounds.length;
+    secs = (performance.now() - t0) / 1000;
+    const p = arm.built[0].policy as Partial<HeuristicPolicy>;
+    if (typeof p.decisions === "number" && p.evStats) {
+      seat0 = { decisions: p.decisions, evStats: p.evStats };
+    }
+  } finally {
+    closeArm(arm);
+  }
   console.log(`${a.games} 半荘 / ${rounds} 局 を ${secs.toFixed(3)}s`);
   console.log(`${(a.games / secs).toFixed(1)} 半荘/秒   ${(rounds / secs).toFixed(0)} 局/秒`);
+  if (seat0) {
+    console.log(`${(seat0.decisions / secs).toFixed(0)} 決定/秒 (席0, ${seat0.decisions} 決定)`);
+    const ev = seat0.evStats;
+    if (ev.calls > 0) {
+      console.log(
+        `EV核: ${ev.calls} 回  平均 ${(ev.nodes / ev.calls).toFixed(0)} nodes  ` +
+          `最大 ${ev.maxNodes}  打ち切り ${ev.truncated} 回`,
+      );
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------

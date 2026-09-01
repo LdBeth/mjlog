@@ -19,6 +19,7 @@ import {
   AugmentedHeuristic,
   calibrationReads,
   curriculumReads,
+  mergeAugmented,
   noisyReads,
   oracleReads,
   parseChannels,
@@ -34,6 +35,9 @@ import {
   learnedReads,
   mergeDealin,
 } from "./ai/dealin.ts";
+import { buildEv, closeEv } from "./ai/ev.ts";
+import type { EvCore } from "./ai/ev.ts";
+import { mergeEv } from "./ai/evparams.ts";
 import { mergeFold } from "./ai/fold.ts";
 import type { FoldSample } from "./ai/fold.ts";
 import type { FoldCalibrationWriter } from "./ai/foldcalib.ts";
@@ -49,6 +53,7 @@ import {
   FROZEN_SENSE,
 } from "./ai/frozen.ts";
 import type { HandCalibrationWriter, HandSample } from "./ai/handcalib.ts";
+import type { EvCalibrationWriter, EvSample } from "./ai/evcalib.ts";
 import { mergeHand } from "./ai/handvalue.ts";
 import type { HandWeights } from "./ai/handvalue.ts";
 import { mergeRiichi } from "./ai/riichi.ts";
@@ -128,6 +133,17 @@ export interface MakePolicyOptions extends SeatSpec {
    */
   foldSink?: (rec: FoldSample) => void;
   foldEps?: number;
+  /**
+   * M15b: where this seat's EV-core calibration wires go. A "k" seat only, and
+   * only on a vector with NO `ev` block — `makePolicy` refuses the combination
+   * below, because a lane recorded under the DP is censored by the DP's own
+   * folds (the M11 lesson, measured).
+   *
+   * Like `handSink` it needs no tap on the Table and perturbs nothing: the
+   * policy packs the wire it would have handed a core and hands it to the
+   * writer instead.
+   */
+  evSink?: (rec: EvSample) => void;
 }
 
 /**
@@ -276,6 +292,70 @@ export function makePolicy(o: MakePolicyOptions): SeatPolicy {
       }
       return reads;
     };
+    // M15's expected-value core. Same ownership rule as the fold head below —
+    // built exactly once HERE, never inside `build`, freed in the seat's
+    // `close()` — and built FIRST, so a refused layout is refused before any
+    // other component has allocated anything. It is the strictest of the
+    // family in two further ways.
+    //
+    // IT REFUSES WHAT IT SUPERSEDES (plan D3). `mergeEv` is pure data, so the
+    // conflicts below are decided BEFORE `buildEv` is ever called: a layout
+    // that is refused must be refused on a machine with no dylib, or the
+    // diagnostic a user gets for a bad table would be "build the library
+    // first". A block that would be loaded and then never consulted is a
+    // silent no-op, which is the one thing the flag discipline does not allow.
+    //
+    // AND IT HAS NO FALLBACK. `buildEv` THROWS on a missing/stale `libmjev`,
+    // on a missing `--allow-ffi`, and under `MJGAME_NATIVE=0`; a seat that
+    // quietly went back to the linear surrogate would be graded as the DP.
+    const evParams = o.ktune?.ev ? mergeEv(o.ktune.ev) : undefined;
+    if (evParams) {
+      // THROWN, not `die`d: `die` exits the process, and this refusal has to
+      // be assertable from a test that never spawns one (`mergeFold` /
+      // `mergeDealin` refuse a malformed block the same way, and the CLI turns
+      // the exception into a message).
+      const both = (other: string): never => {
+        throw new Error(
+          `ev ブロック と ${other} は併用できません (M15 D3: EV核が置き換える側なので、` +
+            `${other} は積まれても一度も参照されません — 黙って無効になるくらいなら拒否します)`,
+        );
+      };
+      // M15b, and NOT gated on a sub-switch: the calibration lane must be the
+      // PLAIN champion's continuation of the hand, so any `ev` block at all
+      // disqualifies the seat from recording it.
+      if (o.evSink) both("--evcalib (M15b EV核レーン)");
+      if (evParams.discard) {
+        // The DP owns the discard score core AND the push/fold verdict, so
+        // every incumbent owner of either is refused while `ev.discard` is on.
+        if (o.consumer) both("consumer (M9 の学習消費器)");
+        if (o.ktune?.hand) both("hand ブロック (M11 手牌価値)");
+        if (o.ktune?.fold) both("fold ブロック (M13 押し引きヘッド)");
+        if (o.foldSink) both("--foldcalib (M13 押し引きレーン)");
+      }
+      // `ev.riichi` replaces the declare-vs-damaten decision inside the gates,
+      // which is exactly what the M12 head does (plan D3: unit C is graded as
+      // `champion − riichi + ev`, so the substitution has to be explicit).
+      if (evParams.riichi && o.ktune?.riichi) both("riichi ブロック (M12 リーチヘッド)");
+
+      // D4 の換算率が本当に換算率であること。`dealinCostPts` は `riskOf` と
+      // 「同じ式の単位違い」であることを契約にしていて、その等式が成り立つのは
+      // λ = 1/pointsPerScore のときだけです (λ は線形サロゲートの消費スカラ、
+      // pointsPerScore は DP の交換レート — 別々に調整できてしまう)。ずれた
+      // まま走ると、同じ牌が同じ判断の中で二つの値段を持つことになるので、
+      // 積む前に断ります。dylib は要りません (mergeEv と同じく純データ)。
+      const lambda = mergeAugmented(o.ktune?.augment).lambda;
+      const product = evParams.pointsPerScore * lambda;
+      if (Math.abs(product - 1) > 1e-9) {
+        throw new Error(
+          `ev.pointsPerScore × augment.lambda は 1 でなければなりません ` +
+            `(${evParams.pointsPerScore} × ${lambda} = ${product}): ` +
+            `dealinCostPts は riskOf を points に換算しただけのものという契約 (M15 D4) が` +
+            `この等式に乗っています — どちらか一方だけを動かすと、同じ牌が同じ判断の中で` +
+            `二つの値段を持ちます`,
+        );
+      }
+    }
+    const evCore: EvCore | undefined = evParams ? buildEv(evParams) : undefined;
     // M13's fold head. Unlike `hand`/`riichi` this is a BUILT object — it may
     // hold a native context — so it is constructed exactly once, here, and
     // freed in the seat's `close()` below. And unlike them it reaches a "k"
@@ -299,11 +379,13 @@ export function makePolicy(o: MakePolicyOptions): SeatPolicy {
         riichi: riichiHead,
         sense: o.ktune?.sense,
         handSink: o.handSink,
+        evSink: o.evSink,
         fold: foldHead,
         foldSink: o.foldSink,
+        ev: evCore,
         ...(o.foldEps ? { foldExplore: { eps: o.foldEps } } : {}),
       }));
-    if (!foldHead && !dealinHeads) return seat;
+    if (!foldHead && !dealinHeads && !evCore) return seat;
     // `withReads` returns a no-op `close`; the heads are the one thing this seat
     // owns that the process would otherwise leak per seat, per run.
     return {
@@ -311,6 +393,8 @@ export function makePolicy(o: MakePolicyOptions): SeatPolicy {
       close: () => {
         if (foldHead) closeMlp(foldHead);
         if (dealinHeads) closeDealinHeads(dealinHeads);
+        // Idempotent by contract (`closeEv`), because `closeArm` is.
+        if (evCore) closeEv(evCore);
       },
     };
   }
@@ -499,6 +583,16 @@ export interface HeadlessOptions {
    */
   foldCalib?: FoldCalibrationWriter;
   /**
+   * M15b: SEAT 0's EV-core recorder, one file for the whole run. A WRITER and
+   * not a path, for `handCalib`'s two reasons — and for a third of its own: the
+   * writer OWNS the `EvCore` every wire is evaluated through, so it is the only
+   * object in the run that may be built once and freed once.
+   *
+   * A "k" seat 0 only, and (enforced in `makePolicy`) only on a vector with no
+   * `ev` block.
+   */
+  evCalib?: EvCalibrationWriter;
+  /**
    * M13: the ε of the fold-flip lane, 0 < ε < 1. 0 (the default) is a pure
    * observation lane: the recorder writes what the incumbent gate decided and
    * nothing is perturbed. Only meaningful with `foldCalib`; the CLI refuses the
@@ -535,6 +629,8 @@ export interface Arm {
   readonly handCalib: HandCalibrationWriter | undefined;
   /** Set only when seat 0 is a "k" seat under an M13 fold lane. */
   readonly foldCalib: FoldCalibrationWriter | undefined;
+  /** Set only when seat 0 is a "k" seat under an M15b EV核 lane. */
+  readonly evCalib: EvCalibrationWriter | undefined;
 }
 
 /**
@@ -570,6 +666,9 @@ export function openArm(seats: string | TableSpec, opts: HeadlessOptions = {}): 
   // and a lane recorded off the frozen baseline would fit a rule that seat can
   // never carry.
   const foldCalibOn = opts.foldCalib !== undefined && table[0].kind === "k";
+  // M15b's lane. "k" ONLY, like M13's: the core the lane fits is routed to "k"
+  // seats alone. (The `ev`-block refusal is `makePolicy`'s, where the vector is.)
+  const evCalibOn = opts.evCalib !== undefined && table[0].kind === "k";
   const wiring: OracleWiring = {
     get: () => ref.t,
     channels: opts.oracle ?? new Set(),
@@ -590,6 +689,7 @@ export function openArm(seats: string | TableSpec, opts: HeadlessOptions = {}): 
       handSink: handCalibOn && seat === 0 ? opts.handCalib!.record : undefined,
       foldSink: foldCalibOn && seat === 0 ? opts.foldCalib!.record : undefined,
       foldEps: foldCalibOn && seat === 0 ? opts.foldEps : undefined,
+      evSink: evCalibOn && seat === 0 ? opts.evCalib!.record : undefined,
     })
   );
   // Record ONLY neural seats: ppo.py recomputes behavior logp from --init, so a
@@ -614,6 +714,7 @@ export function openArm(seats: string | TableSpec, opts: HeadlessOptions = {}): 
     calibrate: calibrateOn ? opts.calibrate : undefined,
     handCalib: handCalibOn ? opts.handCalib : undefined,
     foldCalib: foldCalibOn ? opts.foldCalib : undefined,
+    evCalib: evCalibOn ? opts.evCalib : undefined,
   };
 }
 
@@ -626,6 +727,7 @@ export function playGame(arm: Arm, seed: number): MatchResult {
   arm.calibrate?.beginGame(seed);
   arm.handCalib?.beginGame(seed);
   arm.foldCalib?.beginGame(seed);
+  arm.evCalib?.beginGame(seed);
   for (const seat of SEATS) arm.built[seat].reset(seed * 4 + seat);
   // Without the hooks the ledger is always empty and the stats line would
   // report "違反 0件" no matter what actually happened.
@@ -642,6 +744,7 @@ export function playGame(arm: Arm, seed: number): MatchResult {
   // dependency — but it is a FIXED convention, so two lanes of one run
   // interleave the same way every time.
   const foldCalib = arm.foldCalib;
+  const evCalib = arm.evCalib;
   const r = runMatchSync(arm.policies, {
     seed,
     cfg: JANKI,
@@ -649,12 +752,13 @@ export function playGame(arm: Arm, seed: number): MatchResult {
     scorer,
     tableRef: arm.tableRef,
     ...hooks,
-    ...(handCalib || foldCalib
+    ...(handCalib || foldCalib || evCalib
       ? {
         onRoundEnd: (t: Table, outcome: RoundOutcome) => {
           hooks.onRoundEnd(t, outcome);
           handCalib?.endRound(t, outcome);
           foldCalib?.endRound(t, outcome);
+          evCalib?.endRound(t, outcome);
         },
       }
       : {}),
@@ -755,6 +859,7 @@ export type ArmSpec = Omit<
   | "calibrate"
   | "handCalib"
   | "foldCalib"
+  | "evCalib"
   | "ktuneB"
   | "consumerB"
   | "tableB"
@@ -851,6 +956,7 @@ export async function headlessParallel(
 ): Promise<RunReport> {
   if (opts.calibrate) throw new Error("headlessParallel: --calibrate cannot be sharded");
   if (opts.handCalib) throw new Error("headlessParallel: --handcalib cannot be sharded");
+  if (opts.evCalib) throw new Error("headlessParallel: --evcalib cannot be sharded");
   // Resolved HERE, once: every shard receives the same four specs, so a table
   // and its seats-string form shard identically by construction.
   const table = typeof seats === "string" ? resolveTable(seats, opts) : seats;
@@ -860,6 +966,7 @@ export async function headlessParallel(
     writer: _w,
     calibrate: _c,
     handCalib: _hc,
+    evCalib: _ec,
     ktuneB: _kb,
     consumerB: _cb,
     ...spec

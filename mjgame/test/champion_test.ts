@@ -117,6 +117,7 @@ Deno.test("champion: the computed calibration, and NO hand block", () => {
   // the owner's word. A block appearing here by merge accident would silently
   // re-crown an ungraded seat, exactly as a `hand` block would.
   assertEquals(k.fold, undefined, "fold ブロックは未昇格 (M13 は対戦評価と主の判断待ち)");
+  assertEquals(k.ev, undefined, "ev ブロックは未昇格 (M15)");
   // M14 PROMOTED 2026-08-30: the learned deal-in read is the champion's price
   // of a tile. `augment.floor` (the rule ladder's floor under the estimate) is
   // the owner's separate decision — 0.25 is the arena-tested value; 0.5 and 0

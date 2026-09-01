@@ -28,6 +28,8 @@ import type { CalibRecord } from "./calibration.ts";
 import { buildCalibRecord } from "./calibration.ts";
 import type { ComputedTrace, ComputedTraceRef } from "./computed.ts";
 import type { DealinRecordExtras } from "./dealin.ts";
+import type { EvHidden } from "./evpack.ts";
+import { indicatorOfDora } from "./evpack.ts";
 import type { Ctx, HeuristicOptions } from "./heuristic.ts";
 import { HeuristicPolicy } from "./heuristic.ts";
 import type { PlannerOptions, TargetPlan } from "./planner.ts";
@@ -645,6 +647,13 @@ export class AugmentedHeuristic extends HeuristicPolicy {
    * What comes back is a PROPOSAL: `HeuristicPolicy.decide` puts it past the
    * referee preview before playing it, so a plan that asks for a ledgerable call
    * simply does not get it.
+   *
+   * M15 UNIT D: THIS PATH KEEPS PRECEDENCE. With a target locked the plan
+   * decides, and the EV core is not asked — a lock is a commitment to a named
+   * future, and re-pricing every call against the whole hand would be exactly
+   * the "fast, cheap and yakuless" drift the lock exists to prevent. The core
+   * serves the calls this override delegates: no target, or a fold in progress,
+   * and `super.chooseCall` prices them (plan §4.5).
    */
   protected override chooseCall(ctx: Ctx, legal: Action[]): Action | null {
     const target = this.target;
@@ -700,6 +709,134 @@ export class AugmentedHeuristic extends HeuristicPolicy {
     }
     // RULE FLOOR, bottom half.
     return Math.max(this.aw.lambda * risk, this.aw.floor * base) + this.surcharge(ctx, tile);
+  }
+
+  // ---------------------------------------------------------------- EV核 (M15)
+
+  /**
+   * The root deal-in probability the DP is told about one candidate: the same
+   * `dealinP` sum `riskOf` multiplies by a payment, handed over unmultiplied.
+   *
+   * The DP wants the two factors SEPARATELY — it uses the probability again in
+   * its own survival term — so this is not a decomposition of `riskOf` after
+   * the fact; it is the estimate before `riskOf` ever collapsed it.
+   */
+  protected override dealinProbOf(_ctx: Ctx, tile: Tile): number {
+    const dealinP = this.reads?.dealinP;
+    if (!dealinP) return 0;
+    const ty = tileType(tile);
+    let p = 0;
+    for (let i = 0; i < 3; i++) p += dealinP[i][ty];
+    return p;
+  }
+
+  /**
+   * `riskOf`'s arithmetic in POINTS — the same expression, exit for exit, with
+   * `lambda` dropped and `floor` scaled into the points ladder.
+   *
+   * The correspondence is exact rather than approximate, and worth stating:
+   * `riskOf` returns `max(λ·risk, floor·base) + surcharge` in score units, and
+   * λ is 1/`pointsPerScore` by construction, so multiplying through by
+   * `pointsPerScore` gives `max(risk, floor·base·pps) + surcharge·pps` — the
+   * body below. `test/ev_wiring_test.ts` asserts the two agree on real boards
+   * rather than trusting the algebra.
+   *
+   * 順位効用's `risk` multiplies the result, where the incumbent path applies
+   * it as `Ctx.def`.
+   */
+  protected override dealinCostPts(ctx: Ctx, tile: Tile): number {
+    const pps = this.pointsPerScore();
+    const st = this.standingsOf(ctx.obs);
+    const level = this.dangerLevelOf(ctx, tile);
+    const surcharge = this.surcharge(ctx, tile) * pps;
+    const dealinP = this.reads?.dealinP;
+    if (!dealinP) {
+      // NO READ ⇒ the base policy's price exactly, 安全 rung included: with no
+      // estimate there is nothing for the proof to outrank, and `riskOf`'s own
+      // no-read exit above is `base + surcharge` with `base = ruleRisk(level)`.
+      // (2026-08-30 review: this branch zeroed the rung and the one above did
+      // not, so the two disagreed under any vector that priced 安全.)
+      return (this.ruleRisk(level) * pps + surcharge) * st.risk;
+    }
+    // 安全 is a proof (genbutsu) and stays free of every estimate — the top
+    // half of `riskOf`'s rule floor, and the same insistence that the proof be
+    // EXPLICIT: an absent entry is absence of assessment, not of danger.
+    if (level === "安全") return surcharge * st.risk;
+
+    const ty = tileType(tile);
+    let risk = 0;
+    for (let i = 0; i < 3; i++) {
+      const p = dealinP[i][ty];
+      if (p <= 0) continue;
+      const v = this.reads?.dealinValue?.[i]?.[ty] ?? this.reads?.expLoss?.[i] ?? ASSUMED_LOSS;
+      risk += p * v;
+    }
+    // The rule floor's bottom half, in points: the ladder's score-unit price
+    // times the exchange rate.
+    return (Math.max(risk, this.aw.floor * this.ruleRisk(level) * pps) + surcharge) * st.risk;
+  }
+
+  /**
+   * The DP's hidden-information channels (plan D7), filled from whatever this
+   * seat's `Reads` actually carry.
+   *
+   * ONE-HOTS ARE THE DEGENERATE CASE. The oracle knows the next own draw, the
+   * next kan-dora and the live wall exactly, so each channel is a point mass;
+   * a learned hidden-information module will return soft distributions through
+   * the identical fields, and the engine cannot tell the two apart. That is the
+   * whole design: the ablation and the eventual module share one seam.
+   *
+   * `nextDora` is converted from a DORA type to an INDICATOR type — the wire
+   * speaks in indicators, because that is what a wall slot holds and what the
+   * DP's own counting expectation over `unseen` is written against.
+   *
+   * `riichiNextDraw` is NOT consumed (plan D7): it is per-opponent SEQUENTIAL
+   * information, which is what the constitution forbids the 計算 seat to read.
+   * A later ablation may add it as a channel of its own; it will not arrive
+   * through this hook by accident.
+   */
+  protected override hiddenInfoOf(_obs: Observation): EvHidden | null {
+    const r = this.reads;
+    if (!r) return null;
+    const h: EvHidden = {};
+    const own = r.ownNextDraw;
+    if (own !== null && own !== undefined) {
+      const row = new Float64Array(34);
+      row[own] = 1;
+      h.drawDist = [row];
+    }
+    const nd = r.nextDora;
+    if (nd !== null && nd !== undefined) {
+      const row = new Float64Array(34);
+      row[indicatorOfDora(nd)] = 1;
+      h.nextDora = row;
+    }
+    if (r.wallComposition) {
+      // Counts, not a normalised distribution: this REPLACES `publicUnseen`,
+      // and the DP depletes it copy by copy as the sequence is drawn.
+      //
+      // A WALL THIS SHORT IS NOT A POOL (2026-08-30 review; this crashed real
+      // play). 計算's composition is `unseen × wallRemaining/unseenTotal`, so at
+      // 河底 — the last discard of every hand that reaches it — the whole vector
+      // is zero, and with ONE tile left the float32 shares sum to 0.99999998.
+      // Handing either over as a REPLACEMENT posterior says the tiles come from
+      // nowhere or from less than one tile: `mjev.cc` refuses it (`Nroot < 1`)
+      // and `evEvalDiscard` turns the refusal into a throw in the middle of a
+      // match. So the channel is filled only when the composition holds at
+      // least one tile AS THE DP COUNTS IT — the same sum, in the same order,
+      // that `parseEval` takes — and below four live tiles nothing is lost by
+      // withholding it: `T` is `⌊wallRemaining/4⌋` = 0 there, so not one of
+      // these tiles is ever drawn and the uniform `unseen` prices the identical
+      // hand.
+      let mass = 0;
+      for (let ty = 0; ty < 34; ty++) mass += r.wallComposition[ty];
+      if (mass >= 1) {
+        const pool = new Float64Array(34);
+        for (let ty = 0; ty < 34; ty++) pool[ty] = r.wallComposition[ty];
+        h.pool = pool;
+      }
+    }
+    return h.drawDist || h.nextDora || h.pool ? h : null;
   }
 
   /** Threat volume priced by who is actually tenpai, and for how much. */

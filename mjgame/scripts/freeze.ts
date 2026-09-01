@@ -36,6 +36,7 @@
 import { mergeAugmented } from "../src/ai/augmented.ts";
 import { mergeComputed } from "../src/ai/computed.ts";
 import { mergeDealin } from "../src/ai/dealin.ts";
+import { mergeEv } from "../src/ai/evparams.ts";
 import { mergeFold } from "../src/ai/fold.ts";
 import { mergeHand } from "../src/ai/handvalue.ts";
 import { mergeHeuristic } from "../src/ai/heuristic.ts";
@@ -105,6 +106,9 @@ function main() {
     // identity here), so a snapshot can never carry a block the live seat
     // would reject.
     ...(src.dealin ? { dealin: mergeDealin(src.dealin) } : {}),
+    // M15 likewise — and `mergeEv` is pure data (no FFI), so freezing a vector
+    // that carries an `ev` block needs no dylib; only PLAYING one does.
+    ...(src.ev ? { ev: mergeEv(src.ev) } : {}),
   };
 
   // The self-check: the resolved dump and the original configuration must be
